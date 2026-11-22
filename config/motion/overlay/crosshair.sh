@@ -22,7 +22,7 @@ if ! command -v qs >/dev/null || ! command -v python3 >/dev/null || [[ ! -f $dir
   exit 1
 fi
 
-accent="$(sed -n 's/^ *accent = "\(#[0-9a-fA-F]\{6\}\)".*/\1/p' "$root/config/generated/appearance.lua" | head -n 1)"
+accent=$(sed -n 's/^ *accent = "\(#[0-9a-fA-F]\{6\}\)".*/\1/p' "$root/config/generated/appearance.lua" 2>/dev/null | head -n1 || true)
 
 export POINTERFX_DIR="$dir"
 export POINTERFX_ACCENT="${accent:-#ffcccd}"

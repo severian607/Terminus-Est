@@ -196,10 +196,24 @@ fi
 )SH";
 
   // The slow package check (checkupdates and yay -Qua take seconds), refreshed every 30 minutes and on open.
+  // `repo` and `aur` are printed only when the tool exists and ran: checkupdates exits 0 with updates, 2 with none
+  // and anything else on failure (offline, no database); the AUR helper exits 0 or 1 when it ran. A missing count
+  // reads as unknown, never as "up to date".
   // `last` is the last full system upgrade in pacman.log, 0 when it has none.
   constexpr const char* kUpkeepScript = R"SH(
-echo "repo=$(checkupdates 2>/dev/null | wc -l)"
-echo "aur=$(yay -Qua 2>/dev/null | grep -c .)"
+if command -v checkupdates >/dev/null 2>&1; then
+  out=$(checkupdates 2>/dev/null)
+  rc=$?
+  if [ "$rc" -eq 0 ]; then echo "repo=$(printf '%s\n' "$out" | grep -c .)"; elif [ "$rc" -eq 2 ]; then echo "repo=0"; fi
+fi
+for helper in yay paru; do
+  if command -v "$helper" >/dev/null 2>&1; then
+    out=$("$helper" -Qua 2>/dev/null)
+    rc=$?
+    if [ "$rc" -le 1 ]; then echo "aur=$(printf '%s\n' "$out" | grep -c .)"; fi
+    break
+  fi
+done
 cache=$(du -sb /var/cache/pacman/pkg 2>/dev/null)
 echo "cache=${cache%%[[:space:]]*}"
 echo "orphans=$(pacman -Qdtq 2>/dev/null | wc -l)"
@@ -1555,10 +1569,15 @@ void HomeTab::syncUpkeepHousekeeping() {
   std::string updates = slow.running ? "checking…" : "--";
   Tone updateTone = Tone::Dim;
   if (slow.loaded) {
-    const long long repo = std::max(0LL, numberValue(slow, "repo", 0));
-    const long long aur = std::max(0LL, numberValue(slow, "aur", 0));
+    const long long repoCount = numberValue(slow, "repo", -1);
+    const long long aurCount = numberValue(slow, "aur", -1);
+    const long long repo = std::max(0LL, repoCount);
+    const long long aur = std::max(0LL, aurCount);
     if (repo + aur == 0) {
-      updates = "up to date";
+      // Zero only means up to date when both checks ran.
+      if (repoCount == 0 && aurCount == 0) {
+        updates = "up to date";
+      }
     } else {
       updates = repo > 0 ? std::format("{} repo", repo) : std::string{};
       if (aur > 0) {

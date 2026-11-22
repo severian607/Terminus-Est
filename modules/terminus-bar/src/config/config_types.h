@@ -1878,8 +1878,8 @@ struct PluginsConfig {
   bool operator==(const PluginsConfig&) const = default;
 };
 
-// Default sources seeded when [plugins] declares no [[plugins.source]]: the
-// official + community plugin repos.
+// The official and community plugin repos. Nothing seeds them into the config any more: a config lists the
+// sources it wants, and these are only what plugin recommendations accept votes for.
 [[nodiscard]] std::vector<PluginSourceConfig> defaultPluginSources();
 [[nodiscard]] bool isDefaultPluginSourceName(std::string_view name);
 // Whether the background auto-update mode covers `source` (kind, enabled state, and

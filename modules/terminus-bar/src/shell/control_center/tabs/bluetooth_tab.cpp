@@ -791,9 +791,12 @@ void BluetoothTab::doUpdate(Renderer& renderer) {
 
 void BluetoothTab::setActive(bool active) {
   if (!active) {
-    // The tab object outlives the panel: a reopen starts without an open menu or a remembered selection.
-    m_qMenuFor.clear();
-    m_qSelected.clear();
+    // The tab object outlives the panel: a reopen starts without an open menu or a remembered selection, unless
+    // it only changes the height.
+    if (!quickPanelResizing()) {
+      m_qMenuFor.clear();
+      m_qSelected.clear();
+    }
     m_qArmed = nullptr;
     m_qArmTimer.stop();
     m_qListKey.clear();
@@ -808,6 +811,16 @@ void BluetoothTab::setActive(bool active) {
 
 void BluetoothTab::onClose() {
   deferDiscoveryStop();
+  if (m_quick && quickPanelResizing()) {
+    // The panel reopens at another height: take the half-typed code along and keep the selection in view.
+    if (m_pairingInput != nullptr) {
+      m_qResumeTyped = m_pairingInput->value();
+      m_qResumeInput = true;
+    }
+    m_qScrollToSelected = true;
+  } else {
+    forgetQuick();
+  }
   resetQuick();
   m_rootLayout = nullptr;
   m_pairingCard = nullptr;
@@ -1497,9 +1510,8 @@ std::string BluetoothTab::quickPanelStatus() const {
   return s.discovering ? "scanning" : "";
 }
 
+// Drops everything that points into the panel's widgets, so the next create() builds from scratch.
 void BluetoothTab::resetQuick() {
-  m_qMenuFor.clear();
-  m_qSelected.clear();
   m_qArmTimer.stop();
   m_qFailTimer.stop();
   m_qArmed = nullptr;
@@ -1522,12 +1534,20 @@ void BluetoothTab::resetQuick() {
   m_qRows.clear();
   m_qOrder.clear();
   m_qConnectedKey.clear();
-  m_qScrollToSelected = false;
   m_qFocusInput = false;
-  m_qHadInput = false;
   m_qPlanKey.clear();
   m_qListKey.clear();
   m_qHeightKey.clear();
+}
+
+// What the user was in the middle of; kept across a resize reopen, dropped when the panel really closes.
+void BluetoothTab::forgetQuick() {
+  m_qMenuFor.clear();
+  m_qSelected.clear();
+  m_qScrollToSelected = false;
+  m_qHadInput = false;
+  m_qResumeTyped.clear();
+  m_qResumeInput = false;
 }
 
 std::unique_ptr<Flex> BluetoothTab::makeQuickLine(float scale, Label** gutterOut, Flex** nodeOut) {
@@ -2121,8 +2141,10 @@ void BluetoothTab::rebuildQuickLists(Renderer& renderer) {
   quickClearArmed();
   m_qArmTimer.stop();
   // A half-typed code survives the rebuild.
-  const bool hadInput = m_pairingInput != nullptr;
-  const std::string typed = hadInput ? m_pairingInput->value() : std::string{};
+  const bool hadInput = m_pairingInput != nullptr || m_qResumeInput;
+  const std::string typed = m_pairingInput != nullptr ? m_pairingInput->value() : std::move(m_qResumeTyped);
+  m_qResumeTyped.clear();
+  m_qResumeInput = false;
   m_pairingInput = nullptr;
   m_qPairGutter = nullptr;
   m_qPairNode = nullptr;

@@ -1,13 +1,13 @@
 ---
 title: Installation
-description: Start here to set up and use Noctalia.
+description: Start here to set up and use TerminusBar.
 sidebar:
   order: 1
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Noctalia is available on the following distributions. Choose your platform below, or use the manual installation method on another Linux distribution.
+TerminusBar is available on the following distributions. Choose your platform below, or use the manual installation method on another Linux distribution.
 
 - [Arch Linux](#arch)
 - [NixOS](/noctalia/getting-started/nixos/)
@@ -21,15 +21,15 @@ Noctalia is available on the following distributions. Choose your platform below
 You can also [install manually](#manual-install) on any other Linux distribution.
 
 :::note[Package ownership]
-The Noctalia team maintains the **manual installation method**. Official distribution packages are maintained through their distributions' own packaging processes; other repositories listed here are community-maintained. Review a third-party repository before installing from it.
+The TerminusBar team maintains the **manual installation method**. Official distribution packages are maintained through their distributions' own packaging processes; other repositories listed here are community-maintained. Review a third-party repository before installing from it.
 :::
 
 <details>
-  <summary>Already using Noctalia Shell v4?</summary>
+  <summary>Already using TerminusBar Shell v4?</summary>
 
-  Noctalia v5 is a fresh install, not an automatic upgrade from the Quickshell-based v4 implementation. Its package and configuration files are separate, so both versions can be installed at the same time on most distributions, but v4 settings are not migrated.
+  TerminusBar v5 is a fresh install, not an automatic upgrade from the Quickshell-based v4 implementation. Its package and configuration files are separate, so both versions can be installed at the same time on most distributions, but v4 settings are not migrated.
 
-  Only your **compositor keybinds** need attention. Update any bindings that launch the Noctalia launcher, panels, settings UI, or other commands when switching between versions.
+  Only your **compositor keybinds** need attention. Update any bindings that launch the TerminusBar launcher, panels, settings UI, or other commands when switching between versions.
 </details>
 
 ## Arch Linux {#arch}
@@ -204,37 +204,12 @@ sudo apt update
 sudo apt install noctalia
 ```
 
-You can also install the `noctalia-greeter`, `umbriel`, and `xdg-desktop-portal-umbriel` packages.
+You can also install the `umbriel` and `xdg-desktop-portal-umbriel` packages.
 
 :::note
 The APT repository provides `amd64` and `arm64` packages only.
 :::
 
-
-***Configuring `noctalia-greeter`***
-<ol>
-<li>
-If already using `greetd`, no configuration is required. Just restart greetd with:
-
-```bash
-sudo systemctl restart greetd
-```
-</li>
-<li>
-If not currently using `greetd`
-
-First stop and disable your current display manager. Eg:
-
-```bash
-sudo systemctl disable --now gdm3
-```
-Then enable and start `greetd`. Eg:
-
-```bash
-sudo systemctl enable --now greetd
-```
-</li>
-</ol>
 ---
 
 ## Chimera Linux {#chimera}
@@ -264,7 +239,7 @@ apk add noctalia
 Manual installation has **no easy upgrade path**. You will need to manually download and replace files for each update. We strongly recommend using a package manager ([Arch](#arch), [Fedora](#fedora)) whenever possible.
 :::
 
-If you prefer to install Noctalia locally or want more control over the installation process, you can install it manually to your user configuration directory. This method works on any Linux distribution.
+If you prefer to install TerminusBar locally or want more control over the installation process, you can install it manually to your user configuration directory. This method works on any Linux distribution.
 
 **Step 1**: Sync and install dependencies
 
@@ -342,7 +317,7 @@ git clone https://github.com/noctalia-dev/noctalia --branch main
 cd noctalia
 ```
 
-**Step 3**: Building and installing Noctalia
+**Step 3**: Building and installing TerminusBar
 
 Requires [just](https://github.com/casey/just) and [meson](https://mesonbuild.com/).
 
@@ -382,24 +357,24 @@ Requires [just](https://github.com/casey/just) and [meson](https://mesonbuild.co
 Meson installs the binary and shipped assets using the normal prefix layout:
 
 ```text
-/usr/local/bin/noctalia
-/usr/local/share/noctalia/assets/...
+/usr/local/bin/terminusbar
+/usr/local/share/terminusbar/assets/...
 ```
 
-Noctalia needs the shipped `assets/` tree at runtime. Copying only the `noctalia` binary is not enough.
+TerminusBar needs the shipped `assets/` tree at runtime. Copying only the `terminusbar` binary is not enough.
 
 Portable bundle layouts are also supported:
 
 ```text
 bundle/
-  noctalia
+  terminusbar
   assets/
 ```
 
 ```text
 bundle/
-  bin/noctalia
-  share/noctalia/assets/
+  bin/terminusbar
+  share/terminusbar/assets/
 ```
 
 See [PACKAGING.md](https://github.com/noctalia-dev/noctalia/blob/main/PACKAGING.md#runtime-asset-lookup) for the full runtime asset lookup order.

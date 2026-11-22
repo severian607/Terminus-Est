@@ -15,7 +15,7 @@ These ship from the default **official** source
 enabled like any other plugin - see [Using Plugins](/noctalia/plugins/). Once enabled, an entry can be driven over IPC:
 
 ```sh
-noctalia msg plugin <author/plugin:entry> <target> <event> [payload]
+terminusbar msg plugin <author/plugin:entry> <target> <event> [payload]
 ```
 
 `<target>` selects which live instances receive the event:
@@ -168,7 +168,7 @@ cache, and per-output state; threshold, feather, and automatic generation are pl
 Animated and video wallpapers via [mpvpaper](https://github.com/GhostNaN/mpvpaper). A headless **service**
 supervises one `mpvpaper` instance per output; a **panel** (`picker`) browses your video directory as a thumbnail
 grid and applies a video per output (or to all); a bar **widget** (`mpvpaper`) toggles the panel. When a video is
-assigned to an output, Noctalia drops its own wallpaper surface there so the video shows through - the bar and dock
+assigned to an output, TerminusBar drops its own wallpaper surface there so the video shows through - the bar and dock
 still draw above it. Assignments persist across restarts.
 
 Requires the external `mpvpaper` command (which pulls in `mpv`; `mpv` also renders the picker thumbnails). Works on

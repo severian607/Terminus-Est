@@ -28,7 +28,9 @@ enable() {
   fi
 
   if terminus-hyprland-toggle-disabled "$TOGGLE"; then
-    echo "monitor=$EXTERNAL, preferred, auto, 1, mirror, $INTERNAL" > "$TOGGLE_FLAG"
+    # toggles.lua reads this flag as data: external output, then the internal output it mirrors.
+    mkdir -p "$(dirname "$TOGGLE_FLAG")"
+    printf '%s\n%s\n' "$EXTERNAL" "$INTERNAL" >"$TOGGLE_FLAG"
     notify-send -u low "󰍹    Mirroring enabled ($EXTERNAL)"
     hyprctl reload
   fi

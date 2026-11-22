@@ -28,7 +28,11 @@ def run(binary):
         state_root = root / "state/terminusbar"
         config_dir = root / "config/terminus-est/terminus-bar"
         config_dir.mkdir(parents=True)
-        (config_dir / "config.toml").write_text("[shell]\ntelemetry_enabled = false\nsetup_wizard_enabled = false\n")
+        sources = "".join(
+            f'[[plugins.source]]\nkind = "git"\nname = "{name}"\nlocation = "https://github.com/noctalia-dev/{name}-plugins"\n\n'
+            for name in ["official", "community"]
+        )
+        (config_dir / "config.toml").write_text("[shell]\ntelemetry_enabled = false\nsetup_wizard_enabled = false\n\n" + sources)
         for source in ["official", "community"]:
             repo = state_root / "plugins/sources" / source / "repo"
             repo.mkdir(parents=True)

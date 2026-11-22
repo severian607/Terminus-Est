@@ -228,6 +228,7 @@ def log_reboot(db):
 
 
 def oom_events(db, since):
+    """Store kernel OOM events since SINCE. False when the journal could not be read."""
     try:
         out = subprocess.run(
             [
@@ -245,7 +246,7 @@ def oom_events(db, since):
             timeout=JOURNAL_TIMEOUT_SECONDS,
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        return  # no journal this round; the next scan starts from the same time
+        return False  # no journal this round; the next scan starts from the same time
     for line in out.splitlines():
         ts, _, rest = line.partition(" ")
         try:
@@ -253,6 +254,7 @@ def oom_events(db, since):
         except ValueError:
             continue  # not a timestamped journal line (e.g. the "-- No entries --" marker)
         db.execute("INSERT INTO events VALUES(?,?,?)", (when, "oom", rest[:EVENT_DETAIL_CHARS]))
+    return True
 
 
 @dataclass
@@ -313,8 +315,8 @@ class Logger:
         )
         self.write_top_apps(ts, now)
         self.write_hot_events(ts, now)
-        if int(now) // OOM_SCAN_SECONDS != int(self.last_oom_scan) // OOM_SCAN_SECONDS:
-            oom_events(self.db, self.last_oom_scan)
+        due = int(now) // OOM_SCAN_SECONDS != int(self.last_oom_scan) // OOM_SCAN_SECONDS
+        if due and oom_events(self.db, self.last_oom_scan):  # a failed scan is retried from the same time
             self.last_oom_scan = now
         if ts % HOUR < MINUTE:  # once an hour
             cutoff = ts - RETENTION_DAYS * DAY

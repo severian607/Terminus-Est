@@ -159,8 +159,10 @@ void QuickPanel::onFrameTick(float deltaMs) { m_tab->onFrameTick(deltaMs); }
 void QuickPanel::onOpen(std::string_view /*context*/) { m_tab->setActive(true); }
 
 void QuickPanel::onClose() {
+  m_tab->setQuickPanelResizing(PanelManager::instance().reopeningActivePanel());
   m_tab->setActive(false);
   m_tab->onClose();
+  m_tab->setQuickPanelResizing(false);
   m_frame = nullptr;
   m_body = nullptr;
   m_tabContainer = nullptr;

@@ -149,7 +149,6 @@ private:
   void saveCache() const;
   [[nodiscard]] bool coordinatesValid() const noexcept;
 
-  [[nodiscard]] static std::filesystem::path transportCacheDir();
   [[nodiscard]] static std::filesystem::path stateCacheFilePath();
   [[nodiscard]] static std::string formatCoordinate(double value);
 

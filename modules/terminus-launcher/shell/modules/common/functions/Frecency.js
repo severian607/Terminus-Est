@@ -15,6 +15,7 @@ var HALF_LIFE_MS = 7 * 24 * 3600 * 1000;
 var MAX_LAUNCHES = 40;
 var MAX_QUERIES = 400;
 var MAX_CALCS = 20;
+var FORGET_HALF_LIVES = 8; // an item unused this long scores under 0.4% of a launch and is dropped
 
 function empty() {
     return { version: 1, launches: {}, picks: {}, calcs: [] };
@@ -86,6 +87,13 @@ function record(state, id, query, now) {
     if (log.length > MAX_LAUNCHES)
         log.splice(0, log.length - MAX_LAUNCHES);
     state.launches[id] = log;
+    // Ids never repeat for some items (files), so the log would otherwise only grow.
+    var cutoff = now - FORGET_HALF_LIVES * HALF_LIFE_MS;
+    for (var k in state.launches) {
+        var l = state.launches[k];
+        if (l.length === 0 || l[l.length - 1] < cutoff)
+            delete state.launches[k];
+    }
 
     var q = normQuery(query);
     if (q !== "") {

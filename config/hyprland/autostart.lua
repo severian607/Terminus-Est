@@ -27,9 +27,12 @@ local function host_autostarts_omp()
 end
 
 hl.on("hyprland.start", function()
-  hl.exec_cmd(o.launch("fcitx5 --disable notificationitem"))
-  hl.exec_cmd("terminus compat first-run")
-  hl.exec_cmd("terminus compat powerprofiles-init")
+  if o.command_exists("fcitx5") then
+    hl.exec_cmd(o.launch("fcitx5 --disable notificationitem"))
+  end
+  if o.command_exists("powerprofilesctl") then
+    hl.exec_cmd("terminus compat powerprofiles-init")
+  end
   hl.exec_cmd(o.launch("terminus compat hyprland-monitor-watch"))
   hl.exec_cmd("systemctl --user import-environment $(env | cut -d'=' -f 1)")
   hl.exec_cmd("dbus-update-activation-environment --systemd --all")

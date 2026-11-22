@@ -2,7 +2,7 @@
 
 # terminus:summary=Set the Plymouth boot theme colors and logo
 # terminus:args=<background-hex> <text-hex> <path-to-logo.png>
-# terminus:examples=terminus-est plymouth set '#1d2021' '#ebdbb2' ~/.config/terminus-est/current/theme/plymouth/logo.png
+# terminus:examples=terminus plymouth set '#1d2021' '#ebdbb2' ~/.config/terminus-est/current/theme/plymouth/logo.png
 # terminus:requires-sudo=true
 
 # Configure the Plymouth boot theme with a custom background color, text color, and logo.

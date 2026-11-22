@@ -172,6 +172,7 @@ namespace netq {
   // ---- tailscale -----------------------------------------------------------------------------------------
 
   struct TsPeer {
+    std::string id; // the status map key: unique, unlike the host name
     std::string name;
     std::string ip;
     bool online = false;
@@ -287,6 +288,7 @@ namespace netq {
           continue;
         }
         TsPeer entry;
+        entry.id = key;
         entry.name = peerName(peer);
         if (entry.name.empty()) {
           entry.name = key.substr(0, 8);

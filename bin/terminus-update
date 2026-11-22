@@ -8,7 +8,13 @@ set -uo pipefail
 hook=0
 [[ ${1:-} == --hook ]] && hook=1
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
+failed=0
 say() { echo "terminus-update: $*"; }
+# A step failed: say so and remember it for the exit status (--hook still exits 0).
+fail() {
+  say "$*"
+  failed=1
+}
 stop() {
   say "$*"
   exit $((1 - hook))
@@ -33,7 +39,7 @@ build_bar() {
   if ninja -C "$bar/build-release" -j"$jobs" terminusbar >/dev/null; then
     systemctl --user try-restart terminus-bar.service
   else
-    say "bar build failed; the previous binary stays in use"
+    fail "bar build failed; the previous binary stays in use"
   fi
 }
 # rebuild_plugin DIR LABEL: rebuild a Hyprland plugin and report the outcome.
@@ -41,19 +47,98 @@ rebuild_plugin() {
   if make -B -C "$1" >/dev/null 2>&1; then
     say "rebuilt the $2 plugin"
   else
-    say "$2 plugin did not build"
+    fail "$2 plugin did not build"
   fi
 }
 
 if [[ ${1:-} == --build-bar ]]; then
   build_bar
-  exit 0
+  exit "$failed"
 fi
 export PATH="$root/bin:$HOME/.local/bin:$PATH"
 
+# merge_local_wins DIR: three-way merge of DIR/{local,base,upstream} to stdout. Where both sides changed the same
+# lines the local side wins (a key upstream added right beside such a line is dropped with it; settings fall back
+# to their defaults). A non-zero status means the file cannot be merged line by line (binary).
+merge_local_wins() {
+  git merge-file -p --ours "$1/local" "$1/base" "$1/upstream"
+}
+
+# Re-apply the stash taken before the pull. Where local and upstream changed the same lines the local side wins;
+# every other change from both sides is kept. A file that cannot be merged line by line (binary, deleted on one
+# side) is left as upstream's version and the local copy is saved. No conflict marker or unmerged entry survives,
+# and the stash is dropped only when every file is settled.
+reapply_local() {
+  local -a unmerged resolved=() staged
+  local path stages tmp saved
+  if git stash apply --quiet >/dev/null 2>&1; then
+    git stash drop --quiet
+    return 0
+  fi
+  mapfile -t unmerged < <(git diff --name-only --diff-filter=U)
+  if ((${#unmerged[@]} == 0)); then
+    fail "could not re-apply your local changes; they stay in 'git stash'"
+    return 1
+  fi
+  tmp=$(mktemp -d)
+  saved=$HOME/.local/state/terminus-est/update-local/$(date +%Y%m%d-%H%M%S)
+  for path in "${unmerged[@]}"; do
+    # Stage 1 is the common base, 2 upstream, 3 the local change.
+    stages=$(git ls-files -u -- "$path" | awk '{print $3}' | sort -u | tr -d '\n')
+    if [[ $stages == 123 ]] &&
+      git show ":1:$path" >"$tmp/base" && git show ":2:$path" >"$tmp/upstream" && git show ":3:$path" >"$tmp/local" &&
+      merge_local_wins "$tmp" >"$tmp/merged"; then
+      cat "$tmp/merged" >"$path"
+      resolved+=("$path")
+      say "$path: upstream and your changes merged; yours won where they overlapped"
+    else
+      if [[ $stages == *3* ]]; then
+        mkdir -p "$saved/$(dirname "$path")"
+        git show ":3:$path" >"$saved/$path"
+      fi
+      if [[ $stages == *2* ]]; then
+        git checkout HEAD -- "$path"
+      else
+        git rm -q -f --cached -- "$path"
+        rm -f -- "$path"
+      fi
+      fail "$path: could not be merged; upstream's version is in place, your copy is in $saved/$path"
+    fi
+  done
+  rm -rf "$tmp"
+  # The failed apply also staged the files it merged cleanly; leave every tracked file merely modified, as a plain apply would.
+  mapfile -t staged < <(git diff --cached --name-only --diff-filter=M)
+  resolved+=("${staged[@]}")
+  ((${#resolved[@]})) && git reset -q -- "${resolved[@]}"
+  if [[ -z $(git ls-files -u) ]]; then
+    git stash drop --quiet
+  else
+    fail "some files are still unmerged; your changes stay in 'git stash'"
+  fi
+}
+
+# Fast-forward without --autostash, which can leave conflict markers in tracked files: set local changes aside,
+# pull, put them back.
+update_checkout() {
+  local stashed=0 stash_before
+  if [[ -n $(git status --porcelain --untracked-files=no) ]]; then
+    stash_before=$(git rev-parse -q --verify refs/stash || true)
+    git stash push --quiet -m "terminus-update autostash" >/dev/null 2>&1
+    [[ $(git rev-parse -q --verify refs/stash || true) != "$stash_before" ]] || stop "could not set local changes aside; nothing changed"
+    stashed=1
+  fi
+  git pull --ff-only --quiet 2>&1 | sed 's/^/terminus-update: /'
+  if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+    # The pull changed nothing, so the stash applies back cleanly.
+    ((stashed)) && { git stash pop --quiet >/dev/null 2>&1 || say "could not restore your local changes; they stay in 'git stash'"; }
+    stop "pull failed (no network, no sign-in, or local commits); nothing changed"
+  fi
+  ((stashed)) && reapply_local
+  return 0
+}
+
 before=$(git rev-parse HEAD)
-git pull --ff-only --autostash --quiet 2>&1 | sed 's/^/terminus-update: /'
-[[ ${PIPESTATUS[0]} -eq 0 ]] || stop "pull failed (no network, no sign-in, or local commits); nothing changed"
+update_checkout
 after=$(git rev-parse HEAD)
 changed=$(git diff --name-only "$before" "$after")
 changed_in() { grep -q -E "$1" <<<"$changed"; }
@@ -114,10 +199,20 @@ fi
 
 # Launcher and picker services read their code at start.
 changed_in '^modules/terminus-launcher/|^lib/skin_launcher.py' && systemctl --user try-restart terminus-launcher.service
-changed_in '^lib/shader_panel.py' && systemctl --user try-restart terminus-shaders.service terminus-audio.service terminus-motion.service
-changed_in '^lib/symbol_panel.py' && systemctl --user try-restart terminus-symbols.service
+# The pickers run lib/shader_panel.py (keysounds included) and import picker_style, which imports settings and tokens.
+changed_in '^lib/(shader_panel|picker_style|settings|tokens)\.py' &&
+  systemctl --user try-restart terminus-shaders.service terminus-audio.service terminus-motion.service terminus-keysounds.service
+changed_in '^lib/(symbol_panel|picker_style|settings|tokens)\.py' && systemctl --user try-restart terminus-symbols.service
+changed_in '^modules/terminus-bar-plugins/vitals/bin/vitals-log' && systemctl --user try-restart terminus-vitals-log.service
 
-terminus-settings apply >/dev/null 2>&1 || say "terminus-settings apply failed; run it by hand"
+# The login screen helper runs as root from /usr/local/libexec; a stale copy only changes with sudo.
+login_apply=/usr/local/libexec/terminus-login-apply
+if [[ -f $login_apply ]] && ! cmp -s "$login_apply" "$root/tools/terminus-login-apply"; then
+  say "the root copy of terminus-login-apply is out of date; run:"
+  say "  sudo install -o root -g root -m 0755 $root/tools/terminus-login-apply $login_apply"
+fi
+
+terminus-settings apply >/dev/null 2>&1 || fail "terminus-settings apply failed; run it by hand"
 if changed_in '^config/(hyprland|hosts)/'; then
   if hyprctl reload >/dev/null 2>&1; then
     say "reloaded Hyprland"
@@ -125,4 +220,4 @@ if changed_in '^config/(hyprland|hosts)/'; then
     say "Hyprland is not running; the change applies at next start"
   fi
 fi
-exit 0
+exit $((failed && ! hook))

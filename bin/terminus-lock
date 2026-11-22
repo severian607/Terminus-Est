@@ -17,11 +17,23 @@ from pathlib import Path
 PROJECT = Path(__file__).resolve().parents[1]
 OVERLAY = PROJECT / "bin/terminus-screensaver"
 UNIT = "terminus-lock.service"
-HYPRLOCK = Path.home() / "Projects/Hyprlock-Amaterasu/build/hyprlock"
+# The secure lock needs a hyprlock that acknowledges the session lock on --ready-fd; stock hyprlock cannot.
+PATCHED_HYPRLOCK = Path.home() / "Projects/Hyprlock-Amaterasu/build/hyprlock"
 HYPRLOCK_CONFIG = PROJECT / "config/hyprlock/hyprlock.conf"
 READY_TIMEOUT_SECONDS = 20  # locker must acknowledge the compositor's session lock within this
 OVERLAY_STOP_TIMEOUT_SECONDS = 10
 LOCKER_TERMINATE_GRACE_SECONDS = 3
+
+
+def hyprlock():
+    """The patched hyprlock: $TERMINUS_HYPRLOCK, else the private build path. Never stock hyprlock."""
+    path = Path(os.environ.get("TERMINUS_HYPRLOCK") or PATCHED_HYPRLOCK)
+    if not (path.is_file() and os.access(path, os.X_OK)):
+        raise RuntimeError(
+            "the secure lock needs the patched hyprlock (one with --ready-fd; stock hyprlock cannot "
+            f"acknowledge the lock). Set TERMINUS_HYPRLOCK to its path; looked for {path}"
+        )
+    return path
 
 
 def run(*args, **kwargs):
@@ -95,6 +107,7 @@ def lock():
         stock_pam()
         if active() and not acknowledged(identity):
             raise RuntimeError("An acknowledged lock belongs to a different graphical session")
+        hyprlock()  # fail before starting the unit
         # Never let a lingering user manager supply yesterday's display socket.
         run(
             "systemctl",
@@ -104,6 +117,7 @@ def lock():
             "HYPRLAND_INSTANCE_SIGNATURE",
             "XDG_RUNTIME_DIR",
             "PATH",
+            *(["TERMINUS_HYPRLOCK"] if os.environ.get("TERMINUS_HYPRLOCK") else []),
         )
         run("systemctl", "--user", "start", UNIT)
         if session() != identity or not acknowledged(identity):
@@ -116,6 +130,7 @@ def supervise():
     if not os.environ.get("NOTIFY_SOCKET") or not os.environ.get("INVOCATION_ID"):
         raise RuntimeError("Lock supervision requires its Type=notify user unit")
     identity = session()
+    locker = hyprlock()
     stock_pam()
     root = state_dir()
     marker = root / "ready.json"
@@ -128,7 +143,7 @@ def supervise():
     child = None
     try:
         child = subprocess.Popen(
-            [str(HYPRLOCK), "--config", str(HYPRLOCK_CONFIG), "--ready-fd", str(write_fd)],
+            [str(locker), "--config", str(HYPRLOCK_CONFIG), "--ready-fd", str(write_fd)],
             pass_fds=(write_fd,),
             env=child_env,
         )

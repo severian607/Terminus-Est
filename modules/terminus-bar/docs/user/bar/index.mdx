@@ -1,6 +1,6 @@
 ---
 title: Bar
-description: Add and customize Noctalia bars, choose their widgets, and adjust them per monitor.
+description: Add and customize TerminusBar bars, choose their widgets, and adjust them per monitor.
 sidebar:
   order: 2
 ---
@@ -87,7 +87,7 @@ configured corner radius, half the bar `thickness`, and the available `margin_en
 
 Multiple `[bar.*]` entries are supported - each is independently configured and rendered on all monitors.
 
-`[bar].order` controls the order Noctalia creates bar layer-shell surfaces. This matters only for bars with
+`[bar].order` controls the order TerminusBar creates bar layer-shell surfaces. This matters only for bars with
 `reserve_space = true`, and the compositor still owns the final exclusive-zone arrangement. Names omitted from `order`
 are appended after the listed names.
 
@@ -193,8 +193,8 @@ The IPC `bar-layer-set <top|overlay> [bar-name] [monitor-selector]` switches the
 
 ```kdl
 binds {
-    Mod+B { spawn-sh "noctalia msg bar-layer-set overlay"; }
-    Mod+Shift+B { spawn-sh "noctalia msg bar-layer-set top"; }
+    Mod+B { spawn-sh "terminusbar msg bar-layer-set overlay"; }
+    Mod+Shift+B { spawn-sh "terminusbar msg bar-layer-set top"; }
 }
 ```
 

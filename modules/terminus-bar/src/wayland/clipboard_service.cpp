@@ -12,6 +12,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
@@ -450,7 +451,13 @@ namespace {
 } // namespace
 
 ClipboardService::ClipboardService(security::StorageKeyProvider& storageKeyProvider)
-    : m_maxHistoryBytes(kDefaultMaxHistoryBytes), m_storageKeyProvider(storageKeyProvider) {}
+    : m_maxHistoryBytes(kDefaultMaxHistoryBytes), m_storageKeyProvider(storageKeyProvider) {
+  // Exports used to live in the state directory and were never deleted: remove the plaintext leftovers once.
+  if (exportsDirectory() != legacyExportsDirectory()) {
+    std::error_code ec;
+    std::filesystem::remove_all(legacyExportsDirectory(), ec);
+  }
+}
 
 void ClipboardService::setMaxHistoryBytesForTesting(std::size_t maxBytes) {
   m_maxHistoryBytes = maxBytes;
@@ -670,6 +677,7 @@ bool ClipboardService::clearEncryptedPersistenceForRecovery() {
 
   m_history.clear();
   m_historyBytes = 0;
+  pruneExports();
   ++m_changeSerial;
   notifyChanged();
   setPersistenceState(ClipboardPersistenceState::Opening, m_persistenceMigrationPending);
@@ -783,8 +791,7 @@ std::optional<std::string> ClipboardService::exportEntryForExternalTool(std::siz
       entry.storageId = generateStorageId();
     }
 
-    const fs::path exportDir = fs::path(stateDirectory()) / "exports";
-    ensurePrivateDirectory(stateDirectory());
+    const fs::path exportDir = exportsDirectory();
     ensurePrivateDirectory(exportDir);
     const fs::path exportPath = exportDir / (entry.storageId + exportExtensionForEntry(entry));
 
@@ -971,6 +978,7 @@ bool ClipboardService::removeHistoryEntry(std::size_t index) {
   } else {
     m_historyBytes = 0;
   }
+  pruneExports();
   ++m_changeSerial;
   persistHistory();
   notifyChanged();
@@ -993,6 +1001,7 @@ void ClipboardService::clearUnpinnedHistory() {
   } else {
     m_historyBytes = 0;
   }
+  pruneExports();
   ++m_changeSerial;
   persistHistory();
   notifyChanged();
@@ -1004,6 +1013,7 @@ void ClipboardService::clearHistory() {
   }
   m_history.clear();
   m_historyBytes = 0;
+  pruneExports();
   ++m_changeSerial;
   persistHistory();
   notifyChanged();
@@ -1460,6 +1470,7 @@ void ClipboardService::addToHistory(ClipboardEntry entry) {
     m_history.clear();
     m_historyBytes = entry.byteSize;
     m_history.push_back(std::move(entry));
+    pruneExports();
     ++m_changeSerial;
     notifyChanged();
     return;
@@ -1856,7 +1867,9 @@ void ClipboardService::trimHistoryToBudget() {
     }
   }
 
-  const auto eraseAt = [this, &unpinnedCount, &unpinnedBytes](std::size_t index) {
+  bool erased = false;
+  const auto eraseAt = [this, &erased, &unpinnedCount, &unpinnedBytes](std::size_t index) {
+    erased = true;
     const std::size_t removedBytes = m_history[index].byteSize;
     unpinnedBytes -= removedBytes;
     --unpinnedCount;
@@ -1893,6 +1906,9 @@ void ClipboardService::trimHistoryToBudget() {
     }
 
     break;
+  }
+  if (erased) {
+    pruneExports();
   }
 }
 
@@ -1978,6 +1994,38 @@ std::string ClipboardService::stateDirectory() {
     return dir + "/clipboard";
   }
   return "/tmp/terminusbar-clipboard";
+}
+
+std::string ClipboardService::legacyExportsDirectory() { return stateDirectory() + "/exports"; }
+
+std::string ClipboardService::exportsDirectory() {
+  const char* runtime = std::getenv("XDG_RUNTIME_DIR");
+  if (runtime != nullptr && runtime[0] == '/') {
+    return std::string(runtime) + "/terminusbar-clipboard-exports";
+  }
+  return legacyExportsDirectory();
+}
+
+void ClipboardService::pruneExports() {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  fs::directory_iterator it(exportsDirectory(), ec);
+  if (ec) {
+    return;
+  }
+  std::unordered_set<std::string> active;
+  for (const ClipboardEntry& entry : m_history) {
+    active.insert(entry.storageId);
+  }
+  for (; it != fs::directory_iterator(); it.increment(ec)) {
+    if (ec) {
+      break;
+    }
+    if (!active.contains(it->path().stem().string())) {
+      std::error_code removeEc;
+      fs::remove(it->path(), removeEc);
+    }
+  }
 }
 
 std::string ClipboardService::manifestPath() { return stateDirectory() + "/index.enc"; }

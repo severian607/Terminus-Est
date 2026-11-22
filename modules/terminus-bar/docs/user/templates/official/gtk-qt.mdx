@@ -11,7 +11,7 @@ This guide covers theming applications built with GTK, Qt, and KDE Plasma toolki
 
 ## GTK 3/4 Applications
 
-GTK applications include most GNOME apps and many Linux applications. Noctalia can automatically theme them using the `adw-gtk3` theme.
+GTK applications include most GNOME apps and many Linux applications. TerminusBar can automatically theme them using the `adw-gtk3` theme.
 
 ### Setup
 
@@ -27,7 +27,7 @@ GTK applications include most GNOME apps and many Linux applications. Noctalia c
 2. **Apply the GTK theme:**
    - **Using nwg-look (recommended):**
       :::tip[GTK4 Theming]
-      In nwg-look, make sure to **uncheck the GTK4 option**. Leaving GTK4 checked can prevent GTK4 applications from using Noctalia's color scheme.
+      In nwg-look, make sure to **uncheck the GTK4 option**. Leaving GTK4 checked can prevent GTK4 applications from using TerminusBar's color scheme.
 
       If you previously applied a custom GTK4 theme, you may need to hit **"Clear"** (found in the **Preference** tab) in nwg-look before reapplying and regenerating the color scheme. This ensures the new colors are accepted by GTK4 apps.
       :::
@@ -41,20 +41,20 @@ GTK applications include most GNOME apps and many Linux applications. Noctalia c
      gsettings set org.gnome.desktop.interface gtk-theme 'adw-gtk3'
      ```
 
-3. **Enable GTK theming in Noctalia:**
+3. **Enable GTK theming in TerminusBar:**
   - Open **Settings → Templates**
   - Toggle on **GTK 3** and/or **GTK 4**
 
-Enabling those built-in templates writes `noctalia.css` and runs the shipped
+Enabling those built-in templates writes `terminusbar.css` and runs the shipped
 [`apply.sh`](https://github.com/noctalia-dev/noctalia/blob/main/assets/templates/gtk/apply.sh)
 `post_hook` (`bash '…/gtk/apply.sh' dark|light`). That script imports
-`noctalia.css` into `gtk.css` and selects `adw-gtk3` / `adw-gtk3-dark`. A theme
+`terminusbar.css` into `gtk.css` and selects `adw-gtk3` / `adw-gtk3-dark`. A theme
 mode change re-applies the templates, so the same full hook runs again; you do
 not need a separate hook for that path.
 
 The GNOME `org.gnome.desktop.interface.color-scheme` preference, which browsers
 and other apps read through the desktop portal, is not part of the GTK
-templates. Noctalia syncs it on its own, with or without these templates; see
+templates. TerminusBar syncs it on its own, with or without these templates; see
 [`sync_color_scheme`](/noctalia/theming/#sync_color_scheme) to turn that off.
 
 ### Troubleshooting
@@ -124,14 +124,14 @@ Qt applications include KDE apps and many cross-platform applications. KDE apps 
    export QT_QPA_PLATFORMTHEME=qt6ct
    ```
 
-3. **Enable the KColorScheme (or QT theme) in Noctalia:**
+3. **Enable the KColorScheme (or QT theme) in TerminusBar:**
   - Open **Settings → Templates**
   - Toggle on **KColorScheme** (or **Qt**)
 
 4. **Configure qt6ct:**
   - Run `qt6ct` from terminal
   - In the **Appearance** tab, there will be a dropdown for **"Color scheme:"**
-  - In the dropdown select `noctalia (KColorScheme)` if using a KColorScheme for KDE app compatibility, or `noctalia` for a normal QT theme without the need for KDE app compatibility.
+  - In the dropdown select `terminusbar (KColorScheme)` if using a KColorScheme for KDE app compatibility, or `terminusbar` for a normal QT theme without the need for KDE app compatibility.
   - Click **Apply** and **OK**
    
    :::tip[KDE File Picker]
@@ -149,20 +149,20 @@ Qt applications include KDE apps and many cross-platform applications. KDE apps 
 
 ## KDE Plasma (KColorScheme)
 
-If you're using KDE Plasma, Noctalia can apply colors through the native KColorScheme system.
+If you're using KDE Plasma, TerminusBar can apply colors through the native KColorScheme system.
 
 ### Setup
 
-1. **Enable KColorScheme in Noctalia:**
+1. **Enable KColorScheme in TerminusBar:**
   - Open **Settings → Templates**
   - Toggle on **KColorScheme**
 
 2. **Apply in KDE System Settings:**
   - Open **System Settings → Appearance → Colors**
-  - Select the `noctalia` color scheme
-  - The scheme will update automatically when you change colors in Noctalia
+  - Select the `terminusbar` color scheme
+  - The scheme will update automatically when you change colors in TerminusBar
 
 ### Troubleshooting
 
 - **Scheme not appearing:** Restart KDE Plasma or log out and back in
-- **Colors not updating:** Ensure KColorScheme toggle is enabled in Noctalia settings
+- **Colors not updating:** Ensure KColorScheme toggle is enabled in TerminusBar settings

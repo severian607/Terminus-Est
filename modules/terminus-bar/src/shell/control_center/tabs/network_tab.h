@@ -185,6 +185,11 @@ private:
   void quickEditConnections(const std::string& uuid, const std::string& name);
   [[nodiscard]] bool quickTextInputFocused() const;
   void resetQuick();
+  void registerSecretCallback();
+  // The control-center instance, and the one whose callback the secret agent currently holds.
+  static NetworkTab* s_defaultTab;
+  static const NetworkTab* s_callbackOwner;
+  void forgetQuick();
   // Settles the pending Wi-Fi toggle once the requested state is observed.
   void settleWifiToggle(const NetworkState& state);
 
@@ -307,6 +312,7 @@ private:
   std::optional<WifiAttempt> m_qAttempt;
   bool m_qTrafficDirty = true;
   bool m_qFocusPassword = false;
+  std::string m_qResumePassword; // the password field as a resize reopen destroyed it
   float m_qGraphWidth = 0.0F;
   float m_qWidth = 440.0F;
   std::uint32_t m_qHeldKey = 0;

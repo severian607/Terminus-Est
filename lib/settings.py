@@ -764,19 +764,21 @@ def render_and_apply(args, root, isolated):
         if args.command == "login-apply" and isolated:
             raise SettingsError("login-apply is forbidden with --root")
         changed = commit(root, plan, root_fd)
-        if args.command == "login-apply":
-            return login_apply(root, isolated)
-        if args.command == "render":
+        if args.command != "login-apply":
+            if args.command == "render":
+                return settings
+            if isolated:
+                print(
+                    "Isolated root: settings saved/rendered only; no live applications or services changed.",
+                    file=sys.stderr,
+                )
+            else:
+                keys = {name for name, _ in updates} if is_update else None
+                apply_runtime(settings, root, set(plan) if args.command == "apply" else changed, modules, keys)
             return settings
-        if isolated:
-            print(
-                "Isolated root: settings saved/rendered only; no live applications or services changed.",
-                file=sys.stderr,
-            )
-        else:
-            keys = {name for name, _ in updates} if is_update else None
-            apply_runtime(settings, root, set(plan) if args.command == "apply" else changed, modules, keys)
-        return settings
+    # login-apply: the staged file is committed; release the lock before the polkit prompt (up to 180 s),
+    # so `terminus-settings set` is not blocked meanwhile. The helper reads the file once, before it authenticates.
+    return login_apply(root, isolated)
 
 
 def run_command(args):

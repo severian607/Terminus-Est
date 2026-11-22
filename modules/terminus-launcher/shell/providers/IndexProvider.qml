@@ -358,7 +358,10 @@ Provider {
     function windowItem(w) {
         const name = w.title !== "" ? w.title : w.cls
         const label = name.toLowerCase()
-        const actions = [root.focusAction(w, label, null), root.moveAction(w, label)]
+        // A window's address dies with it, so focusing one is not worth remembering.
+        const focus = root.focusAction(w, label, null)
+        focus.remember = false
+        const actions = [focus, root.moveAction(w, label)]
         if (w.pid > 0)
             actions.push(root.killAction([w.pid], label))
         return Schema.make({

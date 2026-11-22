@@ -266,6 +266,19 @@ namespace scripting {
     if (m_config.config().shell.offlineMode || m_fetching || Clock::now() < m_readRetryAt) {
       return;
     }
+    // Votes are only accepted for the default sources, so without one there is nothing to show metrics for.
+    const auto builtins = defaultPluginSources();
+    const auto& configured = m_config.config().plugins.sources;
+    const bool hasRecommendableSource = std::ranges::any_of(configured, [&](const PluginSourceConfig& source) {
+      return source.enabled
+          && source.kind == PluginSourceKind::Git
+          && std::ranges::any_of(builtins, [&](const PluginSourceConfig& builtin) {
+               return source.name == builtin.name && source.location == builtin.location;
+             });
+    });
+    if (!hasRecommendableSource) {
+      return;
+    }
     if (m_hasDocument && Clock::now() < m_freshUntil) {
       m_metricsAvailable = true;
       changed();

@@ -5,6 +5,7 @@
 #include "i18n/i18n.h"
 #include "net/http_client.h"
 #include "time/time_format.h"
+#include "util/file_utils.h"
 
 #include <algorithm>
 #include <cctype>
@@ -503,9 +504,7 @@ void WeatherService::notifyChanged() {
 }
 
 void WeatherService::startWeatherFetch() {
-  std::error_code ec;
-  std::filesystem::create_directories(transportCacheDir(), ec);
-  const auto path = transportCacheDir() / "forecast.json";
+  const auto path = FileUtils::privateCacheSubdir("weather") / "forecast.json";
   const std::string url = std::format(
       "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}"
       "&current=temperature_2m,apparent_temperature,wind_speed_10m,wind_direction_10m,weather_code,is_day,uv_index,"
@@ -689,8 +688,6 @@ bool WeatherService::coordinatesValid() const noexcept {
       && m_resolvedLongitude >= -180.0
       && m_resolvedLongitude <= 180.0;
 }
-
-std::filesystem::path WeatherService::transportCacheDir() { return std::filesystem::path("/tmp") / "terminusbar-weather"; }
 
 std::filesystem::path WeatherService::stateCacheFilePath() {
   if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg != nullptr && xdg[0] != '\0') {

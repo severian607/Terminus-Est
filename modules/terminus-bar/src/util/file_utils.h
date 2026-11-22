@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unistd.h>
 #include <unordered_set>
 #include <vector>
 
@@ -386,6 +387,30 @@ namespace FileUtils {
       return std::string(home) + "/.config/terminus-est/terminus-bar";
     }
     return {};
+  }
+
+  // The bar's per-user cache root: <XDG_CACHE_HOME or ~/.cache>/terminusbar. Without either, a directory under
+  // $XDG_RUNTIME_DIR, and only then one named for the uid in /tmp.
+  [[nodiscard]] inline std::filesystem::path cacheDir() {
+    if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg != nullptr && xdg[0] != '\0') {
+      return std::filesystem::path(xdg) / "terminusbar";
+    }
+    if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
+      return std::filesystem::path(home) / ".cache" / "terminusbar";
+    }
+    if (const char* runtime = std::getenv("XDG_RUNTIME_DIR"); runtime != nullptr && runtime[0] == '/') {
+      return std::filesystem::path(runtime) / "terminusbar-cache";
+    }
+    return std::filesystem::path("/tmp") / ("terminusbar-cache-" + std::to_string(::getuid()));
+  }
+
+  // `name` under cacheDir(), created if needed with mode 0700 (the cache root too).
+  [[nodiscard]] inline std::filesystem::path privateCacheSubdir(std::string_view name) {
+    std::error_code ec;
+    createPrivateDirectories(cacheDir(), ec);
+    std::filesystem::path dir = cacheDir() / name;
+    createPrivateDirectories(dir, ec);
+    return dir;
   }
 
   [[nodiscard]] inline std::string stateDir() {

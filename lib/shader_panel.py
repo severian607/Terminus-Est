@@ -104,6 +104,8 @@ class ClipRun:
             if len(frame) < frame_bytes:
                 break
             self.taken.clear()
+            if self.ended:  # kill() set the event before this clear; nothing would wake the wait below
+                break
             self.frame = frame
             self.taken.wait()  # the pipe's back-pressure keeps ffmpeg at the display rate
         self.ended = True

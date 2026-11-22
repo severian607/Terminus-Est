@@ -2,7 +2,7 @@
 
 # terminus:summary=Preview a Plymouth boot screen with custom colors and logo
 # terminus:args=<background-hex> <text-hex> <path-to-logo.png> <output-path>
-# terminus:examples=terminus-est plymouth preview '#1d2021' '#ebdbb2' ~/.config/terminus-est/current/theme/plymouth/logo.png /tmp/plymouth-preview.png
+# terminus:examples=terminus plymouth preview '#1d2021' '#ebdbb2' ~/.config/terminus-est/current/theme/plymouth/logo.png /tmp/plymouth-preview.png
 
 # Render a Plymouth login-screen preview PNG by compositing the staged terminus-est
 # theme assets (recolored with the given text color) onto the background.

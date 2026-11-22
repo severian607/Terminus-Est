@@ -66,7 +66,6 @@ private:
   [[nodiscard]] bool manualCoordinatesValid() const noexcept;
   [[nodiscard]] static bool coordinatesValid(double latitude, double longitude) noexcept;
 
-  [[nodiscard]] static std::filesystem::path transportCacheDir();
   [[nodiscard]] static std::filesystem::path stateCacheFilePath();
   [[nodiscard]] static std::string compactLocationLabel(const std::string& name, const std::string& country);
 

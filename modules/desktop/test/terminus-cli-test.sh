@@ -14,7 +14,7 @@ fail() {
 }
 
 # The primary dispatcher must never become a desktop helper or be called by it.
-cat >"$TMPDIR/terminus-est" <<'SH'
+cat >"$TMPDIR/terminus" <<'SH'
 #!/bin/bash
 exit 99
 SH
@@ -41,7 +41,7 @@ printf 'body:%s\n' "$*"
 # terminus:group=wrong
 # terminus:name=wrong
 SH
-chmod +x "$TMPDIR"/terminus-est*
+chmod +x "$TMPDIR"/terminus*
 
 [[ $("$CLI" weird test 'two words') == 'weird:two words' ]] || fail 'malformed metadata preserves dispatch and arguments'
 [[ $("$CLI" partial meta test value) == 'partial:value' ]] || fail 'partial metadata preserves filename routing'

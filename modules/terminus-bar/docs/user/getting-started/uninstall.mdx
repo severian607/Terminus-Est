@@ -1,6 +1,6 @@
 ---
 title: Uninstall
-description: How to uninstall Noctalia and clean up configuration files.
+description: How to uninstall TerminusBar and clean up configuration files.
 sidebar:
   order: 99
 ---
@@ -12,8 +12,8 @@ If you wish to remove Noctalia from your system, you can uninstall the `noctalia
 If you installed manually using `just install release`, remove the files installed under your prefix:
 
 ```bash
-rm ~/.local/bin/noctalia
-rm -rf ~/.local/share/noctalia
+rm ~/.local/bin/terminusbar
+rm -rf ~/.local/share/terminusbar
 ```
 
 ## Cleaning Up
@@ -22,11 +22,11 @@ After removing the package, you may want to remove the configuration and cache f
 
 ### Configuration and Cache
 
-Noctalia stores its configuration and cache in the standard XDG directories. To remove them:
+TerminusBar stores its configuration and cache in the standard XDG directories. To remove them:
 
 ```bash
-rm -rf ~/.local/state/noctalia
-rm -rf ~/.cache/noctalia
+rm -rf ~/.local/state/terminusbar
+rm -rf ~/.cache/terminusbar
 ```
 
 ### Generated Templates

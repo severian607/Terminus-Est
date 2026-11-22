@@ -198,3 +198,43 @@ impl App {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_sort_survives_a_chain_deeper_than_the_limit() {
+        let mut app = App::fixture();
+        // One chain of MAX_DEPTH + 3 processes, then two siblings at its end.
+        let mut procs = vec![process(9000, 0, "chain", "chain", 1.0, 1, 1)];
+        for depth in 1..=u32::from(MAX_DEPTH) + 2 {
+            procs.push(process(9000 + depth, 8999 + depth, "chain", "chain", 1.0, 1, 1));
+        }
+        let end = 9000 + u32::from(MAX_DEPTH) + 2;
+        procs.push(process(end + 1, end, "leaf-a", "leaf-a", 2.0, 1, 1));
+        procs.push(process(end + 2, end, "leaf-b", "leaf-b", 3.0, 1, 1));
+        app.table = procs.into_iter().map(|p| (p.pid, p)).collect();
+        app.tree = true;
+        app.rebuild_view();
+        assert!(!app.view.is_empty());
+    }
+
+    #[test]
+    fn a_reused_pid_is_not_signalled() {
+        let mut app = App::fixture();
+        let me = std::process::id();
+        let start = app.reader.stat(me).expect("own stat").start;
+
+        let dialog = |start| Dialog { pid: me, name: "me".to_string(), ask: Ask::Confirm(0), error: None, start };
+        app.dialog = Some(dialog(start + 1));
+        app.confirm();
+        let error = app.dialog.as_ref().and_then(|d| d.error.as_deref());
+        assert_eq!(error, Some("No such process"));
+
+        // Signal 0 only checks that the process can be signalled.
+        app.dialog = Some(dialog(start));
+        app.confirm();
+        assert!(app.dialog.is_none(), "the same process is signalled");
+    }
+}

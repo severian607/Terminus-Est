@@ -79,12 +79,21 @@ def stop():
 def start():
     if running():
         return
-    if not APP.is_file():
-        raise SystemExit(f"terminus-mechvibes: {APP} is missing")
+    import shutil
+
+    env = None
+    if APP.is_file():  # hand-extracted AppImage: it needs its own library directory
+        program = str(APP)
+        env = dict(os.environ, LD_LIBRARY_PATH=f"{LIB}:{os.environ.get('LD_LIBRARY_PATH', '')}".rstrip(":"))
+    else:  # the `mechvibes` package
+        program = shutil.which("mechvibes")
+        if not program:
+            raise SystemExit(
+                f"terminus-mechvibes: Mechvibes is not installed (no `mechvibes` on PATH, no AppImage at {APP})"
+            )
     subprocess.run(["terminus-funmode", "off"], check=False)  # two engines would double every key
-    env = dict(os.environ, LD_LIBRARY_PATH=f"{LIB}:{os.environ.get('LD_LIBRARY_PATH', '')}".rstrip(":"))
     subprocess.Popen(
-        ["uwsm-app", "--", str(APP)],
+        ["uwsm-app", "--", program],
         env=env,
         start_new_session=True,
         stdin=subprocess.DEVNULL,
@@ -94,7 +103,10 @@ def start():
 
 
 def load():
-    return json.loads(CONFIG.read_text())
+    try:
+        return json.loads(CONFIG.read_text())
+    except (OSError, ValueError):
+        raise SystemExit("terminus-mechvibes: no config yet; start Mechvibes once so it can write it") from None
 
 
 def edit(change):
@@ -376,7 +388,9 @@ def remove_pack(pack_id):
 
     kind = device(pack_id)
     folder = PACKS / pack_id
-    if kind not in DEVICES or not folder.is_dir() or folder.parent.parent != PACKS:
+    # resolve first: `keyboard/..` is a directory whose lexical parent looks right but is the packs root
+    resolved = folder.resolve()
+    if kind not in DEVICES or not folder.is_dir() or resolved.parent != (PACKS / kind).resolve():
         raise SystemExit(f"terminus-mechvibes: {pack_id} is a bundled pack and cannot be deleted")
 
     def change(config):

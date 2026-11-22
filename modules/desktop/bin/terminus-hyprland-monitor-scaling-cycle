@@ -8,6 +8,10 @@ CURRENT_SCALE=$(echo "$MONITOR_INFO" | jq -r '.scale')
 WIDTH=$(echo "$MONITOR_INFO" | jq -r '.width')
 HEIGHT=$(echo "$MONITOR_INFO" | jq -r '.height')
 REFRESH_RATE=$(echo "$MONITOR_INFO" | jq -r '.refreshRate')
+TRANSFORM=$(echo "$MONITOR_INFO" | jq -r '.transform')
+MIRROR_OF=$(echo "$MONITOR_INFO" | jq -r '.mirrorOf')
+MIRROR_LUA=""
+[[ $MIRROR_OF != none && -n $MIRROR_OF ]] && MIRROR_LUA=" mirror = \"$MIRROR_OF\","
 
 # Cycle through scales: 1 → 1.25 → 1.6 → 2 → 3 → 4 → 1 (or reverse with --reverse)
 SCALES=(1 1.25 1.6 2 3 4)
@@ -32,19 +36,15 @@ fi
 
 NEW_SCALE=${SCALES[$NEW_IDX]}
 
+# hl.monitor replaces the whole rule, so carry over the rotation and any mirror that the call would otherwise reset.
 hyprctl eval "hl.monitor({
   output = \"$ACTIVE_MONITOR\",
   mode = \"${WIDTH}x${HEIGHT}@${REFRESH_RATE}\",
   position = \"auto\",
   scale = $NEW_SCALE,
+  transform = $TRANSFORM,${MIRROR_LUA}
 })"
 
-# Persist the active output's Lua rule so the scale survives reloads/reboots.
-MONITOR_LUA="$HOME/.config/hypr/monitors.lua"
-if [[ -f $MONITOR_LUA ]]; then
-  sed -i -E \
-    "/hl\\.monitor\\(\\{ output = \"$ACTIVE_MONITOR\"/ s/scale = [0-9.]+/scale = $NEW_SCALE/" \
-    "$MONITOR_LUA"
-fi
+# The scale lasts until the next reload; monitors are defined in the host's monitors.lua, which this does not edit.
 
 notify-send -u low "󰍹    Display scaling set to ${NEW_SCALE}x"

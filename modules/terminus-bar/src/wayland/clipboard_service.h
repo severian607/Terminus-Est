@@ -212,6 +212,8 @@ private:
   [[nodiscard]] bool removeLegacyStorage();
   bool persistHistory(bool force = false);
   void trimHistoryToBudget();
+  // Deletes exported image files whose entry is no longer in the history.
+  void pruneExports();
   [[nodiscard]] bool loadEntryPayload(ClipboardEntry& entry);
   [[nodiscard]] static bool loadLegacyEntryPayload(ClipboardEntry& entry);
   static void evictPayloadData(ClipboardEntry& entry);
@@ -219,6 +221,10 @@ private:
   [[nodiscard]] static std::string manifestPath();
   [[nodiscard]] static std::string legacyManifestPath();
   [[nodiscard]] static std::string entriesDirectory();
+  // Where decrypted images are exported for external tools: a private directory under $XDG_RUNTIME_DIR, so they
+  // vanish at logout; the state directory only when there is no runtime dir.
+  [[nodiscard]] static std::string exportsDirectory();
+  [[nodiscard]] static std::string legacyExportsDirectory();
   [[nodiscard]] static std::string payloadPathForId(std::string_view storageId);
   [[nodiscard]] static std::string legacyPayloadPathForId(std::string_view storageId);
   [[nodiscard]] static bool isValidStorageId(std::string_view storageId);

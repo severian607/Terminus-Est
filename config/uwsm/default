@@ -5,6 +5,8 @@ export TERMINAL=xdg-terminal-exec
 
 # Use code for VSCode
 export EDITOR=zeditor
+# EDITOR stays a bare command name (terminus-launch-editor checks it); git and sudoedit need the wait flag.
+export VISUAL="zeditor --wait"
 
 # Use a custom directory for screenshots (remember to make the directory!)
 export TERMINUS_SCREENSHOT_DIR="$HOME/Pictures/Screenshots"

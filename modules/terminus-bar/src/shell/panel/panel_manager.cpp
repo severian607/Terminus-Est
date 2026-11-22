@@ -1790,7 +1790,11 @@ void PanelManager::reopenActivePanel(std::string_view panelId) {
     if (!isOpen() || m_closing || m_inTransition || m_activePanelId != id) {
       return;
     }
+    // openPanel destroys the old panel (onClose) and creates and opens the new one synchronously, so the flag
+    // covers the old panel's onClose.
+    m_reopeningActivePanel = true;
     openPanel(id, m_lastOpenRequest);
+    m_reopeningActivePanel = false;
   });
 }
 

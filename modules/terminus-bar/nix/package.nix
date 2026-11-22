@@ -37,6 +37,7 @@
   nlohmann_json,
   tomlplusplus,
   libical,
+  libvterm-neovim,
   wireplumber,
   jemalloc,
   makeWrapper,
@@ -124,6 +125,7 @@ lib.warnIf cudaSupport
     nlohmann_json
     tomlplusplus
     libical
+    libvterm-neovim
   ];
 
   mesonBuildType = "release";

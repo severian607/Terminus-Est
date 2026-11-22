@@ -83,6 +83,9 @@ public:
   ) {
     return false;
   }
+  // Set by QuickPanel around onClose() when the panel is only reopening at another height: the tab drops its
+  // widget pointers as usual but keeps what the user is in the middle of.
+  void setQuickPanelResizing(bool resizing) noexcept { m_quickPanelResizing = resizing; }
   void setQuickPanelResizeRequest(std::function<void()> request) { m_quickPanelResizeRequest = std::move(request); }
 
   void setInputDispatcher(InputDispatcher* dispatcher) noexcept { m_inputDispatcher = dispatcher; }
@@ -98,6 +101,7 @@ public:
 
 protected:
   [[nodiscard]] InputDispatcher* inputDispatcher() const noexcept { return m_inputDispatcher; }
+  [[nodiscard]] bool quickPanelResizing() const noexcept { return m_quickPanelResizing; }
   [[nodiscard]] float contentScale() const noexcept { return m_contentScale; }
   [[nodiscard]] float panelCardOpacity() const noexcept { return m_panelCardOpacity; }
   // Asks the hosting QuickPanel to re-read quickPanelHeight(); it reopens at the new size when that changed.
@@ -118,6 +122,7 @@ protected:
 private:
   float m_contentScale = 1.0F;
   float m_panelCardOpacity = 1.0F;
+  bool m_quickPanelResizing = false;
   InputDispatcher* m_inputDispatcher = nullptr;
   std::function<void()> m_quickPanelResizeRequest;
 };

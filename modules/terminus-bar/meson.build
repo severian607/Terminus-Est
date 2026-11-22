@@ -1292,6 +1292,7 @@ if build_tests
     'process',
     'scheme',
     'scrollbar_geometry',
+    'secret_shape',
     'secret_store',
     'security_primitives',
     'state_store',

@@ -2,11 +2,11 @@
 # Terminus-Est installer for Arch Linux.
 #
 #   curl -fsSL https://raw.githubusercontent.com/severian607/Terminus-Est/main/install.sh | bash
-#   curl -fsSL .../install.sh | bash -s -- --no-packages     skip pacman and AUR
+#   curl -fsSL .../install.sh | bash -s -- --no-packages     skip pacman, the AUR and every sudo step (including the root login helper)
 #
 # Installs the packages, clones the repository to ~/Projects/Terminus-Est (units and bindings expect that path),
 # links the configuration into place, builds the bar and the Hyprland plugins, renders the skins and enables
-# the user units. Anything already at a target path that is not a link is moved to
+# the user units. Anything already at a target path that is not the right link is moved to
 # ~/.local/state/terminus-est/install-backup/<time>/ first. Running it again updates and relinks.
 set -euo pipefail
 
@@ -26,6 +26,8 @@ PACKAGES=(
   # tools and pickers
   python python-gobject gtk4 gtk4-layer-shell python-tomlkit python-evdev python-numpy
   mpv btop jq libnotify brightnessctl playerctl wl-clipboard grim slurp wf-recorder wtype socat
+  fd ripgrep pacman-contrib yazi gum tesseract tesseract-data-eng imagemagick ffmpeg power-profiles-daemon desktop-file-utils
+  easyeffects lsp-plugins-lv2 calf
   # terminal, editor, fonts
   ghostty zed otf-monaspace-nerd ttf-jetbrains-mono-nerd
 )
@@ -46,13 +48,13 @@ die() {
   exit 1
 }
 
-# Point $2 at $1. A link is replaced; anything else is moved into the backup folder first.
+# Point $2 at $1. Anything already there that is not the right link, a link included, is moved into the backup folder.
 link() {
   local source=$1 target=$2
-  if [[ -L $target ]]; then
-    [[ $(readlink "$target") == "$source" ]] && return
-    rm "$target"
-  elif [[ -e $target ]]; then
+  if [[ -L $target && $(readlink "$target") == "$source" ]]; then
+    return
+  fi
+  if [[ -e $target || -L $target ]]; then
     mkdir -p "$BACKUP_DIR$(dirname "$target")"
     mv "$target" "$BACKUP_DIR$target"
     say "moved $target to the backup"
@@ -109,8 +111,9 @@ install_packages() {
   # rustup provides cargo too; asking pacman for rust there would conflict and abort.
   command -v cargo >/dev/null || packages_wanted+=(rust)
   # The script arrives on stdin under curl | bash, so pacman and sudo prompts read the terminal instead.
+  # -Syu: a partial upgrade (an old sync database against new packages) breaks Arch, and stale databases 404.
   # shellcheck disable=SC2024  # /dev/tty is readable by the user; the redirect needs no root
-  sudo pacman -S --needed "${packages_wanted[@]}" </dev/tty
+  sudo pacman -Syu --needed "${packages_wanted[@]}" </dev/tty
   aur=$(command -v paru || command -v yay || true)
   if [[ -n $aur ]]; then
     "$aur" -S --needed "${AUR_PACKAGES[@]}" </dev/tty || say "optional AUR packages failed; the rest works without them"
@@ -132,7 +135,8 @@ install_launcher_font() {
 fetch_repository() {
   step "repository"
   if [[ -d $REPO_DIR/.git ]]; then
-    git -C "$REPO_DIR" pull --ff-only --autostash
+    # No --autostash: it can leave conflict markers behind. A checkout with conflicting local edits stops here.
+    git -C "$REPO_DIR" pull --ff-only || die "could not fast-forward $REPO_DIR; commit or stash local changes and retry"
   elif [[ -e $REPO_DIR ]]; then
     die "$REPO_DIR exists and is not a git checkout; move it away first"
   else
@@ -158,14 +162,30 @@ link_configuration() {
   link "$dir/config/swayosd" "$HOME/.config/swayosd"
   follow_palette
   link "$dir/wallpapers" "$HOME/Pictures/Wallpapers/Terminus Est"
-  for file in "$dir"/config/systemd/user/terminus-* "$dir"/config/systemd/user/swayosd-server.service; do
+  for file in "$dir"/config/systemd/user/terminus-* "$dir"/config/systemd/user/swayosd-server.service "$dir"/config/systemd/user/easyeffects.service; do
     link "$file" "$HOME/.config/systemd/user/$(basename "$file")"
   done
   for file in "$dir"/config/dbus-1/services/*; do link "$file" "$HOME/.local/share/dbus-1/services/$(basename "$file")"; done
+  link "$dir/config/yazi/keymap.toml" "$HOME/.config/yazi/keymap.toml"
+  for file in "$dir"/config/applications/*.desktop; do link "$file" "$HOME/.local/share/applications/$(basename "$file")"; done
+  if command -v update-desktop-database >/dev/null; then update-desktop-database "$HOME/.local/share/applications"; fi
   for file in "$dir"/modules/terminus-bar-plugins/*/; do
     file=${file%/}
     link "$file" "$HOME/.local/share/terminusbar/plugins/$(basename "$file")"
   done
+}
+
+# The login screen helper runs as root (terminus-settings login-apply starts it through pkexec), so its copy must be
+# root-owned.
+# That needs sudo, which --no-packages rules out; terminus-update prints the command when the copy is stale.
+install_login_helper() {
+  local source=$REPO_DIR/tools/terminus-login-apply target=/usr/local/libexec/terminus-login-apply
+  if cmp -s "$source" "$target"; then
+    return
+  fi
+  # shellcheck disable=SC2024  # /dev/tty is readable by the user; the redirect needs no root
+  sudo install -D -o root -g root -m 0755 "$source" "$target" </dev/tty
+  say "installed $target (root-owned)"
 }
 
 build_and_render() {
@@ -226,6 +246,7 @@ main() {
   install_launcher_font
   fetch_repository
   link_configuration
+  if ((want_packages)); then install_login_helper; fi
   build_and_render
   enable_user_units
   print_next_steps

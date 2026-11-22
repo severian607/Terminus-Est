@@ -148,6 +148,7 @@ private:
   void applyProfiles(const std::string& json);
   void deferDiscoveryStop();
   void resetQuick();
+  void forgetQuick();
 
   BluetoothService* m_service = nullptr;
   BluetoothAgent* m_agent = nullptr;
@@ -185,6 +186,9 @@ private:
   bool m_qScrollToSelected = false;
   bool m_qFocusInput = false;
   bool m_qHadInput = false;
+  // The pairing field as it was when a resize reopen destroyed it.
+  std::string m_qResumeTyped;
+  bool m_qResumeInput = false;
   std::string m_qPlanKey;
   std::string m_qListKey;
   std::string m_qHeightKey;

@@ -217,6 +217,8 @@ pub struct Dialog {
     pub name: String,
     pub ask: Ask,
     pub error: Option<String>,
+    /// The process's start time; a reused pid has another.
+    pub start: u64,
 }
 
 /// What a click does.
@@ -831,8 +833,11 @@ impl App {
             }
             // Siblings in the list's order, by what their subtrees use.
             edges.sort_unstable_by(|a, b| {
-                a.0.cmp(&b.0)
-                    .then_with(|| sort.order(reverse, &table[&a.1], &table[&b.1], &sums[&a.1].0, &sums[&b.1].0))
+                a.0.cmp(&b.0).then_with(|| {
+                    // Below MAX_DEPTH nothing is summed, and nothing is shown.
+                    let sum = |pid| sums.get(&pid).map_or_else(Load::default, |s| s.0);
+                    sort.order(reverse, &table[&a.1], &table[&b.1], &sum(a.1), &sum(b.1))
+                })
             });
             let tree = Tree { table, edges, sums, folded: &self.folded };
             for &(_, root) in children(edges, 0) {
@@ -969,7 +974,7 @@ impl App {
     fn open(&mut self, ask: Ask) {
         let target = self.selected.and_then(|row| self.view.get(row)).and_then(|row| self.table.get(&row.pid));
         if let Some(p) = target {
-            self.dialog = Some(Dialog { pid: p.pid, name: p.name.clone(), ask, error: None });
+            self.dialog = Some(Dialog { pid: p.pid, name: p.name.clone(), ask, error: None, start: p.start });
         }
     }
 
@@ -1009,7 +1014,11 @@ impl App {
             Ask::Confirm(signal) => signal,
             Ask::Pick(cursor) => SIGNALS[cursor].0,
         };
-        match sys::kill(dialog.pid, signal) {
+        // The pid may have been reused since the dialog opened.
+        let same = self.reader.stat(dialog.pid).is_some_and(|s| s.start == dialog.start);
+        let sent =
+            if same { sys::kill(dialog.pid, signal) } else { Err(std::io::Error::from_raw_os_error(libc::ESRCH)) };
+        match sent {
             Ok(()) => self.dialog = None,
             Err(e) => {
                 let text = e.to_string();

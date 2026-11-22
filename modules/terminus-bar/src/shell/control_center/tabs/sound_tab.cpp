@@ -1086,6 +1086,7 @@ void SoundTab::rebuildBody() {
   }
   flushBand();
   const Ident wanted = m_selIdent;
+  const std::size_t oldSelected = m_selected;
   Flex* content = m_scroll->content();
   for (Flex* section : m_sections) {
     (void)content->removeChild(section);
@@ -1101,7 +1102,7 @@ void SoundTab::rebuildBody() {
 
   if (m_selected >= m_items.size() || !(m_items[m_selected]->ident == wanted)) {
     // The selected row is gone: fall back to its neighbour in the list and drop any open menu.
-    m_selected = std::min(m_selected, m_items.size() - 1);
+    m_selected = std::min(oldSelected, m_items.size() - 1);
     m_menuOpen = false;
     m_moveMode = false;
   }
@@ -1145,10 +1146,8 @@ std::unique_ptr<Flex> SoundTab::create() {
   content->setAlign(FlexAlign::Stretch);
   content->setGap(kSectionGap * scale);
 
+  // Menu, move mode and selection were reset by onClose unless this is a resize reopen, which keeps them.
   clearBody();
-  m_menuOpen = false;
-  m_moveMode = false;
-  m_selIdent = Ident{};
   m_cardsTried.clear();
   rebuildBody();
   m_bodyKey = structureKey();
@@ -1186,10 +1185,14 @@ void SoundTab::onClose() {
   clearBody();
   m_bodyKey.clear();
   m_bodyDirty = true;
-  m_menuOpen = false;
-  m_moveMode = false;
-  m_statuses.clear();
-  m_pending.clear();
+  // A reopen that only changes the height keeps the open menu, move mode and row statuses.
+  if (!quickPanelResizing()) {
+    m_menuOpen = false;
+    m_moveMode = false;
+    m_selIdent = Ident{};
+    m_statuses.clear();
+    m_pending.clear();
+  }
   m_statusRequested = false;
   m_syncing = false;
   m_eqPending = false;

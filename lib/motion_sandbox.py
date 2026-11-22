@@ -25,7 +25,11 @@ class Sandbox:
         self.extra = extra
 
     def __enter__(self):
-        self.start()
+        try:
+            self.start()
+        except BaseException:  # __exit__ never runs when __enter__ raises
+            self.stop()
+            raise
         return self
 
     def __exit__(self, *_exc):

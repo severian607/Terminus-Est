@@ -112,6 +112,8 @@ public:
   // Reopens the active panel with the request that last opened it (same output, anchor and context), on the next
   // main-loop tick, so it re-reads its preferred size. Does nothing when `panelId` is no longer the active panel.
   void reopenActivePanel(std::string_view panelId);
+  // True while a reopenActivePanel() is running its openPanel(): the old panel's onClose is a resize, not a close.
+  [[nodiscard]] bool reopeningActivePanel() const noexcept { return m_reopeningActivePanel; }
 
   bool onPointerEvent(const PointerEvent& event);
   void onKeyboardEvent(const KeyboardEvent& event);
@@ -261,6 +263,7 @@ private:
   PanelOpenRequest m_lastOpenRequest;
   std::string m_lastOpenContext;
   std::string m_lastOpenSourceBarName;
+  bool m_reopeningActivePanel = false;
 
   wl_output* m_output = nullptr;
   wl_surface* m_wlSurface = nullptr;

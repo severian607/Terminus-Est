@@ -203,7 +203,11 @@ static bool buf_alloc(Output *o, Buf *b) {
   int stride = pw * 4;
   b->size = (size_t)stride * ph;
   int fd = memfd_create("pointer-fx", MFD_CLOEXEC);
-  if (fd < 0 || ftruncate(fd, (off_t)b->size) < 0) return false;
+  if (fd < 0) return false;
+  if (ftruncate(fd, (off_t)b->size) < 0) {
+    close(fd);
+    return false;
+  }
   b->data = mmap(NULL, b->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   if (b->data == MAP_FAILED) {
     close(fd);
@@ -465,7 +469,7 @@ static void refresh_cursor(double now) {
   unsigned size = 32;
   if (sscanf(key, "%127s %u", theme, &size) < 1) return;
   if (n_sets < MAX_SETS && load_set(&SETS[n_sets], theme, size)) cur_set = n_sets++;
-  else if (n_sets >= MAX_SETS) fprintf(stderr, "pointer-fx: too many cursor themes in one session, keeping the last\\n");
+  else if (n_sets >= MAX_SETS) fprintf(stderr, "pointer-fx: too many cursor themes in one session, keeping the last\n");
   else cur_set = -1;
 }
 

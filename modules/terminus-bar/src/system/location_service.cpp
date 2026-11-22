@@ -4,6 +4,7 @@
 #include "core/log.h"
 #include "i18n/i18n.h"
 #include "net/http_client.h"
+#include "util/file_utils.h"
 #include "util/string_utils.h"
 
 #include <cmath>
@@ -178,9 +179,7 @@ void LocationService::requestRefresh() {
 }
 
 void LocationService::startGeolocate() {
-  std::error_code ec;
-  std::filesystem::create_directories(transportCacheDir(), ec);
-  const auto path = transportCacheDir() / "geolocate.json";
+  const auto path = FileUtils::privateCacheSubdir("location") / "geolocate.json";
   const std::uint64_t serial = ++m_requestSerial;
   m_requestKind = RequestKind::Geolocate;
   m_httpClient.download("https://api.noctalia.dev/geolocate", path, [this, path, serial](bool success) {
@@ -189,9 +188,7 @@ void LocationService::startGeolocate() {
 }
 
 void LocationService::startAddressGeocode() {
-  std::error_code ec;
-  std::filesystem::create_directories(transportCacheDir(), ec);
-  const auto path = transportCacheDir() / "geocode.json";
+  const auto path = FileUtils::privateCacheSubdir("location") / "geocode.json";
   const std::string url = "https://api.noctalia.dev/geocode?city=" + StringUtils::urlEncode(m_config.address);
   const std::uint64_t serial = ++m_requestSerial;
   m_requestKind = RequestKind::GeocodeAddress;
@@ -282,10 +279,6 @@ bool LocationService::coordinatesValid(double latitude, double longitude) noexce
       && latitude <= 90.0
       && longitude >= -180.0
       && longitude <= 180.0;
-}
-
-std::filesystem::path LocationService::transportCacheDir() {
-  return std::filesystem::path("/tmp") / "terminusbar-location";
 }
 
 std::filesystem::path LocationService::stateCacheFilePath() {

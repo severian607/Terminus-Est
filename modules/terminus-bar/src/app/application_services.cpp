@@ -603,11 +603,18 @@ void Application::initStyleThemeAndWayland() {
     m_themeService.onConfigReload();
     m_settingsWindow.onExternalOptionsChanged();
   });
-  m_communityPaletteService.sync();
+  // The palette list is only downloaded while the theme source is community; the picker lists the cached copy
+  // otherwise, and choosing the community source is a theme change that syncs it.
+  const auto syncCommunityPalettes = [this]() {
+    if (m_configService.config().theme.source == PaletteSource::Community) {
+      m_communityPaletteService.sync();
+    }
+  };
+  syncCommunityPalettes();
   m_configService.addReloadCallback(
-      [this]() {
+      [this, syncCommunityPalettes]() {
         if (m_configService.lastChange().theme) {
-          m_communityPaletteService.sync();
+          syncCommunityPalettes();
         }
       },
       "community-palette-sync"

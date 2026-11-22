@@ -3,12 +3,20 @@
 -- # Terminals, editors, files and browsers.
 o.bind("SUPER + RETURN",          "Terminal",          [=[uwsm-app -- ghostty --working-directory="$(terminus compat cmd-terminal-cwd)"]=])
 o.bind("SUPER + ALT + RETURN",    "Tmux",              [=[uwsm-app -- ghostty --working-directory="$(terminus compat cmd-terminal-cwd)" -e bash -lc "tmux attach || tmux new -s Work"]=])
-o.bind("SUPER + SHIFT + Q",       "Open OMP",          "omp-launch-focused")
+if o.command_exists("omp-launch-focused") then
+  o.bind("SUPER + SHIFT + Q",       "Open OMP",          "omp-launch-focused")
+end
 o.bind("SUPER + SHIFT + E",       "Zed",               "uwsm-app -- zeditor")
 o.bind("SUPER + R",               "Skwd-wall",         "uwsm-app -- skwd-wall-v2")
 o.bind("SUPER + SHIFT + RETURN",  "Browser",           "terminus compat launch-browser")
-o.bind("SUPER + ALT + SHIFT + F", "File manager",      "ghostty -e yazi")
-o.bind("SUPER + SHIFT + F",       "Strata (cwd)",      [=[uwsm-app -- strata-launch "$(terminus compat cmd-terminal-cwd)"]=])
+if o.command_exists("yazi") then
+  o.bind("SUPER + ALT + SHIFT + F", "File manager",      "ghostty -e yazi")
+end
+-- # Strata starts through its wrapper when this machine has one, else directly.
+local strata = (o.command_exists("strata-launch") and "strata-launch") or (o.command_exists("strata") and "strata")
+if strata then
+  o.bind("SUPER + SHIFT + F",       "Strata (cwd)",      "uwsm-app -- " .. strata .. [=[ "$(terminus compat cmd-terminal-cwd)"]=])
+end
 o.bind("SUPER + SHIFT + ALT + B", "Browser (private)", "terminus compat launch-browser --private")
 
 -- # Firefox: Ctrl+J/L switch tabs; Ctrl+Left/Right retain native word movement.
@@ -44,15 +52,31 @@ o.bind("CTRL + DOWN",  "Scroll down in Firefox",            function() firefox_c
 
 -- # Editors, notes and web apps.
 o.bind("SUPER + SHIFT + N", "Editor",                     "terminus compat launch-editor")
-o.bind("SUPER + SHIFT + O", "Obsidian",                   [=[terminus compat launch-or-focus '^md\.obsidian\.Obsidian$' "uwsm-app -- $HOME/Projects/Obsidian-Gruvbox-Transparent/obsidian-transparent"]=])
-o.bind("SUPER + PERIOD",    "Toggle Obsidian light/dark", "obsidian-theme-toggle")
+-- # The Obsidian wrapper (transparent window) lives outside this repository; without it, plain obsidian.
+local obsidian_wrapper_path = "/Projects/Obsidian-Gruvbox-Transparent/obsidian-transparent"
+local obsidian_launcher
+if o.file_exists(os.getenv("HOME") .. obsidian_wrapper_path) then
+  obsidian_launcher = "$HOME" .. obsidian_wrapper_path
+elseif o.command_exists("obsidian") then
+  obsidian_launcher = "obsidian"
+end
+if obsidian_launcher then
+  o.bind("SUPER + SHIFT + O", "Obsidian",                   [=[terminus compat launch-or-focus '^md\.obsidian\.Obsidian$' "uwsm-app -- ]=] .. obsidian_launcher .. '"')
+end
+if o.command_exists("obsidian") then
+  o.bind("SUPER + PERIOD",    "Toggle Obsidian light/dark", "obsidian command id=theme:toggle-light-dark")
+end
 
 o.bind("SUPER + SHIFT + Y",        "YouTube",                    [=[terminus compat launch-webapp "https://youtube.com/" ]=])
 o.bind("SUPER + SHIFT + ALT + G",  "WhatsApp",                   [=[terminus compat launch-or-focus-webapp WhatsApp "https://web.whatsapp.com/" ]=])
 o.bind("SUPER + SHIFT + CTRL + G", "Google Messages",            [=[terminus compat launch-or-focus-webapp "Google Messages" "https://messages.google.com/web/conversations"]=])
 o.bind("SUPER + SHIFT + X",        "X",                          [=[terminus compat launch-webapp "https://x.com/" ]=])
 o.bind("SUPER + SHIFT + ALT + X",  "X Post",                     [=[terminus compat launch-webapp "https://x.com/compose/post"]=])
-o.bind("SUPER + V",                "Toggle Hyprwhspr recording", "/usr/lib/hyprwhspr/config/hyprland/hyprwhspr-tray.sh record")
+-- # The dictation helper ships with the hyprwhspr package.
+local hyprwhspr_tray = "/usr/lib/hyprwhspr/config/hyprland/hyprwhspr-tray.sh"
+if o.file_exists(hyprwhspr_tray) then
+  o.bind("SUPER + V",                "Toggle Hyprwhspr recording", hyprwhspr_tray .. " record")
+end
 
 -- # Panels and pickers.
 -- # Panels open on the main monitor when monitors.lua names one, else where the focus is.

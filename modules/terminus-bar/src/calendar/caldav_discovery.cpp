@@ -6,9 +6,11 @@
 
 #include <cctype>
 #include <cstring>
+#include <curl/curl.h>
 #include <libxml/parser.h>
 #include <libxml/tree.h>
 #include <memory>
+#include <optional>
 #include <string_view>
 
 namespace calendar {
@@ -108,6 +110,66 @@ namespace calendar {
         return std::string(url);
       }
       return std::string(url.substr(0, pathStart));
+    }
+
+    struct UrlOrigin {
+      std::string scheme;
+      std::string host;
+      std::string port;
+    };
+
+    std::optional<UrlOrigin> urlOrigin(const std::string& url) {
+      std::unique_ptr<CURLU, decltype(&curl_url_cleanup)> handle(curl_url(), curl_url_cleanup);
+      if (!handle || curl_url_set(handle.get(), CURLUPART_URL, url.c_str(), 0) != CURLUE_OK) {
+        return std::nullopt;
+      }
+      const auto part = [&handle](CURLUPart kind) -> std::optional<std::string> {
+        char* raw = nullptr;
+        if (curl_url_get(handle.get(), kind, &raw, CURLU_DEFAULT_PORT) != CURLUE_OK || raw == nullptr) {
+          return std::nullopt;
+        }
+        std::string value(raw);
+        curl_free(raw);
+        return value;
+      };
+      auto scheme = part(CURLUPART_SCHEME);
+      auto host = part(CURLUPART_HOST);
+      auto port = part(CURLUPART_PORT);
+      if (!scheme || !host || !port) {
+        return std::nullopt;
+      }
+      for (char& c : *scheme) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      }
+      for (char& c : *host) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      }
+      return UrlOrigin{std::move(*scheme), std::move(*host), std::move(*port)};
+    }
+
+    // Credentials go only to the configured server: same scheme, host and port. The one exception is a provider
+    // that opted in to cross-host auth (iCloud hands out per-account hosts such as p01-caldav.icloud.com): there
+    // https hosts under the server's parent domain are accepted too.
+    bool credentialsAllowedFor(const std::string& serverUrl, const std::string& url, bool allowRedirectAuth) {
+      const auto server = urlOrigin(serverUrl);
+      const auto target = urlOrigin(url);
+      if (!server || !target) {
+        return false;
+      }
+      if (server->scheme == target->scheme && server->host == target->host && server->port == target->port) {
+        return true;
+      }
+      if (!allowRedirectAuth || server->scheme != "https" || target->scheme != "https" || target->port != "443") {
+        return false;
+      }
+      const std::size_t dot = server->host.find('.');
+      if (dot == std::string::npos) {
+        return false;
+      }
+      const std::string parent = server->host.substr(dot);
+      return parent.find('.', 1) != std::string::npos
+          && target->host.size() > parent.size()
+          && target->host.ends_with(parent);
     }
 
     std::string requestBaseUrl(std::string_view requestedUrl, std::string_view effectiveUrl) {
@@ -215,7 +277,8 @@ namespace calendar {
       return {};
     }
 
-    std::vector<CalDavCollection> parseCollections(const std::string& body, std::string_view homeUrl) {
+    std::vector<CalDavCollection>
+    parseCollections(const std::string& body, std::string_view homeUrl, const DiscoveryContext& ctx) {
       std::vector<CalDavCollection> out;
       auto doc = parseXml(body);
       if (!doc) {
@@ -233,6 +296,10 @@ namespace calendar {
         const std::string href = firstChildText(response, "href");
         const std::string url = resolveHref(homeUrl, href);
         if (url.empty()) {
+          continue;
+        }
+        if (!credentialsAllowedFor(ctx.serverUrl, url, ctx.allowRedirectAuth)) {
+          kLog.warn("ignoring collection {}: it is not on the configured server", url);
           continue;
         }
 
@@ -333,6 +400,11 @@ namespace calendar {
               finish(ctx, false);
               return;
             }
+            if (!credentialsAllowedFor(ctx->serverUrl, principalUrl, ctx->allowRedirectAuth)) {
+              kLog.warn("principal url {} is not on the configured server; not sending credentials", principalUrl);
+              finish(ctx, false);
+              return;
+            }
             discoverCalendarHome(ctx, principalUrl);
           }
       );
@@ -354,6 +426,11 @@ namespace calendar {
               finish(ctx, false);
               return;
             }
+            if (!credentialsAllowedFor(ctx->serverUrl, homeUrl, ctx->allowRedirectAuth)) {
+              kLog.warn("calendar home {} is not on the configured server; not sending credentials", homeUrl);
+              finish(ctx, false);
+              return;
+            }
             discoverCollections(ctx, homeUrl);
           }
       );
@@ -368,7 +445,7 @@ namespace calendar {
               finish(ctx, false, {}, classify(resp));
               return;
             }
-            std::vector<CalDavCollection> collections = parseCollections(resp.body, homeUrl);
+            std::vector<CalDavCollection> collections = parseCollections(resp.body, homeUrl, *ctx);
             if (collections.empty()) {
               kLog.warn("calendar collection discovery returned no VEVENT collections");
               finish(ctx, false, {}, DiscoveryFailure::NoCalendars);

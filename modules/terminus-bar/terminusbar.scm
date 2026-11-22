@@ -32,6 +32,7 @@
   #:use-module (gnu packages polkit)
   #:use-module (gnu packages pulseaudio)
   #:use-module (gnu packages stb)
+  #:use-module (gnu packages terminals)
   #:use-module (gnu packages xdisorg)
   #:use-module (gnu packages xml))
 
@@ -95,6 +96,7 @@
            libsecret
            libsndfile
            libsodium
+           libvterm
            libwebp
            libxkbcommon
            libxml2

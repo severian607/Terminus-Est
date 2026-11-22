@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Unused upstream installer kept for reference; it overwrites linked config and /etc/pacman.conf. Never run it.
+echo "This is the unused upstream installer kept for reference; the installer is the repository root's install.sh." >&2
+exit 1
+
 # Exit immediately if a command exits with a non-zero status
 set -eEo pipefail
 

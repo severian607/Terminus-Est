@@ -16,7 +16,7 @@ sudo pacman -S meson gcc just \
   libsecret libsodium \
   sdbus-cpp libpipewire wireplumber polkit \
   pam curl libwebp libjxl libsndfile librsvg \
-  libqalculate libxml2 \
+  libqalculate libxml2 libvterm \
   md4c tomlplusplus libical \
   nlohmann-json stb \
   jemalloc
@@ -34,7 +34,7 @@ sudo dnf install meson gcc-c++ just \
   libsecret-devel libsodium-devel \
   sdbus-cpp-devel pipewire-devel wireplumber-devel \
   pam-devel polkit-devel libcurl-devel libwebp-devel libjxl-devel libsndfile-devel librsvg2-devel \
-  libqalculate-devel libxml2-devel \
+  libqalculate-devel libxml2-devel libvterm-devel \
   md4c-devel tomlplusplus-devel libical-devel \
   json-devel stb_image_resize2-devel stb_image_write-devel \
   jemalloc-devel
@@ -52,7 +52,7 @@ sudo zypper install meson gcc-c++ just \
   libsecret-devel libsodium-devel \
   sdbus-cpp-devel pipewire-devel wireplumber-devel \
   pam-devel polkit-devel libcurl-devel libwebp-devel libjxl-devel libsndfile-devel librsvg-devel \
-  libqalculate-devel libxml2-devel \
+  libqalculate-devel libxml2-devel libvterm-devel \
   md4c-devel tomlplusplus-devel libical-devel \
   nlohmann_json-devel stb-devel \
   jemalloc-devel
@@ -71,7 +71,7 @@ sudo apt install meson g++ just \
   libsdbus-c++-dev libpipewire-0.3-dev libwireplumber-0.5-dev \
   libpam0g-dev libpolkit-agent-1-dev libpolkit-gobject-1-dev \
   libcurl4-openssl-dev libwebp-dev libjxl-dev libsndfile1-dev librsvg2-dev \
-  libqalculate-dev libxml2-dev \
+  libqalculate-dev libxml2-dev libvterm-dev \
   libmd4c-dev libtomlplusplus-dev libical-dev \
   nlohmann-json3-dev libstb-dev \
   libjemalloc-dev
@@ -90,7 +90,7 @@ sudo xbps-install meson ninja pkg-config git \
   basu-devel sdbus-c++-devel \
   libmd4c-devel tomlplusplus-devel libical-devel \
   json-c++ stb \
-  polkit-devel librsvg-devel libqalculate-devel libxml2-devel jemalloc-devel
+  polkit-devel librsvg-devel libqalculate-devel libxml2-devel libvterm-devel jemalloc-devel
 ```
 
 ### AerynOS
@@ -104,7 +104,7 @@ sudo moss install meson gcc clang just \
   libsecret-devel libsodium-devel \
   sdbus-cpp-devel pipewire-devel wireplumber-devel polkit-devel \
   linux-pam-devel curl libwebp-devel libjxl-devel libsndfile-devel librsvg-devel \
-  libqalculate-devel libxml2-devel \
+  libqalculate-devel libxml2-devel libvterm-devel \
   md4c-devel tomlplusplus-devel libical-devel \
   nlohmann-json stb \
   jemalloc-devel

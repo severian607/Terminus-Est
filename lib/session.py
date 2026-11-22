@@ -61,6 +61,20 @@ def _check_login(login: dict) -> None:
             raise ValueError(f"login.{key} must be boolean")
 
 
+def host_idle(root: Path) -> str | None:
+    """This host's own idle configuration (config/hosts/<hostname>/hypridle.conf), if it has one."""
+    try:
+        host = Path("/etc/hostname").read_text().strip()
+    except OSError:
+        return None
+    if not host or "/" in host or host.startswith("."):
+        return None
+    try:
+        return (root / "hosts" / host / "hypridle.conf").read_text()
+    except OSError:
+        return None
+
+
 def render(settings: dict, root: Path) -> dict[Path, str]:
     saver = settings["screensaver"]
     login = settings["login"]
@@ -68,7 +82,7 @@ def render(settings: dict, root: Path) -> dict[Path, str]:
     _check_login(login)
     # Availability is checked by terminus-screensaver itself; keep the existing idle
     # listener alive while disabled so availability never changes pause state.
-    idle = (
+    idle = host_idle(root) or (
         HYPRIDLE_HEAD + "\nlistener {\n"
         f"    timeout = {saver['idle_seconds']}\n"
         "    on-timeout = terminus-screensaver\n"

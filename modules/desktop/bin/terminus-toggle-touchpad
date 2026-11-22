@@ -22,7 +22,8 @@ enable() {
 disable() {
   hyprctl eval "hl.device({ name = $device_lua, enabled = false })" >/dev/null
   mkdir -p "$(dirname "$STATE_CONF")"
-  printf 'device {\n    name = %s\n    enabled = false\n}\n' "$device" > "$STATE_CONF"
+  # toggles.lua reads this flag as data (the device name) and re-applies it on reload.
+  printf '%s\n' "$device" > "$STATE_CONF"
   terminus-swayosd-client --custom-icon touchpad-disabled-symbolic --custom-message "Touchpad disabled"
 }
 

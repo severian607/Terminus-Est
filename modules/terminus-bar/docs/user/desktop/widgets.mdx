@@ -7,11 +7,11 @@ sidebar:
 
 # Desktop Widgets
 
-Desktop widgets are configured through the normal Noctalia config stack. Declare layouts in `~/.config/noctalia/*.toml`;
+Desktop widgets are configured through the normal TerminusBar config stack. Declare layouts in `~/.config/terminus-est/terminus-bar/*.toml`;
 the interactive editor writes its layout overrides to `settings.toml`.
 
-- Declarative config: `[desktop_widgets]` in `~/.config/noctalia/*.toml`
-- GUI/editor overrides: `$NOCTALIA_STATE_HOME/noctalia/settings.toml`, `$XDG_STATE_HOME/noctalia/settings.toml`, or `~/.local/state/noctalia/settings.toml`
+- Declarative config: `[desktop_widgets]` in `~/.config/terminus-est/terminus-bar/*.toml`
+- GUI/editor overrides: `$TERMINUSBAR_STATE_HOME/terminusbar/settings.toml`, `$XDG_STATE_HOME/terminusbar/settings.toml`, or `~/.local/state/terminusbar/settings.toml`
 
 ```toml
 [desktop_widgets]
@@ -32,7 +32,7 @@ flip_y   = false
 format = "{:%H:%M}"
 ```
 
-When enabled, Noctalia renders each desktop widget as its own tightly-sized layer-shell surface on the `Bottom` layer. The current implementation ships `button`, `calendar`, `clock`, `label`, `audio_visualizer`, `fancy_audio_visualizer`, `sticker`, `weather`, `media_player`, `volume`, and `sysmon` widget types plus an interactive edit mode.
+When enabled, TerminusBar renders each desktop widget as its own tightly-sized layer-shell surface on the `Bottom` layer. The current implementation ships `button`, `calendar`, `clock`, `label`, `audio_visualizer`, `fancy_audio_visualizer`, `sticker`, `weather`, `media_player`, `volume`, and `sysmon` widget types plus an interactive edit mode.
 
 ---
 
@@ -41,12 +41,12 @@ When enabled, Noctalia renders each desktop widget as its own tightly-sized laye
 ### IPC
 
 ```sh
-noctalia msg desktop-widgets-edit
-noctalia msg desktop-widgets-exit
-noctalia msg desktop-widgets-toggle-edit
+terminusbar msg desktop-widgets-edit
+terminusbar msg desktop-widgets-exit
+terminusbar msg desktop-widgets-toggle-edit
 ```
 
-You can also turn edit mode on from **Settings → Desktop → Toggle Editor**. Noctalia shows a short internal notification and you should switch to an **empty workspace** (no windows covering the desktop) so the editor overlay is visible.
+You can also turn edit mode on from **Settings → Desktop → Toggle Editor**. TerminusBar shows a short internal notification and you should switch to an **empty workspace** (no windows covering the desktop) so the editor overlay is visible.
 
 Widget previews are non-interactive in edit mode. Clicking anywhere within a widget selects or moves it instead of activating its buttons or other controls; normal widget interaction resumes after you exit the editor.
 

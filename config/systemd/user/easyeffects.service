@@ -1,0 +1,9 @@
+[Unit]
+Description=EasyEffects audio effects (service mode, no window; started on demand by terminus-audiofx)
+After=graphical-session.target pipewire.service wireplumber.service
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/easyeffects --service-mode --hide-window
+Restart=on-failure
+RestartSec=2

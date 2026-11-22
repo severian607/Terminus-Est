@@ -20,6 +20,7 @@
 #include "ui/builders.h"
 #include "ui/palette.h"
 #include "ui/style.h"
+#include "util/file_utils.h"
 #include "util/string_utils.h"
 #include "wayland/layer_surface.h"
 #include "wayland/surface.h"
@@ -535,7 +536,7 @@ namespace {
   }
 
   std::filesystem::path remoteIconCachePath(std::string_view url) {
-    const std::filesystem::path cacheDir = std::filesystem::path("/tmp") / "terminusbar-notification-icons";
+    const std::filesystem::path cacheDir = FileUtils::cacheDir() / "notification-icons";
     const std::size_t hash = std::hash<std::string_view>{}(url);
     return cacheDir / (std::to_string(hash) + ".img");
   }
@@ -3115,13 +3116,7 @@ std::string NotificationToast::resolveNotificationIconPath(const PopupEntry& ent
     }
 
     if (m_httpClient != nullptr && !m_pendingRemoteIconDownloads.contains(iconValue)) {
-      std::filesystem::create_directories(cached.parent_path(), ec);
-      if (ec) {
-        kLog.warn(
-            "notification toast: #{} failed to create icon cache dir '{}' error='{}'", entry.notificationId,
-            cached.parent_path().string(), ec.message()
-        );
-      }
+      (void)FileUtils::privateCacheSubdir("notification-icons");
 
       m_pendingRemoteIconDownloads.insert(iconValue);
       m_httpClient->download(iconValue, cached, [this, url = iconValue, path = cached.string()](bool success) {

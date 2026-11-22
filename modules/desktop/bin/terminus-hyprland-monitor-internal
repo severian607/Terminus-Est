@@ -22,7 +22,9 @@ disable() {
     exit 1
   fi
   if terminus-hyprland-toggle-disabled "$TOGGLE" && terminus-hyprland-toggle-disabled "$MIRROR_TOGGLE"; then
-    echo "monitor=$INTERNAL,disable" >"$TOGGLE_FLAG"
+    # toggles.lua reads this flag as data: the output to disable.
+    mkdir -p "$(dirname "$TOGGLE_FLAG")"
+    printf '%s\n' "$INTERNAL" >"$TOGGLE_FLAG"
     notify-send -u low "󰍹    Laptop display disabled"
     hyprctl reload
   fi

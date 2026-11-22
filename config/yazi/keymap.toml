@@ -1,0 +1,30 @@
+#:schema https://yazi-rs.github.io/schemas/keymap.json
+
+[[mgr.prepend_keymap]]
+on = [ "c", "h" ]
+run = '''
+path=%h
+mime=$(file -Lb --mime-type -- "$path") || exit 1
+label=$(basename -- "$path")
+
+case "$mime" in
+  image/gif|video/*)
+    uri=$(python3 -c "import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve().as_uri())" "$path") &&
+      printf '%s\r\n' "$uri" | wl-copy --type text/uri-list
+    ;;
+  image/*)
+    wl-copy --type "$mime" < "$path"
+    ;;
+  *)
+    notify-send --urgency=critical --app-name=Yazi "Not supported media" "$label has type $mime"
+    exit 0
+    ;;
+esac
+
+if [ "$?" -eq 0 ]; then
+  notify-send --app-name=Yazi "Media copied" "$label is ready to paste"
+else
+  notify-send --urgency=critical --app-name=Yazi "Clipboard copy failed" "$label"
+fi
+'''
+desc = "Copy hovered image or video for pasting"

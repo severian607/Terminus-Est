@@ -55,11 +55,15 @@ place() {
 }
 
 start() {
-  [[ ! -e $root ]] || die "sandbox $name already exists ($root); stop it first"
   exec 9>/tmp/tms-start.lock
   flock 9
-  mkdir -p "$root/r"
-  chmod 700 "$root/r"
+  # The lock comes first so two starts cannot race; mkdir without -p refuses a directory someone else made.
+  [[ ! -e $root && ! -L $root ]] || die "sandbox $name already exists ($root); stop it first"
+  mkdir -m 700 "$root" 2>/dev/null || die "cannot create $root"
+  mkdir -m 700 "$root/r"
+  # Anything that fails or is interrupted from here on must not leave the nested compositor or its output behind.
+  trap 'trap - EXIT INT TERM; stop || true' EXIT
+  trap 'exit 1' INT TERM
   # The nested compositor's window must not take the user's keyboard focus with it to the hidden output.
   local focused_window focused_monitor
   focused_window=$(hyprctl activewindow -j | jq -r '.address // empty')
@@ -112,6 +116,7 @@ EOF
   hyprctl dispatch "hl.dsp.window.fullscreen({ window = 'address:$address' })" >/dev/null
   hyprctl dispatch "hl.dsp.focus({ monitor = \"$focused_monitor\" })" >/dev/null
   [[ -z $focused_window ]] || hyprctl dispatch "hl.dsp.focus({ window = 'address:$focused_window' })" >/dev/null
+  trap - EXIT INT TERM
   echo "sandbox $name running on hidden output $output ($root)"
 }
 
@@ -188,6 +193,7 @@ case "$cmd" in
     # The compositor gives its own clients an unshaded copy of the frame; the sandbox window on the hidden output
     # of the real session shows the shaded one.
     (( $# == 2 )) || usage
+    command -v wf-recorder >/dev/null || die "film needs wf-recorder (sudo pacman -S wf-recorder); record falls back to grim and ffmpeg"
     inner true
     wf-recorder -y -o "$output" -f "$1" -r 60 >/dev/null 2>&1 &
     recorder=$!

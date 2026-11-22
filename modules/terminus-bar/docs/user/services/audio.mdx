@@ -18,7 +18,7 @@ sound_theme                = "freedesktop"
 ```
 
 - `enable_overdrive = false` clamps Control Center output/microphone sliders to 100%; `true` allows up to 150%.
-- `enable_sounds = false` disables all shell sound playback. Plugin sounds via `noctalia.sound.play` are not
+- `enable_sounds = false` disables all shell sound playback. Plugin sounds via `terminusbar.sound.play` are not
   affected by `enable_sounds` or the per-event toggles.
 - While `enable_sounds` is `true`, each per-event toggle gates one shell sound: `enable_volume_sounds` (volume
   changes), `enable_notification_sounds` (notifications), `enable_power_sounds` (charger connect or remove), and
@@ -37,7 +37,7 @@ sound_theme                = "freedesktop"
   (screenshots). If a theme lacks the exact event, its trailing dash components are stripped (e.g.
   `message-new-instant`, then `message-new`, then `message`) before trying parent themes.
 
-Noctalia reconnects automatically if the PipeWire daemon restarts or is temporarily unavailable. Audio devices and
+TerminusBar reconnects automatically if the PipeWire daemon restarts or is temporarily unavailable. Audio devices and
 controls disappear while the daemon is offline and repopulate after PipeWire and its session manager are ready again.
 
 ## Related IPC

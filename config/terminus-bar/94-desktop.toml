@@ -1,0 +1,21 @@
+# How the bar fits into this desktop. Without these a fresh install behaves differently from the maintainer's
+# machine, where the same values used to live only in the bar's own state file.
+
+# mako is the notification daemon (key bindings, styling and the dashboard's inbox all talk to it); the bar must
+# not claim org.freedesktop.Notifications first.
+[notification]
+enable_daemon = false
+
+# No catalogue downloads from noctalia's servers; the templates this desktop uses are the two below.
+[theme.templates]
+enable_community_templates = false
+
+# btop colours for the dashboard's embedded task view (assets/btop/terminusbar.conf selects this theme).
+[theme.templates.user.btop_terminusbar]
+input_path = "~/.config/terminus-est/terminus-bar/templates/btop-terminusbar.theme"
+output_path = "~/.config/btop/themes/terminusbar.theme"
+
+# Mic indicator colours for hyprwhspr; written only where that program's folder is wanted.
+[theme.templates.user.noctwhspr_mic_osd]
+input_path = "~/.config/terminus-est/terminus-bar/templates/noctwhspr-mic-osd.css"
+output_path = "~/.config/hyprwhspr/theme/mic-osd.css"

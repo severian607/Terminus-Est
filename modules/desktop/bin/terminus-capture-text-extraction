@@ -2,7 +2,7 @@
 
 # terminus:summary=Extract text from a screenshot region with OCR
 # terminus:group=capture
-# terminus:examples=terminus capture ocr
+# terminus:examples=terminus capture text extraction
 
 # Keep hyprpicker alive until after grim captures so the screenshot sees the
 # frozen overlay rather than live content shifting during teardown.

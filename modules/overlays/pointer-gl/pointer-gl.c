@@ -40,6 +40,9 @@
 #define TRAIL_SEED_LEAD_S 1e-3      // the seed point of a new trail is this much older than its first sample
 #define PAD_ABOVE_FACTOR 1.6        // flames rise: the effect reaches this much further above the path than beside it
 #define PATH_WRAP_PX 100000.0       // path positions wrap here
+// Distance from the oldest point along the path, taken modulo the wrap so a trail that spans the wrap point
+// still reads as positive: the first term is a's distance, the second the step from a to b.
+#define TAIL_DIST "(mod(a.w - u_tail, 100000.0) + h * mod(b.w - a.w, 100000.0))"
 #define TIME_WRAP_S 1000.0          // u_time wraps so float precision does not decay over hours
 #define POLL_SLOW_S 0.04            // pointer poll period shortly after the pointer stopped, and at start
 #define POLL_FAST_WINDOW_S 0.5      // frame-rate polling continues this long after the last movement
@@ -241,7 +244,7 @@ static const char *FRAG =
     "    float fade = pow(1.0 - u, 1.2);\n"
     "    float len = sqrt(l2), along = dot(p - a.xy, ba) / len;\n"
     "    float over = max(max(-along, along - len), 0.0);\n"
-    "    float cap = exp(-over * over / 40.0), taper = smoothstep(0.0, 45.0, mix(a.w, b.w, h) - u_tail);\n"
+    "    float cap = exp(-over * over / 40.0), taper = smoothstep(0.0, 45.0, " TAIL_DIST ");\n"
     "    float side = dot(d, vec2(-ba.y, ba.x) * inversesqrt(l2));\n"
     "    float s = mix(a.w, b.w, h);\n"
     "    float amp = 14.0 * (0.5 + u);\n"
@@ -279,7 +282,7 @@ static const char *FRAG =
     "    float side = dot(d, vec2(-ba.y, ba.x) * inversesqrt(l2));\n"
     "    float len = sqrt(l2), along = dot(p - a.xy, ba) / len;\n"
     "    float over = max(max(-along, along - len), 0.0);\n"                 // past either end of the segment
-    "    float cap = exp(-over * over / 40.0), taper = smoothstep(0.0, 45.0, mix(a.w, b.w, h) - u_tail);\n"
+    "    float cap = exp(-over * over / 40.0), taper = smoothstep(0.0, 45.0, " TAIL_DIST ");\n"
     "    float s = mix(a.w, b.w, h);\n"
     "    float wave = 7.0 * sin(s * 0.07 - u_time * 6.0);\n"
     "    float s1 = exp(-(side - wave) * (side - wave) / 5.0), s2 = exp(-(side + wave) * (side + wave) / 5.0);\n"

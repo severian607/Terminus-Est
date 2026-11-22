@@ -1,0 +1,8 @@
+url: https://github.com/noctalia-dev/community-plugins (cat/)
+author: DotNetRob
+license: MIT (as declared in plugin.toml; the upstream repository carries no licence file)
+font: fonts/catwalk2.otf is traced from the MIT-licensed CatWalk plasmoid by Driglu4it (https://store.kde.org/p/2055225)
+changes:
+  - renamed for Terminus-Bar's plugin API (terminusbar.* instead of noctalia.*)
+  - cat.luau restructured: one loadConfig(), named thresholds, pace recomputed per poll, unchanged frames not re-rendered
+  - the panel (cat_panel.luau) is not shipped; the widget opens the terminus/vitals panel

@@ -2,8 +2,10 @@
 """Mechanical noctalia -> TerminusBar rebrand. Run at the root of a pristine upstream checkout.
 
 Renames a fixed set of paths, then applies ordered replacement rules to every
-text file (binary files are skipped). Deterministic; no other inputs.
+text file (binary files are skipped) and restores the strings that keep the
+upstream name. Safe to run twice. Deterministic; no other inputs.
 """
+
 import os
 import re
 import sys
@@ -31,6 +33,17 @@ RULES = [
     (r"noctalia(?!\.dev|-dev\b)", "terminusbar"),
 ]
 
+# Exact strings that must keep the upstream name: the keyring schema and attributes (renaming them would orphan
+# the stored secrets), the plugin-vote hash prefix and the OAuth client name. The general
+# rules above cannot tell them apart, so they are restored afterwards.
+KEEP = [
+    ("dev.terminusbar.Secret", "dev.noctalia.Secret"),
+    ('.application = "terminusbar"', '.application = "noctalia"'),
+    ('application == "terminusbar"', 'application == "noctalia"'),
+    ('"terminusbar-recommend-v1', '"noctalia-recommend-v1'),
+    ('"client":"terminusbar-shell"', '"client":"noctalia-shell"'),
+]
+
 COMPILED = [(re.compile(p), r) for p, r in RULES]
 
 
@@ -47,6 +60,9 @@ def is_text(data: bytes) -> bool:
 def main() -> int:
     root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
     for src, dst in RENAMES:
+        # A second run finds the paths already renamed.
+        if not (root / src).exists():
+            continue
         (root / dst).parent.mkdir(parents=True, exist_ok=True)
         os.rename(root / src, root / dst)
     for dirpath, dirnames, filenames in os.walk(root):
@@ -61,6 +77,8 @@ def main() -> int:
             text = data.decode("utf-8")
             for pattern, repl in COMPILED:
                 text = pattern.sub(repl, text)
+            for renamed, original in KEEP:
+                text = text.replace(renamed, original)
             if text.encode("utf-8") != data:
                 path.write_bytes(text.encode("utf-8"))
     return 0

@@ -38,6 +38,8 @@ A Hyprland desktop for Arch Linux: one settings file, one palette, and a set of 
 | ⁹ | **Login and lock** | Ly login screen build and its appearance, screensaver, laptop lock | `modules/login-ly` `config/hyprlock` `config/terminus-screensaver` |
 | ¹⁰ | **Zed** · **Strata** | Editor settings and theme; file manager stylesheet and sidebar icons | `config/zed` `config/strata` `lib/skins/` |
 
+How the parts connect, what is generated and which file to change for what: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 <a id="specimens"></a>
 ### `² specimens`
 
@@ -98,7 +100,7 @@ Read [`install.sh`](install.sh) first if you like; it is short and asks for sudo
 
 Running it again updates and relinks. Then log in to the *Hyprland (uwsm-managed)* session. Outputs come up at their preferred mode; to name a main monitor or set modes, see the comment in `config/hyprland/monitors.lua`.
 
-**Per machine.** Hardware that differs between machines goes in `config/hosts/<hostname>/hyprland/`: `monitors.lua` there replaces the default, `host.lua` is loaded after the input module and `host_bindings.lua` after the shared bindings. An empty file `config/hosts/<hostname>/autostart-omp` starts omp with the session.
+**Per machine.** What differs between machines goes in `config/hosts/<hostname>/`: `hyprland/monitors.lua` there replaces the default, `hyprland/host.lua` is loaded after the input module and `hyprland/host_bindings.lua` after the shared bindings; `hypridle.conf` replaces the generated idle configuration, and a file `secure-lock` makes locking authenticate (it needs a hyprlock build with `--ready-fd`, named by `TERMINUS_HYPRLOCK`; without it the screensaver blanks the screen but does not lock). [`docs/examples/hosts/laptop/`](docs/examples/hosts/laptop) is a worked example to copy. An empty file `config/hosts/<hostname>/autostart-omp` starts omp with the session.
 
 **Updating.** `terminus-update` pulls, rebuilds what changed and reloads. To run it after every pacman upgrade:
 
@@ -106,13 +108,15 @@ Running it again updates and relinks. Then log in to the *Hyprland (uwsm-managed
 sed "s/@USER@/$USER/g" ~/Projects/Terminus-Est/config/pacman/terminus-est.hook | sudo install -Dm644 /dev/stdin /etc/pacman.d/hooks/terminus-est.hook
 ```
 
-**Removing.** Everything the installer put in your home is a link into the repository, so removing it is three steps:
+**Removing.** Nearly everything the installer put in your home is a link into the repository, so removing it is three steps:
 
 ```sh
 systemctl --user stop 'terminus-*'
 find ~/.config ~/.local ~/Pictures/Wallpapers -lname "$HOME/Projects/Terminus-Est/*" -delete
 rm -rf ~/Projects/Terminus-Est        # your earlier files are in ~/.local/state/terminus-est/install-backup/
 ```
+
+Not links, so left behind: the import line in the two `gtk.css` files, the three include lines in `~/.config/ghostty/config`, the font in `~/.local/share/fonts`, the bar's own state in `~/.local/state/terminusbar` and, if you installed it, `/usr/local/libexec/terminus-login-apply`.
 
 **If something is off.** `journalctl --user -u terminus-bar -e` shows the bar's log, `hyprctl configerrors` the compositor's, and `terminus-settings validate` checks the settings file. The Hyprland plugins must match the installed Hyprland; `terminus-update` rebuilds them after an upgrade. Mood sounds are not included: copy the Mechvibes repository's `assets/sounds` to `~/.local/share/terminus-est/mood`.
 
@@ -173,7 +177,8 @@ Terminus-Est is released under the MIT licence (`LICENSE`), except where a direc
 - `modules/terminus-bar` is a fork of [noctalia](https://github.com/noctalia-dev/noctalia) (MIT); its `CREDITS.md` and `LICENSE` keep the original attribution.
 - `modules/desktop` is a fork of [Omarchy](https://github.com/basecamp/omarchy) (MIT).
 - `modules/terminus-launcher` derives from the [SekaiPop](https://github.com/Blapples/SekaiPop) shell (GPL-3.0, see its `LICENSE`).
-- `modules/hyprland-plugins/*` keep their upstream licences (MIT or BSD-3-Clause, see each `LICENSE` and `UPSTREAM`).
+- `modules/hyprland-plugins/*` keep their upstream licences (MIT or BSD-3-Clause, see each `LICENSE` and `UPSTREAM`); one shader, `hyprwindowshade/shaders/close/fire_close.glsl`, is GPL-3.0-or-later (`LICENSE.GPL-3.0` beside it).
+- `modules/terminus-bar-plugins/cat` (DotNetRob) and `noctwhspr` (goodroot) come from noctalia's [community plugins](https://github.com/noctalia-dev/community-plugins) (MIT as declared in each `plugin.toml`; see each `UPSTREAM`).
 - The launcher font is [Consoleet Terminus](https://inai.de/projects/consoleet/terminus) (OFL), downloaded by the installer.
 
 This repository is a snapshot of the maintainer's private one: Terminus-Est itself plus the Zed and Strata skins. Configuration for other programs, personal accounts, host configurations and media without a redistribution licence stay private. The Omarchy themes come without their wallpapers and previews, and the Omarchy web-app icons are left out; both are in the [Omarchy](https://github.com/basecamp/omarchy) repository. Some bindings in `config/hyprland/application_bindings.lua` start the maintainer's own programs (omp, Obsidian, rnote, hyprwhspr); they do nothing where those are not installed.

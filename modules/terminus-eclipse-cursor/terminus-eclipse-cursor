@@ -156,11 +156,13 @@ def install(acc_hex: str) -> None:
         sys.exit(f"terminus-eclipse-cursor: {link} exists and is not a symlink; refusing to replace it")
     tmp = sword.ICONS / f".{NAME}.tmp"
     tmp.unlink(missing_ok=True)
-    tmp.symlink_to(cache_path(acc_hex) / NAME)
+    target = cache_path(acc_hex)
+    tmp.symlink_to(target / NAME)
     os.replace(tmp, link)
     theme, size = sword.read_choice()
     if theme == NAME:
         sword.set_cursor(NAME, size)
+    sword.prune(cache_dir(), target, link)
 
 
 def cmd_preview(acc_hex: str, dest: Path) -> None:

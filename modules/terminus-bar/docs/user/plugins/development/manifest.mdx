@@ -30,7 +30,7 @@ exactly `MAJOR.MINOR.PATCH`, with non-negative decimal components and no leading
 and build suffixes are not accepted.
 
 `plugin_api` is a positive integer and gates enable, the catalog badge, and update safety. API levels are cumulative:
-leave the value unchanged until the plugin adopts a capability introduced by a newer level. Noctalia currently
+leave the value unchanged until the plugin adopts a capability introduced by a newer level. TerminusBar currently
 supports plugin APIs <PluginApiRange />; see
 [Plugin API Versions](/noctalia/plugins/development/plugin-api/) for the capability introduced by each level.
 
@@ -118,7 +118,7 @@ This removes only the whole-widget tint; the widget still receives clicks and sc
 
 ## Settings schema
 
-A setting becomes a typed control in the settings GUI and is read back via `noctalia.getConfig(key)`. Only declared keys
+A setting becomes a typed control in the settings GUI and is read back via `terminusbar.getConfig(key)`. Only declared keys
 resolve - reading an undeclared key logs a loud warning and returns `nil` (no silent fallbacks).
 
 Settings come in two scopes:
@@ -129,7 +129,7 @@ Settings come in two scopes:
 - **Widget entry settings** - a `[[<entry>.setting]]` block under a `[[widget]]`. These are edited with the bar widget's
   own settings. Use this for widget presentation tweaks; they are not a second enabled plugin instance.
 - **Panel entry settings** - a `[[panel.setting]]` block under a `[[panel]]`. These also appear in **Settings → Plugins**
-  (the gear on the plugin row) and are read with `noctalia.getConfig(key)` in the panel script.
+  (the gear on the plugin row) and are read with `terminusbar.getConfig(key)` in the panel script.
 
 When both declare the same key, the widget entry value wins for that widget. Both scopes use the same field schema:
 
@@ -155,7 +155,7 @@ entry = "widget.luau"
 ```
 
 The manifest only declares an entry's settings schema. Named widget instances, their configured values, and bar
-placement belong in the user's Noctalia configuration. See [Plugin widgets](/noctalia/bar/widgets/#plugin-widgets) for
+placement belong in the user's TerminusBar configuration. See [Plugin widgets](/noctalia/bar/widgets/#plugin-widgets) for
 that configuration.
 
 | Field | Notes |
@@ -175,7 +175,7 @@ that configuration.
 `extensions` to filter a `file` picker; users can still enter a path directly.
 
 `string_map` requires <PluginApiBadge feature="string-map-setting" />. It stores string keys associated with string values and is returned from
-`noctalia.getConfig()` as an associative Luau table. Its default is a TOML table:
+`terminusbar.getConfig()` as an associative Luau table. Its default is a TOML table:
 
 ```toml
 plugin_api = 6

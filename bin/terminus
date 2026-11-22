@@ -23,6 +23,7 @@ HELP = """Terminus-Est unified desktop
   terminus restart {bar,launcher,hypridle,swayosd}
                                           Idle restarts preserve a paused owner.
   terminus refresh {appearance,settings} [--dry-run]
+  terminus update [arguments]             Terminus-Est updater (bin/terminus-update)
   terminus compat HELPER [arguments]      Explicit desktop helper
   terminus GROUP COMMAND [arguments]      Other desktop operations
 Configuration: ~/.config/terminus-est; maintained helpers: modules/desktop.
@@ -34,7 +35,12 @@ HELPER_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
 # `compat PREFIX-REST` is the upstream spelling of the group command `PREFIX REST`.
 COMPAT_GROUP_PREFIXES = ("launch-", "restart-", "refresh-", "system-", "branding-")
 # Programs this repository owns, by group command (`terminus bar ...`).
-OWNED_PROGRAMS = {"bar": "terminus-bar", "launcher": "terminus-launcher", "screensaver": "terminus-screensaver"}
+OWNED_PROGRAMS = {
+    "bar": "terminus-bar",
+    "launcher": "terminus-launcher",
+    "screensaver": "terminus-screensaver",
+    "update": "terminus-update",  # not the Omarchy module's pacman updater
+}
 # `terminus launch TARGET ...` targets.
 LAUNCH_PROGRAMS = {
     "launcher": "terminus-launcher",
@@ -188,7 +194,7 @@ ROUTES = {
 
 
 def dispatch(args):
-    if not args or args[0] in ("-h", "--help", "commands"):
+    if not args or args[0] in ("-h", "--help"):
         print(HELP)
         return
     command, rest = args[0], args[1:]

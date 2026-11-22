@@ -565,6 +565,19 @@ def ensure_built(acc_hex: str) -> Path:
     return target
 
 
+def prune(root: Path, keep: Path, link: Path) -> None:
+    """Delete the other builds in ROOT: every accent change adds one. Keeps KEEP, the build LINK points at, and
+    in-flight `.build-*` directories. Callers hold the state lock, so no other install can be mid-switch."""
+    try:
+        linked = link.resolve().parent
+    except OSError:
+        linked = keep
+    for entry in root.iterdir():
+        if entry.name.startswith(".") or entry in (keep, linked) or not entry.is_dir() or entry.is_symlink():
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+
+
 def read_choice() -> tuple[str, int]:
     """(theme, size) last chosen with `use`; the sword at the default size until then."""
     try:
@@ -597,6 +610,7 @@ def install(acc_hex: str) -> None:
     theme, size = read_choice()
     if theme == NAME:
         set_cursor(NAME, size)
+    prune(CACHE, target, link)
 
 
 def cmd_preview(acc_hex: str, dest: Path) -> None:

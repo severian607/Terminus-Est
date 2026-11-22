@@ -1,0 +1,41 @@
+#!/bin/bash
+# Automatic shutdown (the control centre's Auto-Off shortcut): schedule a poweroff or cancel the scheduled one.
+#   terminus-shutdown-timer                   pick a delay from a menu
+#   terminus-shutdown-timer --choice LABEL    the same without the menu (LABEL as shown in it)
+# The timer is a transient systemd user unit; the bar reads its unit file to show the time left.
+set -euo pipefail
+
+unit="terminus-auto-shutdown"
+cancel="Cancel scheduled shutdown"
+bar="$(dirname "$(readlink -f "$0")")/terminus-bar"
+
+stop_timer() {
+  systemctl --user stop "$unit.timer" "$unit.service" 2>/dev/null || true
+  systemctl --user reset-failed "$unit.timer" "$unit.service" 2>/dev/null || true
+}
+
+if [[ ${1:-} == --choice && -n ${2:-} ]]; then
+  choice=$2
+else
+  choice=$(printf '%s\n' '15 minutes' '30 minutes' '1 hour' '2 hours' '3 hours' "$cancel" |
+    "$bar" dmenu --prompt 'Automatic shutdown') || exit 0
+fi
+
+case "$choice" in
+  '15 minutes') delay=15m ;;
+  '30 minutes') delay=30m ;;
+  '1 hour') delay=1h ;;
+  '2 hours') delay=2h ;;
+  '3 hours') delay=3h ;;
+  "$cancel")
+    stop_timer
+    notify-send 'Automatic shutdown' 'Scheduled shutdown cancelled.'
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+
+stop_timer
+systemd-run --user --unit="$unit" --on-active="$delay" --collect \
+  --description='Terminus-Est automatic shutdown' /usr/bin/systemctl poweroff
+notify-send 'Automatic shutdown' "Shutdown scheduled in $choice."

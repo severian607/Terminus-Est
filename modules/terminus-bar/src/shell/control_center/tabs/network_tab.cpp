@@ -625,11 +625,11 @@ NetworkTab::NetworkTab(
 )
     : m_network(network), m_secrets(secrets), m_externalIpService(externalIp), m_modem(modem), m_quick(quick),
       m_monitor(monitor), m_clipboard(clipboard) {
-  if (m_secrets != nullptr) {
-    m_secrets->setRequestCallback([this](const NetworkSecretAgent::SecretRequest& request) {
-      showPasswordPrompt(request);
-      PanelManager::instance().refresh();
-    });
+  // The control-center tab is the default receiver, as before the quick panel existed; whichever tab is open
+  // takes the requests while it is (setActive).
+  if (!m_quick) {
+    s_defaultTab = this;
+    registerSecretCallback();
   }
   if (m_quick) {
     // Looked up once; the first lists are read now so the panel opens with them.
@@ -640,10 +640,30 @@ NetworkTab::NetworkTab(
   }
 }
 
+NetworkTab* NetworkTab::s_defaultTab = nullptr;
+const NetworkTab* NetworkTab::s_callbackOwner = nullptr;
+
+void NetworkTab::registerSecretCallback() {
+  if (m_secrets == nullptr) {
+    return;
+  }
+  s_callbackOwner = this;
+  m_secrets->setRequestCallback([this](const NetworkSecretAgent::SecretRequest& request) {
+    showPasswordPrompt(request);
+    PanelManager::instance().refresh();
+  });
+}
+
 NetworkTab::~NetworkTab() {
   *m_alive = false;
+  if (s_defaultTab == this) {
+    s_defaultTab = nullptr;
+  }
   if (m_secrets != nullptr) {
-    m_secrets->setRequestCallback(nullptr);
+    if (s_callbackOwner == this) {
+      s_callbackOwner = nullptr;
+      m_secrets->setRequestCallback(nullptr);
+    }
     m_secrets->cancelSecret();
   }
 }
@@ -763,6 +783,11 @@ void NetworkTab::setActive(bool active) {
     return;
   }
   m_active = active;
+  if (m_active) {
+    registerSecretCallback();
+  } else if (m_quick && s_defaultTab != nullptr) {
+    s_defaultTab->registerSecretCallback();
+  }
   if (m_quick) {
     if (m_active) {
       // The monitor samples on its own cadence; a 1 Hz tick follows link, traffic and Wi-Fi, and drives the
@@ -821,6 +846,20 @@ void NetworkTab::doUpdate(Renderer& renderer) {
 }
 
 void NetworkTab::onClose() {
+  // A quick panel reopening at another height keeps what the user is in the middle of: the open menu, the armed
+  // item, row notes, the join attempt, the pending access point and the half-typed password.
+  const bool resizing = m_quick && quickPanelResizing();
+  if (resizing) {
+    if (m_qPwInput != nullptr) {
+      m_qResumePassword = m_qPwInput->value();
+      const InputDispatcher* dispatcher = inputDispatcher();
+      if (dispatcher != nullptr && dispatcher->focusedArea() == m_qPwInput->inputArea()) {
+        m_qFocusPassword = true;
+      }
+    }
+  } else {
+    forgetQuick();
+  }
   resetQuick();
   m_rootLayout = nullptr;
   m_currentCard = nullptr;
@@ -852,7 +891,9 @@ void NetworkTab::onClose() {
   m_apRows.clear();
   m_lastStructureKey.clear();
   m_lastListWidth = -1.0F;
-  m_pendingAccessPoint.reset();
+  if (!resizing) {
+    m_pendingAccessPoint.reset();
+  }
   m_active = false;
   m_actionPending = false;
   m_actionPendingTimer.stop();
@@ -2343,16 +2384,16 @@ std::vector<QRow> NetworkTab::quickTailscaleRows(std::chrono::steady_clock::time
     if (!peer.exitOption || number >= kMaxExitNodes) {
       continue;
     }
-    exit.menu.push_back(
-        makeItem("x" + std::to_string(number), std::format("{} {}", number + 1, clip(peer.name, kExitNameChars)), 0)
-    );
+    exit.menu.push_back(makeItem(
+        "x" + std::to_string(number), std::format("{} {}", number + 1, escapeMarkup(clip(peer.name, kExitNameChars))), 0
+    ));
     ++number;
   }
   exit.menu.push_back(makeItem("none", "none", 0));
   rows.push_back(std::move(exit));
   for (const auto& peer : m_qTs.peers) {
     QRow row;
-    row.id = "p:" + peer.name;
+    row.id = "p:" + peer.id;
     row.name = peer.name;
     const std::string dot = peer.online ? colorSpan(ColorRole::Primary, "●") : dimSpan("○");
     const std::string ip = peer.online ? escapeMarkup(peer.ip) : dimSpan(netq::lastSeenText(peer.lastSeen));
@@ -2743,9 +2784,9 @@ void NetworkTab::quickEnter() {
     m_qMenuId = id;
     quickRequestUpdate();
   } else if (id.starts_with("p:")) {
-    const std::string name = id.substr(2);
+    const std::string peerId = id.substr(2);
     for (const auto& peer : m_qTs.peers) {
-      if (peer.name == name) {
+      if (peer.id == peerId) {
         quickCopy(id, peer.ip);
         return;
       }
@@ -3024,10 +3065,10 @@ void NetworkTab::quickRunTailscaleItem(const std::string& rowId, const std::stri
         }
       }
     }
-  } else if (itemId == "copy") { // "p:<peer>"
-    const std::string name = rowId.substr(2);
+  } else if (itemId == "copy") { // "p:<peer id>"
+    const std::string peerId = rowId.substr(2);
     for (const auto& peer : m_qTs.peers) {
-      if (peer.name == name) {
+      if (peer.id == peerId) {
         quickCopy(rowId, peer.ip);
         break;
       }
@@ -3185,9 +3226,9 @@ void NetworkTab::settleWifiToggle(const NetworkState& state) {
   }
 }
 
+// Drops everything that points into the panel's widgets, so the next create() builds from scratch.
 void NetworkTab::resetQuick() {
   m_qPollTimer.stop();
-  m_qArmTimer.stop();
   m_qHeroMain = nullptr;
   m_qHeroDim = nullptr;
   m_qLatency = nullptr;
@@ -3206,19 +3247,25 @@ void NetworkTab::resetQuick() {
   m_qKeywords.clear();
   m_qBodyKey.clear();
   m_qHeightKey.clear();
+  m_qSelHasMenu = false;
+  m_qMenuKeys.clear();
+  m_qTrafficDirty = true;
+  m_qGraphWidth = 0.0F;
+  m_qHeldKey = 0;
+  m_qLastPoll = {};
+}
+
+// What the user was in the middle of; dropped when the panel really closes, kept across a resize reopen.
+void NetworkTab::forgetQuick() {
+  m_qArmTimer.stop();
   m_qMenuId.clear();
   m_qArmed.clear();
   m_qNotes.clear();
   m_qWinStart.clear();
-  m_qSelHasMenu = false;
-  m_qMenuKeys.clear();
   m_qPwOwner.clear();
   m_qAttempt.reset();
-  m_qTrafficDirty = true;
   m_qFocusPassword = false;
-  m_qGraphWidth = 0.0F;
-  m_qHeldKey = 0;
-  m_qLastPoll = {};
+  m_qResumePassword.clear();
 }
 
 std::unique_ptr<Flex> NetworkTab::buildQuickHero(float scale) {
@@ -3385,7 +3432,8 @@ void NetworkTab::doLayoutQuick(Renderer& renderer, float contentWidth, float bod
 
 // Drops the old rows and returns the password typed so far; keeps the field focused across the rebuild.
 std::string NetworkTab::quickClearBody() {
-  std::string carried;
+  std::string carried = std::move(m_qResumePassword);
+  m_qResumePassword.clear();
   if (m_qPwInput != nullptr) {
     carried = m_qPwInput->value();
     const InputDispatcher* dispatcher = inputDispatcher();

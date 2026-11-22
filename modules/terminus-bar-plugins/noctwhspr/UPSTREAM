@@ -1,0 +1,6 @@
+url: https://github.com/noctalia-dev/community-plugins (noctwhspr/)
+author: goodroot
+license: MIT (as declared in plugin.toml; the upstream repository carries no licence file)
+changes:
+  - renamed for Terminus-Bar's plugin API (terminusbar.* instead of noctalia.*)
+  - the update interval is set once at load

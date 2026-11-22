@@ -3,7 +3,54 @@
 -- # Keep user-openable opacity rules together below. Rule order is significant.
 local home = assert(os.getenv("HOME"), "HOME is required")
 local appearance_path = home .. "/.config/terminus-est/generated/appearance.lua"
-local appearance = dofile(appearance_path)
+
+-- # Built-in values, equal to the defaults in lib/settings.py. They keep the rest of the configuration (and with it
+-- # the autostart that brings up the bar) loading when the generated file is missing or broken.
+local appearance_defaults = {
+  background_opacity = 0.42,
+  active_opacity = 1.0,
+  inactive_opacity = 0.97,
+  default_active_opacity = 0.97,
+  default_inactive_opacity = 0.9,
+  global_active_opacity = 0.97,
+  global_inactive_opacity = 0.95,
+  blur = true,
+  blur_strength = 6,
+  brightness = 0.42,
+  contrast = 0.87,
+  dim_inactive = false,
+  dim_strength = 0.5,
+  bar_opacity = 1.0,
+  background = "#0b0b0b",
+  accent = "#86d993",
+  active_border = "#86d993",
+  inactive_border = "#262626",
+  foreground = "#ececec",
+  muted = "#8c8c8c",
+  alert = "#e8a07a",
+  glass_opacity = 0.46,
+  chrome_opacity = 0.28,
+  popover_opacity = 0.9,
+  ui_font = "MonaspiceNe Nerd Font",
+}
+local appearance_warned = false
+local function load_appearance()
+  local loaded_ok, loaded = pcall(dofile, appearance_path)
+  if loaded_ok and type(loaded) == "table" then
+    appearance_warned = false
+    return setmetatable(loaded, { __index = appearance_defaults })
+  end
+  if not appearance_warned then
+    appearance_warned = true
+    hl.notification.create({
+      text = "Terminus-Est: generated/appearance.lua is missing or broken; using built-in looks. Run terminus-settings apply.",
+      timeout = 10000,
+      icon = "warning",
+    })
+  end
+  return appearance_defaults
+end
+local appearance = load_appearance()
 local function rgba(color, alpha)
   return "rgba(" .. color:sub(2) .. alpha .. ")"
 end
@@ -15,7 +62,7 @@ end
 -- # `hyprctl eval` when only colours changed, so a wallpaper change recolours the
 -- # borders without reloading the configuration (a reload drops runtime state).
 function o.apply_colors()
-  local colors = dofile(appearance_path)
+  local colors = load_appearance()
   -- # Recessed edge (after denonmaryland/omarchy-dotfiles, dark variant): a black cut along the
   -- # top fading to a faint lit lower lip, plus a soft inner glow of black that sinks the window.
   local function a8(alpha)
