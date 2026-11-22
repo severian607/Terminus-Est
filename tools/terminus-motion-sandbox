@@ -14,6 +14,7 @@ usage: terminus-motion-sandbox start NAME            start a sandbox (NAME: 1-8 
        terminus-motion-sandbox ctl NAME ARGS...      hyprctl inside the sandbox
        terminus-motion-sandbox run NAME CMD...       run a client inside the sandbox
        terminus-motion-sandbox record NAME FILE SEC  record the sandbox output for SEC seconds (60 fps, 960x540)
+       terminus-motion-sandbox film NAME FILE SEC    like record, from the real session: the clip includes the sandbox's screen shader
        terminus-motion-sandbox log NAME              path of the sandbox Hyprland log
 Extra Lua for a sandbox goes in /tmp/tms-NAME/extra.lua (loaded last); apply it with: ctl NAME reload
 EOF
@@ -182,6 +183,17 @@ case "$cmd" in
       ffmpeg -v error -y -framerate "$fps" -i "$frames/%05d.ppm" -an -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p "$1"
       rm -rf "$frames"
     fi
+    ;;
+  film)
+    # The compositor gives its own clients an unshaded copy of the frame; the sandbox window on the hidden output
+    # of the real session shows the shaded one.
+    (( $# == 2 )) || usage
+    inner true
+    wf-recorder -y -o "$output" -f "$1" -r 60 >/dev/null 2>&1 &
+    recorder=$!
+    sleep "$2"
+    kill -INT "$recorder"
+    wait "$recorder" 2>/dev/null || true
     ;;
   log) inner sh -c 'echo "$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/hyprland.log"' ;;
   *) usage ;;

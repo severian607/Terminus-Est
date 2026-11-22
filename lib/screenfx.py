@@ -40,6 +40,7 @@ stack_file = state_dir / "screen-fx.stack"
 frag_file = state_dir / "screen-fx.frag"
 damage_file = state_dir / "screen-fx.damage"
 obsolete_flag = state_dir / "screen-fx"
+preview_dir = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "terminus-screenfx/previews"
 
 PROLOGUE = (
     "#version 300 es\n"
@@ -88,6 +89,10 @@ class Effect:
         self.animated = meta.get("animated", "no").lower() == "yes"
         self.samples = meta.get("samples", "no").lower() == "yes"
         self.raw = meta.get("raw", "no").lower() == "yes"
+
+    @property
+    def preview(self):
+        return preview_dir / f"{self.name}.mp4"
 
     def warnings(self):
         out = []
@@ -328,6 +333,7 @@ def list_effects(effects=None):
             "active": e.name in stack,
             "position": stack.index(e.name) + 1 if e.name in stack else None,
             "shadowed": e.name in shadowed,
+            "preview": str(e.preview) if e.preview.exists() else "",
         })
     return {"categories": CATEGORIES, "groups": GROUPS, "effects": rows}
 

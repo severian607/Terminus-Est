@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Record the preview clips shown in the screen shader picker (Super+D).
+
+usage: terminus-screenfx-previews [--force] [NAME...]
+
+Every shader is activated alone in the hidden sandbox (tools/terminus-motion-sandbox) over the wallpaper and two
+demo windows, filmed from the real session, and stored as ~/.cache/terminus-screenfx/previews/<name>.mp4.
+Nothing is loaded into the real session. Without NAME, shaders that already have a clip are skipped; --force
+records them again.
+"""
+
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+project = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(project / "lib"))
+import screenfx  # noqa: E402
+from motion_sandbox import TOOLS, Sandbox  # noqa: E402
+
+NAME = "fxpre"
+# Two floating demo windows over the wallpaper, so colour and distortion shaders have something to work on.
+SCENE = """
+hl.config({ debug = { damage_tracking = 0 } })  -- shaders that read `time` need it, set before the first one loads
+hl.window_rule({ match = { title = "^Motion demo 1$" }, float = true, size = { 380, 270 }, move = { 50, 60 } })
+hl.window_rule({ match = { title = "^Motion demo 2$" }, float = true, size = { 380, 270 }, move = { 500, 220 } })
+"""
+SETTLE = 0.7  # the compositor compiles the shader on the next frame
+sb = Sandbox(NAME, SCENE)
+
+
+def record(effect, effects):
+    shader = Path(f"/tmp/tms-{NAME}/{effect.name}.frag")  # a new path per effect: Hyprland reloads a shader by path
+    shader.write_text(screenfx.compose([effect.name], effects))
+    sb.eval(f'hl.config({{ decoration = {{ screen_shader = "{shader}" }} }})')
+    time.sleep(SETTLE)
+    with tempfile.TemporaryDirectory() as tmp:
+        raw = Path(tmp) / "raw.mp4"
+        with sb.recording(raw, 4.0 if effect.animated else 2.0, "film"):
+            pass
+        effect.preview.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", raw, "-an", "-vf", "fps=30,scale=640:360:flags=lanczos",
+                        "-c:v", "libx264", "-preset", "slow", "-crf", "24", "-pix_fmt", "yuv420p", effect.preview],
+                       check=True)
+    shader.unlink()
+
+
+def main(argv):
+    force = "--force" in argv
+    names = [a for a in argv if a != "--force"]
+    if any(a.startswith("-") for a in names):
+        print(__doc__, file=sys.stderr)
+        return 2
+    effects = screenfx.load_effects()
+    try:
+        screenfx.known(names, effects)
+    except screenfx.FxError as error:
+        print(f"terminus-screenfx-previews: {error}", file=sys.stderr)
+        return 2
+    targets = [effects[n] for n in names] or [e for e in effects.values() if force or not e.preview.exists()]
+    if not targets:
+        print("every shader already has a preview; use --force to record again")
+        return 0
+    failed = []
+    with sb:
+        demo = sb.spawn(TOOLS / "terminus-motion-demo-windows", "hold", 2, 3600)
+        try:
+            sb.wait_for_clients(2)
+            sb.dispatch("hl.dsp.cursor.move({ x = 958, y = 538 })")  # park the pointer out of the picture
+            for effect in targets:
+                try:
+                    record(effect, effects)
+                    print(f"recorded {effect.name}")
+                except (RuntimeError, subprocess.SubprocessError, OSError) as error:
+                    failed.append(effect.name)
+                    print(f"FAILED   {effect.name}: {error}", file=sys.stderr)
+        finally:
+            demo.terminate()
+            demo.wait()
+    if failed:
+        print("no preview for: " + ", ".join(failed), file=sys.stderr)
+    return 1 if failed else 0
+
+
+sys.exit(main(sys.argv[1:]))

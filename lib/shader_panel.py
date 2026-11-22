@@ -5,6 +5,7 @@ import ctypes
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -24,7 +25,7 @@ BIN = Path(__file__).resolve().parent.parent / "bin"
 PROFILES = {
     "shaders": {"app_id": "local.terminus.Shaders", "namespace": "terminus-shaders",
                 "window_title": "Terminus-Est Shaders", "frame_title": "[ screen shaders ]",
-                "cli": str(BIN / "terminus-screenfx"),
+                "cli": str(BIN / "terminus-screenfx"), "preview": True, "width": 1420,
                 "footer": "Enter  Use only this     Ctrl+Enter  Add to stack     Ctrl+Backspace  Off"
                           "     Tab  Category     Esc  Close"},
     "keysounds": {"app_id": "local.terminus.Keysounds", "namespace": "terminus-keysounds",
@@ -87,10 +88,44 @@ def make_label(css, text="", **kwargs):
     return label
 
 
+class ClipRun:
+    """One ffmpeg decode of a clip. A reader thread owns the blocking pipe reads so the UI thread never waits on ffmpeg."""
+
+    def __init__(self, proc, frame_bytes):
+        self.proc = proc
+        self.frame = None  # newest frame not yet shown
+        self.ended = False
+        self.taken = threading.Event()
+        threading.Thread(target=self.read, args=(frame_bytes,), daemon=True).start()
+
+    def read(self, frame_bytes):
+        while not self.ended:
+            frame = self.proc.stdout.read(frame_bytes)
+            if len(frame) < frame_bytes:
+                break
+            self.taken.clear()
+            self.frame = frame
+            self.taken.wait()  # the pipe's back-pressure keeps ffmpeg at the display rate
+        self.ended = True
+        self.proc.wait()
+        self.proc.stdout.close()
+
+    def take(self):
+        frame, self.frame = self.frame, None
+        self.taken.set()
+        return frame
+
+    def kill(self):
+        self.ended = True
+        self.proc.kill()
+        self.taken.set()
+
+
 class ClipPlayer:
     """Loops a short clip in a Gtk.Picture: ffmpeg decodes raw frames into a pipe, a timer shows them.
 
-    GTK here has no media backend, and the pipe's back-pressure keeps ffmpeg at the display rate.
+    GTK here has no media backend. ffmpeg needs about 300 ms to produce its first frame, so a ClipRun reads it
+    on a thread; the previous clip stays on screen until the new one has a frame.
     """
 
     WIDTH, HEIGHT, FPS = 480, 270, 30
@@ -98,41 +133,46 @@ class ClipPlayer:
     def __init__(self, picture):
         self.picture = picture
         self.path = ""
-        self.proc = None
+        self.run = None
         self.timer = 0
 
     def play(self, path):
-        if path == self.path and self.proc:
+        if path == self.path and self.run:
             return
-        self.stop()
+        self.halt()
         self.path = path
         if not path:
+            self.picture.set_paintable(None)
             return
-        self.proc = subprocess.Popen(
+        proc = subprocess.Popen(
             ["ffmpeg", "-v", "quiet", "-stream_loop", "-1", "-i", path, "-an",
              "-vf", f"scale={self.WIDTH}:{self.HEIGHT},fps={self.FPS}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+        self.run = ClipRun(proc, self.WIDTH * self.HEIGHT * 3)
         self.timer = GLib.timeout_add(1000 // self.FPS, self.tick)
 
     def tick(self):
-        frame = self.proc.stdout.read(self.WIDTH * self.HEIGHT * 3)
-        if len(frame) < self.WIDTH * self.HEIGHT * 3:
+        frame = self.run.take()
+        if frame:
+            self.picture.set_paintable(Gdk.MemoryTexture.new(
+                self.WIDTH, self.HEIGHT, Gdk.MemoryFormat.R8G8B8, GLib.Bytes.new(frame), self.WIDTH * 3))
+        elif self.run.ended:
             self.timer = 0
             self.stop()
             return False
-        self.picture.set_paintable(Gdk.MemoryTexture.new(
-            self.WIDTH, self.HEIGHT, Gdk.MemoryFormat.R8G8B8, GLib.Bytes.new(frame), self.WIDTH * 3))
         return True
 
-    def stop(self):
+    def halt(self):
         if self.timer:
             GLib.source_remove(self.timer)
             self.timer = 0
-        if self.proc:
-            self.proc.kill()
-            self.proc.wait()
-            self.proc = None
+        if self.run:
+            self.run.kill()
+            self.run = None
         self.path = ""
+
+    def stop(self):
+        self.halt()
         self.picture.set_paintable(None)
 
 
@@ -637,8 +677,13 @@ class ShaderPanel(Gtk.Application):
             return False
         self.preview_name.set_label(f"{d['emoji']}  {d['label']}")
         self.preview_desc.set_label(d["description"])
-        lines = [f"category  {d['category']}", f"replaces  other {d.get('slot', '')} entries",
-                 f"source    {source_host(d)} · {d['license']}"]
+        lines = [f"category  {d['category']}"]
+        if "slot" in d:
+            lines.append(f"replaces  other {d['slot']} entries")
+        traits = [f for f in d["flags"] if f not in ("plugin", "default")]
+        if traits:
+            lines.append(f"traits    {' · '.join(traits)}")
+        lines.append(f"source    {source_host(d)} · {d['license']}")
         if "plugin" in d["flags"]:
             lines.append("needs     a Hyprland plugin (modules/hyprland-plugins)")
         self.preview_meta.set_label("\n".join(lines))

@@ -56,10 +56,10 @@ index 86f44b4..d667185 100644
  auth_fails = 10
 diff --git a/src/Constellation.zig b/src/Constellation.zig
 new file mode 100644
-index 0000000..dcbea65
+index 0000000..2448f4d
 --- /dev/null
 +++ b/src/Constellation.zig
-@@ -0,0 +1,460 @@
+@@ -0,0 +1,464 @@
 +// Terminus-Est: constellation password indicator.
 +//
 +// Every typed character adds one star to a constellation in the sky around the
@@ -245,10 +245,14 @@ index 0000000..dcbea65
 +    return x >= self.ex0 and x < self.ex1 and y >= self.ey0 and y < self.ey1;
 +}
 +
++/// First row below the boot-log ticker (the ticker sits at the top of the screen).
++fn topLimit(self: *const Constellation) i32 {
++    return if (self.avoid_ticker) @intCast(common.tickerRows(self.buffer.height) + 1) else 1;
++}
++
 +fn bottomLimit(self: *const Constellation) i32 {
 +    const h: i32 = @intCast(self.buffer.height);
-+    const reserved: i32 = if (self.avoid_ticker) @intCast(common.tickerRows(self.buffer.height) + 1) else 0;
-+    return h - 1 - reserved;
++    return h - 1;
 +}
 +
 +/// The sky is the top right of the screen, away from the sun on the left: stars gather
@@ -258,7 +262,7 @@ index 0000000..dcbea65
 +    const x0 = @divTrunc(w * 45, 100);
 +    const bottom = self.bottomLimit();
 +    const y1 = @divTrunc(bottom * 55, 100);
-+    if (x < x0 or x > w - 1 - @max(1, @divTrunc(w, 20)) or y < 1 or y > y1) return false;
++    if (x < x0 or x > w - 1 - @max(1, @divTrunc(w, 20)) or y < self.topLimit() or y > y1) return false;
 +    return !self.inBox(x, y);
 +}
 +
@@ -522,16 +526,15 @@ index 0000000..dcbea65
 +}
 diff --git a/src/animations/Terminus.zig b/src/animations/Terminus.zig
 new file mode 100644
-index 0000000..d2aa478
+index 0000000..067b74b
 --- /dev/null
 +++ b/src/animations/Terminus.zig
-@@ -0,0 +1,660 @@
+@@ -0,0 +1,641 @@
 +// Terminus-Est background animation: a terminal-aesthetic night sky.
 +//
 +//  * sparse dim stars (. · ˙) that twinkle and drift very slowly
 +//  * an occasional shooting star
-+//  * a faint horizontal scan band travelling down the screen (CRT refresh)
-+//  * a dim boot-log ticker at the bottom rows that types out lines and scrolls
++//  * a dim boot-log ticker in the top rows that types out lines and scrolls
 +//
 +// All colours are derived from the configured fg / border_fg (accent) / bg.
 +// Everything is a function of the clock, so the cost per frame is bounded by
@@ -573,9 +576,6 @@ index 0000000..d2aa478
 +    kind: LineKind = .kernel,
 +    prefix_len: usize = 0, // bytes of timestamp / status prefix
 +};
-+
-+const band_strength = [_]f32{ 0.10, 0.06, 0.035, 0.015 };
-+const band_period_ms: i64 = 8000;
 +
 +const kernel_msgs = [_][]const u8{
 +    "acpi: pci root bridge [pci0000:00] ready",
@@ -753,13 +753,6 @@ index 0000000..d2aa478
 +
 +// ---------------------------------------------------------------- helpers
 +
-+fn bgAt(self: *const Terminus, y: i32, band_head: i32) u32 {
-+    if (!self.full_color) return self.bg;
-+    const d = band_head - y;
-+    if (d < 0 or d >= band_strength.len) return self.bg;
-+    return common.mix(self.bg, self.accent, band_strength[@intCast(d)]);
-+}
-+
 +fn put(self: *const Terminus, x: i32, y: i32, ch: u21, fg: u32, bg: u32) void {
 +    self.terminal_buffer.setCellBoundsChecked(x, y, Cell.init(ch, fg, bg));
 +}
@@ -836,9 +829,8 @@ index 0000000..d2aa478
 +    }
 +}
 +
-+fn drawTicker(self: *Terminus, now: i64, band_head: i32) void {
++fn drawTicker(self: *Terminus, now: i64) void {
 +    const w: i32 = @intCast(self.terminal_buffer.width);
-+    const h: i32 = @intCast(self.terminal_buffer.height);
 +    const rows: i32 = @intCast(common.tickerRows(self.terminal_buffer.height));
 +    if (rows == 0 or w < 12) return;
 +
@@ -848,16 +840,19 @@ index 0000000..d2aa478
 +    const stamp_col = self.dimmed(self.fg, 0.2);
 +    const ok_col = self.dimmed(self.accent, 0.75);
 +
-+    const bottom: i32 = h - 2; // last row stays free for the key hints / version
-+    var r: i32 = 0;
-+    while (r < rows) : (r += 1) {
-+        const li: i32 = @as(i32, @intCast(self.line_count)) - 1 - r;
-+        if (li < 0) break;
++    // Row 0 stays free for Ly's key hints; the log fills downwards from row 1,
++    // oldest line on top, like a console scrolling up.
++    const top: i32 = 1;
++    const count: i32 = @intCast(self.line_count);
++    const first = @max(0, count - rows);
++    var li: i32 = first;
++    while (li < count) : (li += 1) {
 +        const line = &self.lines[@intCast(li)];
-+        const y = bottom - r;
++        const r = count - 1 - li; // 0 = newest
++        const y = top + (li - first);
 +        const is_current = r == 0 and self.typing;
 +        const len = if (r == 0) @min(self.current_shown, line.len) else line.len;
-+        const bg = self.bgAt(y, band_head);
++        const bg = self.bg;
 +
 +        // Older lines fade a little towards the top.
 +        const fade: f32 = 1.0 - @as(f32, @floatFromInt(r)) * 0.09;
@@ -895,7 +890,9 @@ index 0000000..d2aa478
 +        self.shoot_vx = if (rightwards) speed else -speed;
 +        self.shoot_vy = speed * (0.22 + rand.float(f32) * 0.25);
 +        self.shoot_x = if (rightwards) rand.float(f32) * w * 0.5 else w * 0.5 + rand.float(f32) * w * 0.5;
-+        self.shoot_y = rand.float(f32) * h * 0.35;
++        // Start below the boot-log rows.
++        const sky_top: f32 = @floatFromInt(common.tickerRows(self.terminal_buffer.height) + 1);
++        self.shoot_y = sky_top + rand.float(f32) * h * 0.3;
 +        return;
 +    }
 +
@@ -909,7 +906,7 @@ index 0000000..d2aa478
 +    }
 +}
 +
-+fn drawShootingStar(self: *const Terminus, now: i64, band_head: i32) void {
++fn drawShootingStar(self: *const Terminus, now: i64) void {
 +    if (!self.shoot_active) return;
 +    const t: f32 = @floatFromInt(now - self.shoot_start);
 +    const trail = 9;
@@ -926,7 +923,7 @@ index 0000000..d2aa478
 +        else
 +            self.dimmed(common.mix(self.fg, self.accent, 0.5), 0.15 + 0.6 * level);
 +        if (!self.full_color and k > 2) continue;
-+        self.put(x, y, glyph, col, self.bgAt(y, band_head));
++        self.put(x, y, glyph, col, self.bg);
 +    }
 +}
 +
@@ -938,8 +935,10 @@ index 0000000..d2aa478
 +const Scene = struct {
 +    /// First grass row.
 +    horizon: i32,
-+    /// Last grass row (the ticker rows and the key-hint row stay below).
++    /// Last grass row: the bottom of the screen.
 +    ground_bottom: i32,
++    /// First row below the boot-log ticker; nothing else is drawn above it.
++    sky_top: i32,
 +};
 +
 +const blood: u32 = 0x007A3028;
@@ -970,9 +969,9 @@ index 0000000..d2aa478
 +    const w: i32 = @intCast(self.terminal_buffer.width);
 +    if (h < 24 or w < 60) return null;
 +    const tr: i32 = @intCast(common.tickerRows(self.terminal_buffer.height));
-+    const ground_bottom = h - 2 - tr;
++    const ground_bottom = h - 1;
 +    const gh = std.math.clamp(@divTrunc(h, 6), 3, 9);
-+    return .{ .ground_bottom = ground_bottom, .horizon = ground_bottom - gh + 1 };
++    return .{ .ground_bottom = ground_bottom, .horizon = ground_bottom - gh + 1, .sky_top = tr + 1 };
 +}
 +
 +fn hash2(x: i32, y: i32) u32 {
@@ -998,7 +997,7 @@ index 0000000..d2aa478
 +}
 +
 +/// The sun: a dull disc that breathes, flickers and never quite goes out.
-+fn drawSun(self: *const Terminus, sc: Scene, t_ms: i64, t_s: f32, band_head: i32) void {
++fn drawSun(self: *const Terminus, sc: Scene, t_ms: i64, t_s: f32) void {
 +    const g = self.sunGeometry(sc);
 +    var life: f32 = 0.78 + 0.14 * @sin(t_s * 0.9) + 0.08 * @sin(t_s * 3.7 + 1.3);
 +    if (@mod(t_ms, 9000) < 160) life *= 0.6;
@@ -1007,7 +1006,7 @@ index 0000000..d2aa478
 +    const rx = g.ry * 2;
 +    var y = g.cy - g.ry * 2 - 1;
 +    while (y <= g.cy + g.ry * 2 + 1) : (y += 1) {
-+        if (y < 0 or y >= sc.horizon) continue;
++        if (y < sc.sky_top or y >= sc.horizon) continue;
 +        var x = g.cx - rx * 2 - 2;
 +        while (x <= g.cx + rx * 2 + 2) : (x += 1) {
 +            const dx = @as(f32, @floatFromInt(x - g.cx)) / 2.0;
@@ -1021,14 +1020,14 @@ index 0000000..d2aa478
 +                k = 0.14 * life * f * f;
 +            }
 +            if (k < 0.02) continue;
-+            const base = self.bgAt(y, band_head);
++            const base = self.bg;
 +            self.put(x, y, ' ', base, self.blend(base, self.accent, k));
 +        }
 +    }
 +}
 +
 +/// Blood running from the lower rim of the sun down to the grass.
-+fn drawBleed(self: *const Terminus, sc: Scene, t_ms: i64, band_head: i32) void {
++fn drawBleed(self: *const Terminus, sc: Scene, t_ms: i64) void {
 +    if (!self.full_color) return;
 +    const g = self.sunGeometry(sc);
 +    const rx: f32 = @floatFromInt(g.ry * 2);
@@ -1057,7 +1056,7 @@ index 0000000..d2aa478
 +            const y = start_y + 1 + j;
 +            const fall = @as(f32, @floatFromInt(j)) / @as(f32, @floatFromInt(@max(len, 1)));
 +            const k = 0.55 * (1.0 - 0.5 * fall) * fade;
-+            const base = self.bgAt(y, band_head);
++            const base = self.bg;
 +            const glyph: u21 = if (j == len - 1 and u < 0.7) 0x2022 else 0x2502;
 +            self.put(x, y, glyph, common.mix(base, blood, k), base);
 +        }
@@ -1065,12 +1064,12 @@ index 0000000..d2aa478
 +}
 +
 +/// The sword from the fastfetch logo, planted blade-down in the field.
-+fn drawSword(self: *const Terminus, sc: Scene, t_ms: i64, band_head: i32) void {
++fn drawSword(self: *const Terminus, sc: Scene, t_ms: i64) void {
 +    const w: i32 = @intCast(self.terminal_buffer.width);
 +    const hilt: i32 = hilt_rows.len;
 +    var blade: i32 = blade_letters.len;
-+    // Shorten the blade to fit under the top of the screen.
-+    while (blade >= 4 and sc.ground_bottom + 1 - (hilt + blade) < 2) blade -= 1;
++    // Shorten the blade so the hilt stays below the boot log.
++    while (blade >= 4 and sc.ground_bottom + 1 - (hilt + blade) < sc.sky_top + 1) blade -= 1;
 +    if (blade < 4) return;
 +
 +    const y0 = sc.ground_bottom + 1 - (hilt + blade);
@@ -1083,7 +1082,7 @@ index 0000000..d2aa478
 +            if (ch == ' ') continue;
 +            const gem = ch == 'O' or ch == '@';
 +            const c = if (gem) sword_gem else sword_hilt;
-+            const base = self.bgAt(y, band_head);
++            const base = self.bg;
 +            self.put(x0 + @as(i32, @intCast(ci)), y, ch, self.blend(base, c, 0.62), base);
 +        }
 +    }
@@ -1091,7 +1090,7 @@ index 0000000..d2aa478
 +    var bi: i32 = 0;
 +    while (bi < blade) : (bi += 1) {
 +        const y = y0 + hilt + bi;
-+        const base = self.bgAt(y, band_head);
++        const base = self.bg;
 +        const letter = blade_letters[@intCast(bi)];
 +        const glinting = glint == bi;
 +        const steel = self.blend(base, sword_steel, if (glinting) 0.95 else 0.55);
@@ -1104,13 +1103,13 @@ index 0000000..d2aa478
 +}
 +
 +/// Grass, thin at the horizon and dense towards the bottom, swaying in a slow wind.
-+fn drawGrass(self: *const Terminus, sc: Scene, t_s: f32, band_head: i32) void {
++fn drawGrass(self: *const Terminus, sc: Scene, t_s: f32) void {
 +    const w: i32 = @intCast(self.terminal_buffer.width);
 +    const rows = sc.ground_bottom - sc.horizon + 1;
 +    var y = sc.horizon;
 +    while (y <= sc.ground_bottom) : (y += 1) {
 +        const depth: f32 = @as(f32, @floatFromInt(y - sc.horizon)) / @as(f32, @floatFromInt(@max(rows - 1, 1)));
-+        const base = self.bgAt(y, band_head);
++        const base = self.bg;
 +        var x: i32 = 0;
 +        while (x < w) : (x += 1) {
 +            const hv = hash2(x, y);
@@ -1141,25 +1140,10 @@ index 0000000..d2aa478
 +    const h: i32 = @intCast(self.terminal_buffer.height);
 +    if (w < 4 or h < 4) return;
 +
-+    // Scan band: bright leading row with a fading trail above it.
-+    var band_head: i32 = -100;
-+    if (self.full_color) {
-+        const p = @as(f32, @floatFromInt(@mod(t_ms, band_period_ms))) / @as(f32, @floatFromInt(band_period_ms));
-+        band_head = @as(i32, @intFromFloat(p * @as(f32, @floatFromInt(h + @as(i32, band_strength.len))))) - 1;
-+        var d: i32 = 0;
-+        while (d < band_strength.len) : (d += 1) {
-+            const y = band_head - d;
-+            if (y < 0 or y >= h) continue;
-+            const bg = self.bgAt(y, band_head);
-+            var x: i32 = 0;
-+            while (x < w) : (x += 1) self.put(x, y, ' ', bg, bg);
-+        }
-+    }
-+
 +    const sc = self.scene();
 +    if (sc) |s| {
-+        self.drawSun(s, t_ms, t_s, band_head);
-+        self.drawBleed(s, t_ms, band_head);
++        self.drawSun(s, t_ms, t_s);
++        self.drawBleed(s, t_ms);
 +    }
 +
 +    // Background stars.
@@ -1168,23 +1152,24 @@ index 0000000..d2aa478
 +        const x: i32 = @intFromFloat(@mod(s.x0 - s.speed * t_s, wf));
 +        const y: i32 = s.y;
 +        if (sc) |c| {
-+            if (y >= c.horizon) continue;
++            if (y < c.sky_top or y >= c.horizon) continue;
 +        }
 +        const tw = 0.5 + 0.5 * @sin(s.phase + s.rate * t_s);
 +        const level = s.peak * (0.25 + 0.75 * tw);
 +        if (!self.full_color and level < 0.55) continue;
 +        const col = self.dimmed(common.mix(self.fg, self.accent, 0.3), 0.08 + 0.42 * level);
-+        self.put(x, y, s.glyph, col, self.bgAt(y, band_head));
++        self.put(x, y, s.glyph, col, self.bg);
 +    }
 +
++    // Sword after the grass, so the grass never hides the letters on its blade.
 +    if (sc) |s| {
-+        self.drawSword(s, t_ms, band_head);
-+        self.drawGrass(s, t_s, band_head);
++        self.drawGrass(s, t_s);
++        self.drawSword(s, t_ms);
 +    }
 +
 +    self.updateShootingStar(now);
-+    self.drawShootingStar(now, band_head);
-+    self.drawTicker(now, band_head);
++    self.drawShootingStar(now);
++    self.drawTicker(now);
 +}
 diff --git a/src/auth.zig b/src/auth.zig
 index 62fd37d..ab7c955 100644
@@ -1438,7 +1423,7 @@ index f9f4a51..01cc107 100644
              var process = std.process.spawn(state.io, .{
 diff --git a/src/terminus_common.zig b/src/terminus_common.zig
 new file mode 100644
-index 0000000..2c385de
+index 0000000..b911dad
 --- /dev/null
 +++ b/src/terminus_common.zig
 @@ -0,0 +1,35 @@
@@ -1471,8 +1456,8 @@ index 0000000..2c385de
 +    return mix(bg, color, t);
 +}
 +
-+/// Number of rows the "terminus" boot-log ticker occupies at the bottom of the
-+/// screen (above the very last row). The constellation keeps clear of them.
++/// Number of rows the "terminus" boot-log ticker occupies at the top of the
++/// screen (below row 0, which Ly keeps for key hints). The constellation keeps clear of them.
 +pub fn tickerRows(height: usize) usize {
 +    if (height < 14) return 0;
 +    return @min(6, height / 8);
