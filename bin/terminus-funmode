@@ -12,17 +12,15 @@ low-latency PipeWire stream (numpy + sounddevice), so there is no per-key proces
 Nothing is logged or stored; key events are only used to pick a sound.
 """
 
-import hashlib
-import re
-import tomllib
+# toggle/off run on key presses: the listener-only imports (numpy, evdev, sounddevice, wave, selectors, random,
+# hashlib, thread pool) stay inside the functions that need them.
+
 import json
 import os
-import random
-import selectors
+import re
 import subprocess
 import sys
-import wave
-from concurrent.futures import ThreadPoolExecutor
+import tomllib
 from pathlib import Path
 
 UNIT = "terminus-funmode"
@@ -62,6 +60,8 @@ def durations(files):
     stamps = {p: file_stamp(p) for p in files}
     missing = [p for p in files if stamps[p] not in cache]
     if missing:
+        from concurrent.futures import ThreadPoolExecutor
+
         with ThreadPoolExecutor(max_workers=8) as pool:
             for p, seconds in zip(missing, pool.map(probe_duration, missing)):
                 cache[stamps[p]] = seconds if seconds != float("inf") else None
@@ -82,7 +82,8 @@ class Theme:
         self.order = int(data.get("order", 500))
         folder = os.environ.get("TERMINUS_FUNMODE_SOUNDS", data["sounds"])
         self.sound_dir = Path(folder).expanduser()
-        self.custom_dir = self.sound_dir / "New audio"  # files named after a key (m.wav, 1.ogg, shift.wav) replace that key's sound
+        # files named after a key (m.wav, 1.ogg, shift.wav) replace that key's sound
+        self.custom_dir = self.sound_dir / "New audio"
         self.keymap = path.parent.parent / data["keymap"]
 
     def sounds(self):
@@ -120,6 +121,8 @@ def key_sound_map(theme):
 
     Files in the `New audio` folder (named after their key, e.g. `m.wav`, `1.ogg`) override that key's sound.
     """
+    import random
+
     from evdev import ecodes
 
     codes = sorted({code for name, code in ecodes.ecodes.items() if name.startswith("KEY_") and code < 256})
@@ -181,6 +184,8 @@ def as_wav(path):
     """A wav to read: the file itself, or a cached wav converted once from ogg/mp3/flac (originals stay untouched)."""
     if path.suffix.lower() == ".wav":
         return path
+    import hashlib
+
     key = hashlib.sha1(file_stamp(path).encode()).hexdigest()[:20]
     cached = WAV_CACHE / f"{key}.wav"
     if not cached.exists():
@@ -193,6 +198,8 @@ def as_wav(path):
 
 def decode(path):
     """Whole file as int16 stereo at RATE, loaded once up front so a key press only has to mix."""
+    import wave
+
     import numpy as np
 
     wav = as_wav(path)
@@ -248,6 +255,9 @@ class Mixer:
 
 
 def listen(theme):
+    import selectors
+    from concurrent.futures import ThreadPoolExecutor
+
     from evdev import ecodes
 
     mapping = key_sound_map(theme)
@@ -314,7 +324,18 @@ def turn_on(theme):
     STATE.parent.mkdir(parents=True, exist_ok=True)
     STATE.write_text(theme.name + "\n")
     subprocess.run(
-        ["systemd-run", "--user", f"--unit={UNIT}", "--collect", "--quiet", "--", sys.executable, os.path.abspath(__file__), "run", theme.name],
+        [
+            "systemd-run",
+            "--user",
+            f"--unit={UNIT}",
+            "--collect",
+            "--quiet",
+            "--",
+            sys.executable,
+            os.path.abspath(__file__),
+            "run",
+            theme.name,
+        ],
         check=True,
     )
     notify(f"on: {theme.label}")
@@ -331,10 +352,19 @@ def list_themes():
     running = unit_theme()
     rows = [
         {
-            "name": t.name, "label": t.label, "emoji": t.emoji, "category": t.category,
-            "tags": t.tags, "description": t.description, "source": "original", "license": "original",
-            "order": t.order, "flags": [], "active": t.name == running,
-            "position": 1 if t.name == running else None, "shadowed": False,
+            "name": t.name,
+            "label": t.label,
+            "emoji": t.emoji,
+            "category": t.category,
+            "tags": t.tags,
+            "description": t.description,
+            "source": "original",
+            "license": "original",
+            "order": t.order,
+            "flags": [],
+            "active": t.name == running,
+            "position": 1 if t.name == running else None,
+            "shadowed": False,
         }
         for t in load_themes().values()
     ]
@@ -373,7 +403,9 @@ def main(argv):
             print(json.dumps(data, ensure_ascii=False))
         else:
             for e in data["effects"]:
-                print(f" {'*' if e['active'] else ' '} {e['name']:<14} {e['emoji']} {e['label']:<12} {e['description']}")
+                print(
+                    f" {'*' if e['active'] else ' '} {e['name']:<14} {e['emoji']} {e['label']:<12} {e['description']}"
+                )
     elif cmd == "status":
         running = unit_theme()
         print(json.dumps({"active": running, "selected": selected().name}) if js else (running or "off"))
@@ -383,7 +415,9 @@ def main(argv):
 
         theme = pick(name)
         for code, path in sorted(key_sound_map(theme).items()):
-            print(f"{ecodes.KEY[code] if isinstance(ecodes.KEY[code], str) else ecodes.KEY[code][0]:<20} {path.relative_to(theme.sound_dir)}")
+            names = ecodes.KEY[code]  # a str, or a list when several names share the code
+            key_name = names if isinstance(names, str) else names[0]
+            print(f"{key_name:<20} {path.relative_to(theme.sound_dir)}")
     else:
         print(__doc__, file=sys.stderr)
         return 2

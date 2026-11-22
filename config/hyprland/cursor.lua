@@ -1,10 +1,12 @@
 -- # Cursor theme: chosen in Terminus-Motion (SUPER + A, Cursor · Theme), remembered in
 -- # ~/.local/state/terminus-est/cursor/theme as "NAME SIZE". Default: the Terminus Est sword at 36.
 local theme, size = "terminus-est", "36"
-local file = io.open(assert(os.getenv("HOME")) .. "/.local/state/terminus-est/cursor/theme")
+local file = io.open(assert(os.getenv("HOME"), "HOME is required") .. "/.local/state/terminus-est/cursor/theme")
 if file then
-  local t, s = (file:read("*l") or ""):match("^(%S+)%s+(%d+)$")
-  if t then theme, size = t, s end
+  local saved_theme, saved_size = (file:read("*l") or ""):match("^(%S+)%s+(%d+)$")
+  if saved_theme then
+    theme, size = saved_theme, saved_size
+  end
   file:close()
 end
 hl.env("HYPRCURSOR_THEME", theme)

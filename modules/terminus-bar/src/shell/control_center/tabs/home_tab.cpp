@@ -1,12 +1,19 @@
+// Home dashboard tab: the host, upkeep, inbox, toggles, today and fleet tiles and the system strip, each a btop-style
+// box fed by background shell scripts and the shell's services. See home_tab.h for the layout.
+
 #include "shell/control_center/tabs/home_tab.h"
 
+#include "calendar/calendar_service.h"
+#include "calendar/calendar_types.h"
 #include "config/config_service.h"
 #include "core/deferred_call.h"
 #include "core/input/key_modifiers.h"
 #include "core/input/key_symbols.h"
 #include "core/process/process.h"
 #include "i18n/i18n.h"
+#include "idle/idle_inhibitor.h"
 #include "notification/notification_manager.h"
+#include "render/core/async_texture_cache.h"
 #include "render/scene/input_area.h"
 #include "render/scene/input_dispatcher.h"
 #include "scripting/plugin_id.h"
@@ -14,24 +21,20 @@
 #include "shell/control_center/term_frame.h"
 #include "shell/panel/panel_button_style.h"
 #include "shell/panel/panel_manager.h"
-#include "idle/idle_inhibitor.h"
-#include "system/gamma_service.h"
-#include "system/health.h"
-#include "calendar/calendar_service.h"
-#include "calendar/calendar_types.h"
-#include "system/weather_service.h"
-#include "tasks/task_service.h"
-#include "wayland/clipboard_service.h"
-#include "render/core/async_texture_cache.h"
 #include "shell/profile/avatar_path.h"
 #include "system/distro_info.h"
+#include "system/gamma_service.h"
 #include "system/hardware_info.h"
+#include "system/health.h"
+#include "system/weather_service.h"
+#include "tasks/task_service.h"
 #include "ui/builders.h"
-#include "ui/controls/image.h"
 #include "ui/controls/glyph.h"
-#include "util/string_utils.h"
-
+#include "ui/controls/image.h"
 #include "util/secret_shape.h"
+#include "util/string_utils.h"
+#include "wayland/clipboard_service.h"
+
 #include <algorithm>
 #include <cctype>
 #include <charconv>
@@ -40,6 +43,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -49,9 +53,9 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <sys/statvfs.h>
 #include <utility>
 #include <wayland-client-protocol.h>
-#include <sys/statvfs.h>
 
 using namespace control_center;
 
@@ -60,24 +64,46 @@ namespace {
   using term_frame::Tone;
 
   constexpr float kTimerFontSize = 28.0F;
-  // Height the big remaining time asks for.
-  constexpr float kTimerTimeHeight = 44.0F;
   // The dashboard's row height at 14px text.
   constexpr float kHomeRowHeight = 20.0F;
+  constexpr float kFallbackBodyHeight = 600.0F;   // px at scale 1, until the panel reports its height
+  constexpr float kSystemDetailWidthShare = 0.4F; // of the system strip, for the failure line in its middle
+  constexpr float kAvatarHintScale = 0.85F;       // of the caption size: the hint wraps in the small square
+
+  constexpr long long kSecondsPerMinute = 60;
+  constexpr long long kSecondsPerHour = 3600;
+  constexpr long long kSecondsPerDay = 86400;
+  constexpr int kDaysPerYearBound = 400; // above 366, so year * bound + day-of-year is unique per day
+  constexpr double kBytesPerGiB = 1024.0 * 1024.0 * 1024.0;
+
   constexpr std::chrono::seconds kArmTimeout{5};
   constexpr std::chrono::seconds kPendingGiveUp{6 * 3600};
+  constexpr std::chrono::seconds kTerminalStartWindow{5};
+  constexpr std::chrono::seconds kActionPollInterval{2};
+  constexpr std::chrono::seconds kScriptTimeout{180};
+  constexpr std::chrono::seconds kScriptRefreshInterval{60};
+  constexpr std::chrono::seconds kNotesRefreshInterval{5};
+  constexpr std::chrono::minutes kUpkeepInterval{30};
+  constexpr std::chrono::seconds kTimerMin{60};
+  constexpr std::chrono::seconds kTimerMax{99 * 60};
+  constexpr std::chrono::milliseconds kTimerTickInterval{250};
+
+  constexpr long long kFleetStaleSeconds = 90;
+  constexpr long long kMinValidEpochSeconds = 100'000'000; // anything earlier is tailscale's "never seen"
+  constexpr std::size_t kMaxToggleRows = 6;
+  constexpr std::size_t kClipFullChars = 240;
+  constexpr std::size_t kUnitListChars = 22;    // the failed-units list fits this many characters
+  constexpr std::size_t kUnitListMoreChars = 5; // room kept for " +NN"
+  constexpr int kDefaultTimerGoal = 6;
+  constexpr int kMinTimerGoal = 1;
+  constexpr int kMaxTimerGoal = 12;
+  constexpr const char* kSyncthingDefaultUrl = "http://127.0.0.1:8384";
 
   void openControlCenterTab(std::string_view tab) {
     PanelManager::instance().togglePanel("control-center", PanelOpenRequest{.context = tab});
   }
 
-  constexpr std::chrono::seconds kTimerMin{60};
-  constexpr std::chrono::seconds kTimerMax{99 * 60};
-  constexpr std::chrono::milliseconds kTimerTickInterval{250};
-
-  std::chrono::seconds ceilSeconds(std::chrono::milliseconds ms) {
-    return std::chrono::ceil<std::chrono::seconds>(ms);
-  }
+  std::chrono::seconds ceilSeconds(std::chrono::milliseconds ms) { return std::chrono::ceil<std::chrono::seconds>(ms); }
 
   std::string formatTimer(std::chrono::seconds total) {
     return std::format("{:02}:{:02}", total.count() / 60, total.count() % 60);
@@ -123,11 +149,16 @@ namespace {
     return std::strftime(buffer, sizeof(buffer), "%Y-%m-%d", &local) > 0 ? std::string(buffer) : std::string{};
   }
 
-  // "07:42" in local time.
-  std::string clockText(std::chrono::system_clock::time_point at) {
+  std::tm localTime(std::chrono::system_clock::time_point at) {
     const std::time_t t = std::chrono::system_clock::to_time_t(at);
     std::tm local{};
     localtime_r(&t, &local);
+    return local;
+  }
+
+  // "07:42" in local time.
+  std::string clockText(std::chrono::system_clock::time_point at) {
+    const std::tm local = localTime(at);
     char buffer[8];
     return std::strftime(buffer, sizeof(buffer), "%H:%M", &local) > 0 ? std::string(buffer) : std::string{};
   }
@@ -137,24 +168,25 @@ namespace {
   constexpr const char* kLiveScript = R"SH(
 sh=$(getent passwd "$(id -un)" | cut -d: -f7)
 v=$("$sh" --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -1)
-echo "shell=$(basename "$sh") $v"
+echo "shell=${sh##*/} $v"
 echo "wm=Hyprland $(hyprctl version -j 2>/dev/null | jq -r '.version // empty')"
-echo "outputs=$(hyprctl monitors -j 2>/dev/null | jq length)"
 echo "packages=$(pacman -Qq 2>/dev/null | wc -l) · $(flatpak list --app 2>/dev/null | wc -l) flatpak"
-hyprctl monitors -j 2>/dev/null | jq -r 'sort_by(.id)|.[0]|"display=\(.width)x\(.height) @ \(.refreshRate|round)Hz"'
+hyprctl monitors -j 2>/dev/null | jq -r '"outputs=\(length)", (sort_by(.id)|.[0]|"display=\(.width)x\(.height) @ \(.refreshRate|round)Hz")'
 run=$(uname -r)
 case $run in *-zen*) pk=linux-zen;; *-lts*) pk=linux-lts;; *-hardened*) pk=linux-hardened;; *-rt*) pk=linux-rt;; *) pk=linux;; esac
 inst=
 for d in /usr/lib/modules/*/; do
   d=${d%/}
-  [ "$(cat "$d/pkgbase" 2>/dev/null)" = "$pk" ] && inst=$(basename "$d")
+  base=
+  read -r base 2>/dev/null < "$d/pkgbase"
+  [ "$base" = "$pk" ] && inst=${d##*/}
 done
 echo "kernel_run=$run"
 echo "kernel_inst=${inst:-$run}"
 if [ -d "/usr/lib/modules/$run" ]; then echo "reboot=0"; else echo "reboot=1"; fi
-echo "failed=$({ systemctl --failed --no-legend --plain; systemctl --user --failed --no-legend --plain; } 2>/dev/null | awk 'NF{print $1}' | sed 's/\.service$//' | paste -sd, -)"
-state="${XDG_STATE_HOME:-$HOME/.local/state}/terminus-est/dashboard-journal-seen"
-seen=$(cat "$state" 2>/dev/null)
+echo "failed=$({ systemctl --failed --no-legend --plain; systemctl --user --failed --no-legend --plain; } 2>/dev/null | awk 'NF{sub(/\.service$/, "", $1); printf "%s%s", sep, $1; sep=","}')"
+seen=
+read -r seen 2>/dev/null < "${XDG_STATE_HOME:-$HOME/.local/state}/terminus-est/dashboard-journal-seen"
 echo "journal_total=$(journalctl -b -p err -q --no-pager -o json 2>/dev/null | wc -l)"
 if [ -n "$seen" ]; then
   echo "journal_new=$(journalctl -b -p err -q --no-pager -o json --since "@$seen" 2>/dev/null | wc -l)"
@@ -164,14 +196,17 @@ fi
 )SH";
 
   // The slow package check (checkupdates and yay -Qua take seconds), refreshed every 30 minutes and on open.
-  // `last` is the last full system upgrade in pacman.log.
+  // `last` is the last full system upgrade in pacman.log, 0 when it has none.
   constexpr const char* kUpkeepScript = R"SH(
 echo "repo=$(checkupdates 2>/dev/null | wc -l)"
 echo "aur=$(yay -Qua 2>/dev/null | grep -c .)"
-echo "cache=$(du -sb /var/cache/pacman/pkg 2>/dev/null | cut -f1)"
+cache=$(du -sb /var/cache/pacman/pkg 2>/dev/null)
+echo "cache=${cache%%[[:space:]]*}"
 echo "orphans=$(pacman -Qdtq 2>/dev/null | wc -l)"
-l=$(grep 'starting full system upgrade' /var/log/pacman.log 2>/dev/null | tail -1 | sed -E 's/^\[([^]]+)\].*/\1/')
-echo "last=$(date -d "$l" +%s 2>/dev/null || echo 0)"
+l=$(grep 'starting full system upgrade' /var/log/pacman.log 2>/dev/null | tail -1)
+l=${l#\[}
+l=${l%%\]*}
+if [ -n "$l" ]; then echo "last=$(date -d "$l" +%s 2>/dev/null || echo 0)"; else echo "last=0"; fi
 )SH";
 
   // The notifications still on screen in mako, which owns org.freedesktop.Notifications on this desktop, so the
@@ -182,21 +217,29 @@ makoctl list -j 2>/dev/null | jq -r '[.[]|select((.summary // "") != "" or (.bod
 )SH";
 
   // The fleet checks, each with its own short timeout; a check that fails prints nothing for its key and the row
-  // says "unknown". Tailscale comes from `tailscale status --json`, as the network panel reads it. Syncthing's REST
-  // API key is read from its own config.xml inside this script and handed to curl on stdin, so it is never an
-  // argument, never printed and never kept by the bar.
+  // says "unknown". Tailscale comes from `tailscale status --json`, as the network panel reads it; one jq run turns it
+  // into the lines below (`server_up` only tells the shell whether to ping). Syncthing's REST API key is read from its
+  // own config.xml inside this script and handed to curl on stdin, so it is never an argument, never printed and never
+  // kept by the bar.
   constexpr const char* kFleetScript = R"SH(
 if command -v tailscale >/dev/null 2>&1; then
   ts=$(timeout 3 tailscale status --json 2>/dev/null)
   if [ -n "$ts" ]; then
-    echo "ts_state=$(printf '%s' "$ts" | jq -r '.BackendState // "unknown"')"
-    echo "ts_total=$(printf '%s' "$ts" | jq '[.Peer[]?]|length')"
-    echo "ts_online=$(printf '%s' "$ts" | jq '[.Peer[]?|select(.Online)]|length')"
-    printf '%s' "$ts" | jq -r '[.Peer[]?|select(.HostName!="server")]|sort_by(.HostName)|"peer_count=\(length)", (to_entries[]|"peer_\(.key+1)=\(.value.HostName)\t\(if .value.Online then "online" else "offline" end)\t\((.value.LastSeen // "")|sub("\\.[0-9]+Z$";"Z")|try fromdate catch 0)")'
-    echo "server=$(printf '%s' "$ts" | jq -r '[.Peer[]?|select(.HostName=="server")][0]|if .==null then "none" elif .Online then "online" else "offline" end')"
-    if [ "$(printf '%s' "$ts" | jq '[.Peer[]?|select(.HostName=="server" and .Online)]|length')" = 1 ]; then
-      echo "server_ms=$(timeout 5 tailscale ping -c 1 --timeout 3s server 2>/dev/null | sed -n 's/.* in \([0-9.]*\)ms.*/\1/p' | head -1)"
-    fi
+    summary=$(printf '%s' "$ts" | jq -r '
+      [.Peer[]?] as $peers
+      | [$peers[] | select(.HostName == "server")] as $servers
+      | "ts_state=\(.BackendState // "unknown")",
+        "ts_total=\($peers | length)",
+        "ts_online=\([$peers[] | select(.Online)] | length)",
+        ([$peers[] | select(.HostName != "server")] | sort_by(.HostName)
+          | "peer_count=\(length)",
+            (to_entries[] | "peer_\(.key + 1)=\(.value.HostName)\t\(if .value.Online then "online" else "offline" end)\t\((.value.LastSeen // "") | try (sub("\\.[0-9]+Z$"; "Z") | fromdate) catch 0)")),
+        "server=\(if ($servers | length) == 0 then "none" elif $servers[0].Online then "online" else "offline" end)",
+        "server_up=\([$servers[] | select(.Online)] | length)"')
+    printf '%s\n' "$summary"
+    case $summary in
+      *server_up=1) echo "server_ms=$(timeout 5 tailscale ping -c 1 --timeout 3s server 2>/dev/null | sed -n '/ in [0-9.]*ms/{s/.* in \([0-9.]*\)ms.*/\1/p;q;}')" ;;
+    esac
   else
     echo "ts_state=unknown"
     echo "server=unknown"
@@ -206,7 +249,7 @@ else
 fi
 cfg="${XDG_STATE_HOME:-$HOME/.local/state}/syncthing/config.xml"
 if [ -r "$cfg" ] && command -v syncthing >/dev/null 2>&1; then
-  key=$(sed -n 's:.*<apikey>\(.*\)</apikey>.*:\1:p' "$cfg" | head -1)
+  key=$(sed -n 's:.*<apikey>\(.*\)</apikey>.*:\1:p;T;q' "$cfg")
   addr=$(sed -n '/<gui /,/<\/gui>/s:.*<address>\([^<]*\)</address>.*:\1:p' "$cfg" | head -1)
   scheme=http
   grep -q '<gui [^>]*tls="true"' "$cfg" && scheme=https
@@ -234,39 +277,24 @@ else
 fi
 )SH";
 
-  // The value of a `key=value` line in a job's output, empty when absent.
-  std::string scriptValue(const ScriptJob& job, std::string_view key) {
-    const std::string_view out = job.out;
-    std::size_t pos = 0;
-    while (pos < out.size()) {
-      const std::size_t end = std::min(out.find('\n', pos), out.size());
-      const std::string_view line = out.substr(pos, end - pos);
-      if (line.size() > key.size() && line.substr(0, key.size()) == key && line[key.size()] == '=') {
-        std::string value(line.substr(key.size() + 1));
-        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())) != 0) {
-          value.pop_back();
-        }
-        return value;
-      }
-      pos = end + 1;
-    }
-    return {};
+  // The value of a `key=value` line in a job's output, empty when absent. The view lasts until the job's next output.
+  std::string_view scriptValue(const ScriptJob& job, std::string_view key) {
+    const auto found = job.values.find(key);
+    return found == job.values.end() ? std::string_view{} : std::string_view{found->second};
   }
 
   long long numberValue(const ScriptJob& job, std::string_view key, long long fallback) {
-    const std::string text = scriptValue(job, key);
-    long long value = fallback;
-    if (!text.empty()) {
-      std::from_chars(text.data(), text.data() + text.size(), value);
-    }
+    const std::string_view text = scriptValue(job, key);
+    long long value = fallback; // left alone when the text is empty or not a number
+    std::from_chars(text.data(), text.data() + text.size(), value);
     return value;
   }
 
   // Runs `script` on a worker thread and applies its output on the main loop; the callback keeps only the
-  // shared job, so it is safe if the panel or tab is gone. Repeated requests within a minute are ignored unless forced.
+  // shared job, so it is safe if the panel or tab is gone. A repeated request within `minAge` is ignored unless forced.
   void runScriptJob(
       const std::shared_ptr<ScriptJob>& job, const char* script, bool force,
-      std::chrono::seconds minAge = std::chrono::seconds{60}
+      std::chrono::seconds minAge = kScriptRefreshInterval
   ) {
     const auto now = std::chrono::steady_clock::now();
     if (job->running || (!force && job->loaded && now - job->startedAt < minAge)) {
@@ -283,14 +311,14 @@ fi
                   DeferredCall::callLater([job, out = std::move(result.out), ok]() mutable {
                     job->running = false;
                     if (ok) {
-                      job->out = std::move(out);
+                      job->setOutput(std::move(out));
                       job->loaded = true;
                     }
                     PanelManager::instance().refresh();
                   });
                 },
         },
-        process::RunOptions{.timeout = std::chrono::seconds{180}}
+        process::RunOptions{.timeout = kScriptTimeout}
     );
     if (!started) {
       job->running = false;
@@ -299,10 +327,10 @@ fi
 
   // "2h 5m ago", "1d 7h ago": the time since `seconds` ago, in its two largest units.
   std::string formatAgo(long long seconds) {
-    if (seconds < 60) {
+    if (seconds < kSecondsPerMinute) {
       return "just now";
     }
-    const long long minutes = seconds / 60;
+    const long long minutes = seconds / kSecondsPerMinute;
     if (minutes < 60) {
       return std::format("{}m ago", minutes);
     }
@@ -315,23 +343,23 @@ fi
 
   // "now", "5m", "3h", "2d" for the right edge of inbox rows.
   std::string formatAgeShort(long long seconds) {
-    if (seconds < 60) {
+    if (seconds < kSecondsPerMinute) {
       return "now";
     }
-    if (seconds < 3600) {
-      return std::format("{}m", seconds / 60);
+    if (seconds < kSecondsPerHour) {
+      return std::format("{}m", seconds / kSecondsPerMinute);
     }
-    if (seconds < 86400) {
-      return std::format("{}h", seconds / 3600);
+    if (seconds < kSecondsPerDay) {
+      return std::format("{}h", seconds / kSecondsPerHour);
     }
-    return std::format("{}d", seconds / 86400);
+    return std::format("{}d", seconds / kSecondsPerDay);
   }
 
   std::string formatUptime(std::chrono::seconds up) {
     const auto total = up.count();
-    const auto days = total / 86400;
-    const auto hours = (total % 86400) / 3600;
-    const auto minutes = (total % 3600) / 60;
+    const auto days = total / kSecondsPerDay;
+    const auto hours = (total % kSecondsPerDay) / kSecondsPerHour;
+    const auto minutes = (total % kSecondsPerHour) / kSecondsPerMinute;
     if (days > 0) {
       return std::format("{}d {}h {}m", days, hours, minutes);
     }
@@ -341,12 +369,13 @@ fi
     return std::format("{}m", minutes);
   }
 
-  std::string kernelDelta(const std::string& running, const std::string& installed) {
-    const auto base = [](const std::string& release) { return release.substr(0, release.find('-')); };
+  // "7.3.5 → 7.3.6" when the versions differ before their flavour suffix, else the full releases.
+  std::string kernelDelta(std::string_view running, std::string_view installed) {
+    const auto base = [](std::string_view release) { return release.substr(0, release.find('-')); };
     if (base(running) != base(installed)) {
-      return base(running) + " → " + base(installed);
+      return std::format("{} → {}", base(running), base(installed));
     }
-    return running + " → " + installed;
+    return std::format("{} → {}", running, installed);
   }
 
   // One line of free text: control characters and runs of white space become one space.
@@ -400,8 +429,8 @@ fi
     std::size_t shown = 0;
     for (const std::string& name : names) {
       const std::size_t next = out.size() + (out.empty() ? 0 : 2) + name.size();
-      const std::size_t reserve = shown + 1 < names.size() ? 5 : 0; // room for " +NN"
-      if (shown > 0 && next + reserve > 22) {
+      const std::size_t reserve = shown + 1 < names.size() ? kUnitListMoreChars : 0;
+      if (shown > 0 && next + reserve > kUnitListChars) {
         break;
       }
       out += (out.empty() ? "" : ", ") + name;
@@ -415,31 +444,23 @@ fi
 
   // The dashboard's names for the toggles; anything else falls back to the shortcut's own lower-cased label.
   std::string toggleName(const Shortcut& shortcut) {
-    const std::string_view id = shortcut.id();
-    if (id == "keyboard_sounds") {
-      return "keyboard sounds";
-    }
-    if (id == "notification") {
-      return "do not disturb";
-    }
-    if (id == "caffeine") {
-      return "keep awake";
-    }
-    if (id == "nightlight") {
-      return "night light";
-    }
-    if (id == "mic_mute") {
-      return "mic mute";
-    }
-    if (id == "shutdown_timer") {
-      return "auto-off";
+    constexpr std::array<std::pair<std::string_view, std::string_view>, 6> kNames{{
+        {"keyboard_sounds", "keyboard sounds"},
+        {"notification", "do not disturb"},
+        {"caffeine", "keep awake"},
+        {"nightlight", "night light"},
+        {"mic_mute", "mic mute"},
+        {"shutdown_timer", "auto-off"},
+    }};
+    for (const auto& [id, name] : kNames) {
+      if (shortcut.id() == id) {
+        return std::string(name);
+      }
     }
     return StringUtils::toLower(shortcut.displayLabel());
   }
 
-  std::string networkOutputs(long long count) {
-    return std::format("{} {}", count, count == 1 ? "output" : "outputs");
-  }
+  std::string formatOutputs(long long count) { return std::format("{} {}", count, count == 1 ? "output" : "outputs"); }
 
   // Shows or hides a block that takes part in layout; true when its state changed.
   bool setShown(Node* node, bool shown) {
@@ -512,7 +533,490 @@ fi
     }
   }
 
+  // ---- tables and small helpers of the tiles ----
+
+  // Row order of the host tile; the priority tables say which rows go first when the tile is short.
+  enum HostLive : std::size_t { LiveUptime, LiveKernel, LiveSession };
+  enum HostInfo : std::size_t { InfoOs, InfoShell, InfoWm, InfoPkgs, InfoGpu, InfoDisplay };
+  constexpr std::array<std::string_view, 3> kHostLiveKeys{"up", "kernel", "session"};
+  constexpr std::array<std::string_view, 6> kHostInfoKeys{"os", "shell", "wm", "pkgs", "gpu", "display"};
+  constexpr std::array<HostLive, 3> kLivePriority{LiveKernel, LiveSession, LiveUptime};
+  constexpr std::array<HostInfo, 6> kInfoPriority{InfoOs, InfoGpu, InfoDisplay, InfoPkgs, InfoShell, InfoWm};
+
+  // The session keys; `action` is the verb of `terminus-bar msg session`. Lock and sleep run at once, the rest ask
+  // for a confirming second press; the last two sit apart on capital letters (Shift held) in the warning tone.
+  struct PowerKey {
+    const char* word;
+    std::size_t hot;
+    bool warning;
+    const char* action;
+  };
+  constexpr std::array<PowerKey, 5> kPowerKeys{{
+      {"lock", 0, false, "lock"},
+      {"sleep", 0, false, "suspend"},
+      {"logout", 2, false, "logout"},
+      {"R reboot", 0, true, "reboot"},
+      {"D shutdown", 0, true, "shutdown"},
+  }};
+  constexpr std::size_t kFirstConfirmedKey = 2;
+  constexpr std::size_t kFirstDangerKey = 3;
+
+  // Sets the case bit: folds ASCII letters (keysyms and characters alike) together.
+  constexpr std::uint32_t lowerKeysym(std::uint32_t sym) noexcept { return sym | 0x20U; }
+
+  // Whether `key`'s hotkey letter is `letter`; a capital hotkey needs Shift, a lower-case one must not have it.
+  bool hotkeyMatches(const term_frame::Keyword& key, std::uint32_t letter, bool shifted, bool upper) {
+    if (!key.activate || key.button == nullptr || key.hot >= key.word.size()) {
+      return false;
+    }
+    const char hot = key.word[key.hot];
+    const bool capital = hot >= 'A' && hot <= 'Z';
+    return lowerKeysym(static_cast<std::uint32_t>(hot)) == letter && (capital ? shifted || upper : !shifted);
+  }
+
+  // Posts an action's outcome from a worker thread to the main loop, where collectOutcomes() shows it.
+  void reportOutcome(const std::shared_ptr<ActionMailbox>& mailbox, ActionOutcome outcome) {
+    DeferredCall::callLater([mailbox, outcome = std::move(outcome)]() mutable {
+      mailbox->done.push_back(std::move(outcome));
+      PanelManager::instance().refresh();
+    });
+  }
+
+  // The tile grid's geometry in px: three rows of two tiles share the height the system strip leaves, so both tiles
+  // of a row have the same top and bottom edge.
+  struct GridMetrics {
+    float width;
+    float height;
+    float margin;
+    float gridWidth;
+    float leftWidth;
+    float rightWidth;
+    float stripHeight;
+    float inner;      // text width inside a tile
+    float stripInner; // text width inside the system strip
+    std::array<float, 3> rowHeights;
+  };
+
+  GridMetrics gridMetrics(float contentWidth, float bodyHeight, float scale) {
+    const float gap = Style::spaceSm * scale;
+    GridMetrics metrics{};
+    metrics.width = std::max(1.0F, contentWidth);
+    metrics.height = std::max(1.0F, bodyHeight > 0.0F ? bodyHeight : kFallbackBodyHeight * scale);
+    metrics.margin = gap;
+    metrics.gridWidth = std::max(1.0F, metrics.width - metrics.margin);
+    metrics.leftWidth = std::max(1.0F, std::floor((metrics.gridWidth - gap) * 0.5F));
+    metrics.rightWidth = std::max(1.0F, metrics.gridWidth - gap - metrics.leftWidth);
+    metrics.stripHeight = term_frame::btopChrome(scale) + kHomeRowHeight * scale;
+    const float available = std::max(3.0F, metrics.height - metrics.stripHeight - 3.0F * gap);
+    const float baseHeight = std::floor(available / 3.0F);
+    metrics.rowHeights = {baseHeight, baseHeight, available - 2.0F * baseHeight};
+    const float inset = term_frame::boxInset(scale);
+    metrics.inner = std::max(1.0F, std::min(metrics.leftWidth, metrics.rightWidth) - 2.0F * inset);
+    metrics.stripInner = std::max(1.0F, metrics.gridWidth - 2.0F * inset);
+    return metrics;
+  }
+
+  // Takes the instance for `type` out of `pool`; null when there is none.
+  std::unique_ptr<Shortcut> takeShortcut(std::vector<std::unique_ptr<Shortcut>>& pool, std::string_view type) {
+    const auto found = std::ranges::find_if(pool, [type](const auto& shortcut) {
+      return shortcut != nullptr && shortcut->id() == type;
+    });
+    if (found == pool.end()) {
+      return nullptr;
+    }
+    auto shortcut = std::move(*found);
+    pool.erase(found);
+    return shortcut;
+  }
+
+  // Writes `describe(item)` (a name and a state text) into the first `limit` rows of a pool and returns which rows have
+  // an item. Rows past `limit` cannot fit the tile, so they keep their old text until the tile grows.
+  template <std::size_t N, typename Items, typename Describe>
+  std::array<bool, N>
+  fillRows(std::array<term_frame::ToggleRow, N>& rows, const Items& items, std::size_t limit, Describe describe) {
+    std::array<bool, N> wanted{};
+    for (std::size_t i = 0; i < N; ++i) {
+      wanted[i] = i < items.size();
+      if (!wanted[i] || i >= limit || rows[i].button == nullptr) {
+        continue;
+      }
+      const auto [name, state] = describe(items[i]);
+      setRowName(rows[i], name);
+      term_frame::setToggleRow(rows[i], true, false, state);
+    }
+    return wanted;
+  }
+
+  // "1.4 GiB", or "312 MiB" below one GiB.
+  std::string formatCacheSize(long long bytes) {
+    const double gib = static_cast<double>(bytes) / kBytesPerGiB;
+    return gib >= 1.0 ? std::format("{:.1f} GiB", gib) : std::format("{:.0f} MiB", gib * 1024.0);
+  }
+
+  // Header slot of the upkeep tile: how many of the warnings need action.
+  void setUpkeepHeader(term_frame::BtopFrame& frame, bool loaded, int actions) {
+    if (!loaded || actions == 0) {
+      frame.setInfo(loaded ? "all clear" : "checking…");
+      frame.setInfoColor(colorSpecFromRole(ColorRole::OnSurface));
+      return;
+    }
+    frame.setInfo(std::format("! {} {} action", actions, actions == 1 ? "needs" : "need"));
+    frame.setInfoColor(colorSpecFromRole(ColorRole::Warning));
+  }
+
+  // ---- inbox ----
+
+  std::string ageShort(std::chrono::system_clock::time_point now, std::chrono::system_clock::time_point then) {
+    return formatAgeShort(std::chrono::duration_cast<std::chrono::seconds>(now - then).count());
+  }
+
+  struct NoteLine {
+    std::string title;
+    std::string age;
+    std::string makoId; // empty for the bar's own notifications
+  };
+
+  // The newest `maxLines` unread notifications: the bar's own history (its newest entry is at the back), then what
+  // mako still shows. `unread` receives the number of all of them.
+  std::vector<NoteLine> collectNotes(
+      NotificationManager* manager, const ScriptJob& makoJob, std::size_t maxLines,
+      std::chrono::system_clock::time_point now, std::size_t& unread
+  ) {
+    std::vector<NoteLine> lines;
+    if (manager != nullptr) {
+      const auto& history = manager->history();
+      for (auto it = history.rbegin(); it != history.rend(); ++it) {
+        if (it->seen) {
+          continue;
+        }
+        ++unread;
+        if (lines.size() >= maxLines) {
+          continue;
+        }
+        const Notification& note = it->notification;
+        const std::string headline = note.summary.empty() ? note.body : note.summary;
+        NoteLine line{.title = oneLine(note.appName.empty() ? headline : note.appName + ": " + headline)};
+        if (note.receivedWallClock.has_value()) {
+          line.age = ageShort(now, *note.receivedWallClock);
+        }
+        lines.push_back(std::move(line));
+      }
+    }
+    const long long makoCount = numberValue(makoJob, "count", 0);
+    unread += static_cast<std::size_t>(std::max(0LL, makoCount));
+    for (std::size_t n = 1; n <= maxLines && lines.size() < maxLines && static_cast<long long>(n) <= makoCount; ++n) {
+      const std::string_view entry = scriptValue(makoJob, std::format("note_{}", n));
+      const std::size_t tab = entry.find('\t');
+      if (tab == std::string_view::npos) {
+        continue;
+      }
+      lines.push_back(
+          {.title = oneLine(entry.substr(tab + 1)), .age = "dismiss", .makoId = std::string(entry.substr(0, tab))}
+      );
+    }
+    return lines;
+  }
+
+  // The row text of a clipboard entry. Entries that look like secrets are masked; their text shows only while their
+  // row has the focus, in the full-text line.
+  std::string clipTitle(const ClipboardEntry& entry) {
+    if (entry.isImage()) {
+      return "[image]";
+    }
+    if (secret_shape::looksSensitive(entry.textPreview)) {
+      return std::string(secret_shape::kMaskedPreview);
+    }
+    std::string title = oneLine(entry.textPreview);
+    return title.empty() ? "[data]" : title;
+  }
+
+  // ---- today ----
+
+  // A number that is equal for the instants of one local day and differs between days.
+  int localDay(std::chrono::system_clock::time_point at) {
+    const std::tm local = localTime(at);
+    return local.tm_year * kDaysPerYearBound + local.tm_yday;
+  }
+
+  // Events that have not ended yet, soonest first.
+  std::vector<const CalendarEvent*>
+  upcomingEvents(CalendarService* calendar, std::chrono::system_clock::time_point now) {
+    std::vector<const CalendarEvent*> upcoming;
+    if (calendar == nullptr || !calendar->enabled() || !calendar->hasData()) {
+      return upcoming;
+    }
+    for (const CalendarEvent& event : calendar->snapshot().events) {
+      if (event.end > now) {
+        upcoming.push_back(&event);
+      }
+    }
+    std::ranges::sort(upcoming, [](const CalendarEvent* a, const CalendarEvent* b) { return a->start < b->start; });
+    return upcoming;
+  }
+
+  // "all day", "now", "07:42", "tmrw 07:42" or "Fri 07:42": when an event starts; `today` is a localDay().
+  std::string eventWhen(const CalendarEvent& event, std::chrono::system_clock::time_point now, int today) {
+    if (event.allDay) {
+      return "all day";
+    }
+    if (event.start <= now) {
+      return "now";
+    }
+    const std::string clock = clockText(event.start);
+    const int days = localDay(event.start) - today;
+    if (days == 0) {
+      return clock;
+    }
+    if (days == 1) {
+      return "tmrw " + clock;
+    }
+    char weekday[8];
+    const std::tm local = localTime(event.start);
+    std::strftime(weekday, sizeof(weekday), "%a", &local);
+    return std::string(weekday) + " " + clock;
+  }
+
+  // "in 45m" or "in 2h 5m" until the first timed event still ahead today; empty when there is none.
+  std::string nextEventCountdown(
+      const std::vector<const CalendarEvent*>& upcoming, std::chrono::system_clock::time_point now, int today
+  ) {
+    for (const CalendarEvent* event : upcoming) {
+      if (event->allDay || event->start <= now || localDay(event->start) != today) {
+        continue;
+      }
+      const auto minutes = std::chrono::duration_cast<std::chrono::minutes>(event->start - now).count();
+      return minutes < 60 ? std::format("in {}m", minutes + 1) : std::format("in {}h {}m", minutes / 60, minutes % 60);
+    }
+    return {};
+  }
+
+  std::vector<const TaskItem*> openTasks(TaskService* tasks) {
+    std::vector<const TaskItem*> open;
+    if (tasks == nullptr) {
+      return open;
+    }
+    for (const TaskItem& item : tasks->snapshot().items) {
+      if (!item.completed) {
+        open.push_back(&item);
+      }
+    }
+    return open;
+  }
+
+  // "today", "late" or "MM-DD" from a task's YYYY-MM-DD due date; empty without one.
+  std::string taskDue(const std::string& dueDate, const std::string& todayKey) {
+    constexpr std::size_t kYearPrefixChars = 5; // "YYYY-"
+    if (dueDate.empty()) {
+      return {};
+    }
+    if (dueDate == todayKey) {
+      return "today";
+    }
+    return dueDate < todayKey ? "late" : dueDate.substr(std::min(kYearPrefixChars, dueDate.size()));
+  }
+
+  // One line: now, the sky, today's range.
+  std::string weatherText(WeatherService* weather) {
+    if (weather == nullptr || !weather->snapshot().valid) {
+      return "weather --";
+    }
+    const WeatherSnapshot& snapshot = weather->snapshot();
+    std::string text = std::format(
+        "{:.0f}° {}", snapshot.current.temperatureC,
+        StringUtils::toLower(WeatherService::shortDescriptionForCode(snapshot.current.weatherCode))
+    );
+    if (!snapshot.forecastDays.empty()) {
+      text += std::format(
+          " · {:.0f}°–{:.0f}°", snapshot.forecastDays.front().temperatureMinC,
+          snapshot.forecastDays.front().temperatureMaxC
+      );
+    }
+    return text;
+  }
+
+  // ---- timer ----
+
+  // `■■□□□□ 2/6`, plus ` +1` for each session beyond the goal: filled squares for counted sessions, empty up to it.
+  std::string sessionSquares(int sessions, int goal) {
+    const int filled = std::min(sessions, goal);
+    std::string squares;
+    for (int i = 0; i < goal; ++i) {
+      squares += i < filled ? "■" : "□";
+    }
+    squares += std::format(" {}/{}", filled, goal);
+    if (sessions > goal) {
+      squares += std::format(" +{}", sessions - goal);
+    }
+    return squares;
+  }
+
+  // Retitles a keyword and its highlighted letter only when one of them changed.
+  void syncKeyword(term_frame::Keyword& key, std::string_view word, std::size_t hot, bool block) {
+    if (key.word == word && key.block == block && key.hot == hot) {
+      return;
+    }
+    key.word = std::string(word);
+    key.hot = hot;
+    key.block = block;
+    key.blockText = key.word;
+    term_frame::refreshKeyword(key);
+  }
+
+  // ---- fleet ----
+
+  // One row of the fleet tile before it is drawn.
+  struct FleetLine {
+    bool show = true;
+    bool down = false;
+    bool live = false; // read straight from a service, never stale
+    std::string value = "unknown";
+  };
+
+  FleetLine serverLine(const ScriptJob& job) {
+    FleetLine line;
+    const std::string_view server = scriptValue(job, "server");
+    if (scriptValue(job, "tailscale") == "absent" || server == "none") {
+      line.show = false;
+    } else if (server == "online") {
+      const std::string_view ms = scriptValue(job, "server_ms");
+      line.value = ms.empty() ? std::string{"online"} : std::format("online · {} ms", ms);
+    } else if (server == "offline") {
+      line.down = true;
+      line.value = "offline";
+    }
+    return line;
+  }
+
+  FleetLine syncthingLine(const ScriptJob& job) {
+    FleetLine line;
+    const std::string_view syncthing = scriptValue(job, "syncthing");
+    if (syncthing == "absent") {
+      line.show = false;
+    } else if (syncthing == "ok") {
+      line.value = "up to date";
+    } else if (syncthing.starts_with("syncing:")) {
+      line.value = std::format("syncing {}%", syncthing.substr(std::string_view{"syncing:"}.size()));
+    } else if (syncthing == "out") {
+      line.down = true;
+      line.value = "out of sync";
+    }
+    return line;
+  }
+
+  // Radicale: the calendar service's own connection; no check of ours.
+  FleetLine radicaleLine(CalendarService* calendar) {
+    FleetLine line;
+    if (calendar == nullptr || !calendar->enabled()) {
+      line.show = false;
+      return line;
+    }
+    line.live = true;
+    switch (calendar->syncError()) {
+    case CalendarService::SyncError::None:
+      line.value = calendar->hasData() ? "reachable" : "unknown";
+      break;
+    case CalendarService::SyncError::NoCalendars:
+      line.value = "reachable";
+      break;
+    case CalendarService::SyncError::Unreachable:
+      line.down = true;
+      line.value = "unreachable";
+      break;
+    case CalendarService::SyncError::AuthFailed:
+      line.down = true;
+      line.value = "auth failed";
+      break;
+    case CalendarService::SyncError::Failed:
+      line.down = true;
+      line.value = "sync failed";
+      break;
+    }
+    return line;
+  }
+
+  FleetLine tailscaleLine(const ScriptJob& job) {
+    FleetLine line;
+    const std::string_view state = scriptValue(job, "ts_state");
+    if (scriptValue(job, "tailscale") == "absent") {
+      line.show = false;
+    } else if (state == "Running") {
+      line.value =
+          std::format("{} of {} peers online", numberValue(job, "ts_online", 0), numberValue(job, "ts_total", 0));
+    } else if (!state.empty() && state != "unknown") {
+      line.down = true;
+      line.value = StringUtils::toLower(state);
+    }
+    return line;
+  }
+
+  struct PeerText {
+    std::string name;
+    std::string status;
+  };
+
+  // The row text of a tailscale peer from its `name<TAB>online|offline<TAB>last-seen epoch seconds` line.
+  PeerText peerText(std::string_view entry, long long nowSeconds) {
+    const std::size_t first = entry.find('\t');
+    const std::size_t second = first == std::string_view::npos ? first : entry.find('\t', first + 1);
+    PeerText peer{.name = std::string(entry.substr(0, first)), .status = "unknown"};
+    if (second == std::string_view::npos) {
+      return peer;
+    }
+    long long lastSeen = 0;
+    const std::string_view seen = entry.substr(second + 1);
+    std::from_chars(seen.data(), seen.data() + seen.size(), lastSeen);
+    if (entry.substr(first + 1, second - first - 1) == "online") {
+      peer.status = "online";
+    } else if (lastSeen > kMinValidEpochSeconds) {
+      const long long ago = std::max(0LL, nowSeconds - lastSeen);
+      peer.status = ago < kSecondsPerHour ? std::format("last seen {}m", ago / kSecondsPerMinute)
+          : ago < kSecondsPerDay          ? std::format("last seen {}h", ago / kSecondsPerHour)
+                                          : std::format("last seen {}d", ago / kSecondsPerDay);
+    } else {
+      peer.status = "offline";
+    }
+    return peer;
+  }
+
+  // Header slot of the fleet tile. Stale answers are dimmed and carry their age.
+  void setFleetHeader(
+      term_frame::BtopFrame& frame, std::size_t down, std::size_t unknown, bool stale, const std::string& ageText
+  ) {
+    if (down > 0) {
+      frame.setInfo(
+          unknown > 0 ? std::format("! {} down · {} unknown", down, unknown) : std::format("! {} down", down)
+      );
+      frame.setInfoColor(colorSpecFromRole(stale ? ColorRole::OnSurfaceVariant : ColorRole::Warning));
+    } else if (unknown > 0 || stale) {
+      frame.setInfo(unknown > 0 ? std::format("{} unknown", unknown) : std::format("all ok{}", ageText));
+      frame.setInfoColor(colorSpecFromRole(ColorRole::OnSurfaceVariant));
+    } else {
+      frame.setInfo("all ok");
+      frame.setInfoColor(colorSpecFromRole(ColorRole::OnSurface));
+    }
+  }
+
 } // namespace
+
+void ScriptJob::setOutput(std::string text) {
+  out = std::move(text);
+  values.clear();
+  std::string_view rest = out;
+  while (!rest.empty()) {
+    const std::size_t end = std::min(rest.find('\n'), rest.size());
+    const std::string_view line = rest.substr(0, end);
+    rest.remove_prefix(std::min(end + 1, rest.size()));
+    const std::size_t equals = line.find('=');
+    if (equals == std::string_view::npos) {
+      continue;
+    }
+    std::string_view value = line.substr(equals + 1);
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())) != 0) {
+      value.remove_suffix(1);
+    }
+    values.try_emplace(std::string(line.substr(0, equals)), value);
+  }
+}
 
 HomeTab::HomeTab(const ControlCenterServices& services)
     : m_config(services.config), m_services(services.shortcutServices()), m_notifications(services.notifications) {
@@ -525,7 +1029,7 @@ HomeTab::HomeTab(const ControlCenterServices& services)
     writeJournalSeen(); // the first look: nothing is new yet
   }
   // Package upkeep is checked every 30 minutes (and when the dashboard opens), not continuously.
-  m_upkeepTimer.startRepeating(std::chrono::minutes{30}, [this]() { refreshUpkeep(true); });
+  m_upkeepTimer.startRepeating(kUpkeepInterval, [this]() { refreshUpkeep(true); });
   loadTimerToday();
   // The last known fleet values, so the section is never empty while the first check runs.
   if (std::ifstream in(fleetPath()); in) {
@@ -535,7 +1039,7 @@ HomeTab::HomeTab(const ControlCenterServices& services)
     std::string rest((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     if (at > 0 && !rest.empty()) {
       m_fleetAt = at;
-      m_fleetJob->out = std::move(rest);
+      m_fleetJob->setOutput(std::move(rest));
       m_fleetJob->loaded = true;
     }
   }
@@ -628,7 +1132,47 @@ std::unique_ptr<Flex> HomeTab::create() {
 // ---- 1 host -----------------------------------------------------------------------------------------------------
 
 std::unique_ptr<Flex> HomeTab::createHostBox(float scale) {
+  static_assert(kHostLiveKeys.size() == kHostLiveRows && kHostInfoKeys.size() == kHostInfoRows);
   auto box = term_frame::btopBox("¹", "host", scale, &m_hostFrame);
+  auto avatar = createAvatarPicker(scale);
+  auto identity = createHostIdentity(scale);
+  box->addChild(
+      ui::row(
+          {.out = &m_hostHeader, .align = FlexAlign::Center, .gap = Style::spaceSm * scale}, std::move(avatar),
+          std::move(identity)
+      )
+  );
+
+  // The live rows and the static facts take turns in the same place, so opening `i` costs only the difference.
+  auto liveBox = ui::column({.out = &m_hostLiveBox, .align = FlexAlign::Stretch, .gap = Style::spaceXs * scale});
+  for (std::size_t i = 0; i < kHostLiveRows; ++i) {
+    liveBox->addChild(term_frame::infoRow(kHostLiveKeys[i], scale, m_hostLive[i]));
+    m_fixedRows.push_back(m_hostLive[i].row);
+  }
+  box->addChild(std::move(liveBox));
+
+  box->addChild(term_frame::actionRow("info", 0, scale, m_infoKey, [this]() {
+    m_infoOpen = !m_infoOpen;
+    syncHost();
+    relayout();
+  }));
+  m_fixedRows.push_back(m_infoKey.row);
+
+  auto info = ui::column({.out = &m_hostInfoBox, .align = FlexAlign::Stretch, .gap = Style::spaceXs * scale});
+  for (std::size_t i = 0; i < kHostInfoRows; ++i) {
+    info->addChild(term_frame::infoRow(kHostInfoKeys[i], scale, m_hostInfoRows[i]));
+    m_fixedRows.push_back(m_hostInfoRows[i].row);
+  }
+  setShown(info.get(), false);
+  box->addChild(std::move(info));
+
+  syncHost();
+  return box;
+}
+
+// The profile picture, two rows tall: left click picks a new one, right click clears it; hover shows an accent frame.
+// Without a picture it shows the user's initial and a hint.
+std::unique_ptr<InputArea> HomeTab::createAvatarPicker(float scale) {
   const float avatarSize = 2.0F * kHomeRowHeight * scale + Style::spaceXs * scale;
   const float avatarInner = std::max(1.0F, avatarSize - 2.0F * Style::borderWidth);
   m_avatarSize = avatarSize;
@@ -674,7 +1218,7 @@ std::unique_ptr<Flex> HomeTab::createHostBox(float scale) {
       ui::label({
           .out = &m_avatarHint,
           .text = "click to set",
-          .fontSize = Style::fontSizeCaption * scale * 0.85F,
+          .fontSize = Style::fontSizeCaption * scale * kAvatarHintScale,
           .fontFamily = std::string(term_frame::kFont),
           .color = term_frame::dimColor(),
           .maxWidth = avatarInner,
@@ -682,8 +1226,7 @@ std::unique_ptr<Flex> HomeTab::createHostBox(float scale) {
           .textAlign = TextAlign::Center,
       })
   );
-  // Left click picks a new picture, right click clears it; hover shows an accent frame.
-  auto avatarArea = ui::inputArea(
+  return ui::inputArea(
       {
           .out = &m_avatarArea,
           .acceptedButtons = InputArea::buttonMask({BTN_LEFT, BTN_RIGHT}),
@@ -713,9 +1256,11 @@ std::unique_ptr<Flex> HomeTab::createHostBox(float scale) {
       },
       std::move(avatarFrame)
   );
+}
 
-  // Beside the avatar: the user name over the dim @host.
-  auto text = ui::column(
+// Beside the avatar: the user name over the dim @host.
+std::unique_ptr<Flex> HomeTab::createHostIdentity(float scale) {
+  return ui::column(
       {
           .out = &m_hostText,
           .align = FlexAlign::Stretch,
@@ -743,41 +1288,6 @@ std::unique_ptr<Flex> HomeTab::createHostBox(float scale) {
           .ellipsize = TextEllipsize::End,
       })
   );
-  box->addChild(
-      ui::row(
-          {.out = &m_hostHeader, .align = FlexAlign::Center, .gap = Style::spaceSm * scale}, std::move(avatarArea),
-          std::move(text)
-      )
-  );
-
-  // The live rows and the static facts take turns in the same place, so opening `i` costs only the difference.
-  auto liveBox = ui::column({.out = &m_hostLiveBox, .align = FlexAlign::Stretch, .gap = Style::spaceXs * scale});
-  constexpr std::array<std::string_view, kHostLiveRows> live{"up", "kernel", "session"};
-  for (std::size_t i = 0; i < live.size(); ++i) {
-    liveBox->addChild(term_frame::infoRow(live[i], scale, m_hostLive[i]));
-    m_fixedRows.push_back(m_hostLive[i].row);
-  }
-  box->addChild(std::move(liveBox));
-
-  box->addChild(term_frame::actionRow("info", 0, scale, m_infoKey, [this]() {
-    m_infoOpen = !m_infoOpen;
-    syncHost();
-    relayout();
-  }));
-  m_fixedRows.push_back(m_infoKey.row);
-
-  auto info = ui::column({.out = &m_hostInfoBox, .align = FlexAlign::Stretch, .gap = Style::spaceXs * scale});
-  constexpr std::array<std::string_view, kHostInfoRows> infoKeys{"os", "shell", "wm", "pkgs", "gpu", "display"};
-  for (std::size_t i = 0; i < infoKeys.size(); ++i) {
-    info->addChild(term_frame::infoRow(infoKeys[i], scale, m_hostInfoRows[i]));
-    m_fixedRows.push_back(m_hostInfoRows[i].row);
-  }
-  info->setVisible(false);
-  info->setParticipatesInLayout(false);
-  box->addChild(std::move(info));
-
-  syncHost();
-  return box;
 }
 
 void HomeTab::syncHost() {
@@ -791,37 +1301,37 @@ void HomeTab::syncHost() {
   }
   const ScriptJob& job = *m_liveJob;
   const auto fact = [&job](std::string_view key) {
-    std::string value = scriptValue(job, key);
-    return value.empty() ? std::string{"--"} : value;
+    const std::string_view value = scriptValue(job, key);
+    return std::string(value.empty() ? "--" : value);
   };
 
   const auto up = systemUptime();
-  term_frame::setLabelTone(m_hostLive[0].value, up.has_value() ? formatUptime(*up) : "n/a", Tone::Normal);
+  term_frame::setLabelTone(m_hostLive[LiveUptime].value, up.has_value() ? formatUptime(*up) : "n/a", Tone::Normal);
 
-  const std::string running = scriptValue(job, "kernel_run");
-  const std::string installed = scriptValue(job, "kernel_inst");
+  const std::string_view running = scriptValue(job, "kernel_run");
+  const std::string_view installed = scriptValue(job, "kernel_inst");
   const bool kernelDiffers = !running.empty() && installed != running;
-  // A leading "!" says "warning" without relying on the colour.
-  if (m_hostLive[1].key != nullptr && m_hostLive[1].key->text() != (kernelDiffers ? "! kernel" : "kernel")) {
-    m_hostLive[1].key->setText(kernelDiffers ? "! kernel" : "kernel");
+  term_frame::InfoRow& kernel = m_hostLive[LiveKernel];
+  if (kernel.key != nullptr) {
+    kernel.key->setText(kernelDiffers ? "! kernel" : "kernel"); // a leading "!" says "warning" without the colour
   }
   if (running.empty()) {
-    term_frame::setLabelTone(m_hostLive[1].value, kernelLabel(), Tone::Normal);
+    term_frame::setLabelTone(kernel.value, kernelLabel(), Tone::Normal);
   } else if (kernelDiffers) {
-    term_frame::setLabelTone(m_hostLive[1].value, kernelDelta(running, installed), Tone::Warning);
+    term_frame::setLabelTone(kernel.value, kernelDelta(running, installed), Tone::Warning);
   } else {
-    term_frame::setLabelTone(m_hostLive[1].value, running, Tone::Normal);
+    term_frame::setLabelTone(kernel.value, running, Tone::Normal);
   }
 
-  const std::string wm = scriptValue(job, "wm");
+  const std::string_view wm = scriptValue(job, "wm");
   const long long outputs = numberValue(job, "outputs", -1);
   term_frame::setLabelTone(
-      m_hostLive[2].value, wm.empty() || outputs < 0 ? std::string{"--"} : std::format("{} · {}", wm, networkOutputs(outputs)),
-      Tone::Normal
+      m_hostLive[LiveSession].value,
+      wm.empty() || outputs < 0 ? std::string{"--"} : std::format("{} · {}", wm, formatOutputs(outputs)), Tone::Normal
   );
 
-  const std::array<std::string, kHostInfoRows> values{
-      m_osLabel, fact("shell"), fact("wm"), fact("packages"), m_gpuLabel, fact("display")};
+  const std::array<std::string, kHostInfoRows> values{m_osLabel,  fact("shell"),  fact("wm"), fact("packages"),
+                                                      m_gpuLabel, fact("display")}; // HostInfo order
   for (std::size_t i = 0; i < kHostInfoRows; ++i) {
     term_frame::setLabelTone(m_hostInfoRows[i].value, values[i], Tone::Normal);
   }
@@ -832,14 +1342,14 @@ void HomeTab::syncHost() {
   shapeChanged |= setShown(m_hostLiveBox, !m_infoOpen);
   std::vector<FitItem> items;
   if (m_infoOpen) {
-    for (const std::size_t i : std::array<std::size_t, 6>{0, 4, 5, 3, 1, 2}) { // os, gpu, display, pkgs, shell, wm
-      items.push_back({m_hostInfoRows[i].row, 1, true});
+    for (const HostInfo index : kInfoPriority) {
+      items.push_back({m_hostInfoRows[index].row, 1, true});
     }
     items.push_back({m_hostHeader, 2, false});
   } else {
     items.push_back({m_hostHeader, 2, true});
-    for (const std::size_t i : std::array<std::size_t, 3>{1, 2, 0}) { // kernel, session, up
-      items.push_back({m_hostLive[i].row, 1, true});
+    for (const HostLive index : kLivePriority) {
+      items.push_back({m_hostLive[index].row, 1, true});
     }
   }
   shapeChanged |= fitItems(items, m_capacity[TileHost] - 1); // the key row takes one line
@@ -857,10 +1367,6 @@ void HomeTab::syncHost() {
 
 std::unique_ptr<Flex> HomeTab::createUpkeepBox(float scale) {
   auto box = term_frame::btopBox("³", "upkeep", scale, &m_upkeepFrame);
-  const auto hidden = [](Flex* node) {
-    node->setVisible(false);
-    node->setParticipatesInLayout(false);
-  };
   const auto leave = [this](term_frame::Keyword& key) {
     return [this, &key]() {
       if (m_armed == &key) {
@@ -874,26 +1380,32 @@ std::unique_ptr<Flex> HomeTab::createUpkeepBox(float scale) {
   box->addChild(term_frame::infoRow("! root", scale, m_rootRow));
   for (term_frame::InfoRow* row : {&m_rebootRow, &m_rootRow}) {
     row->key->setColor(term_frame::toneColor(Tone::Warning));
-    hidden(row->row);
+    setShown(row->row, false);
     m_fixedRows.push_back(row->row);
   }
-  box->addChild(term_frame::actionRow(
-      "! failed", 2, scale, m_failedRow,
-      [this]() {
-        launchInTerminal("failed", "systemctl", "systemctl --failed --no-pager; systemctl --user --failed --no-pager");
-      },
-      nullptr
-  ));
-  box->addChild(term_frame::actionRow(
-      "! journal", 2, scale, m_journalRow,
-      [this]() {
-        markJournalSeen();
-        launchInTerminal("journal", "journalctl", "journalctl -b -p err");
-      },
-      nullptr
-  ));
+  box->addChild(
+      term_frame::actionRow(
+          "! failed", 2, scale, m_failedRow,
+          [this]() {
+            launchInTerminal(
+                "failed", "systemctl", "systemctl --failed --no-pager; systemctl --user --failed --no-pager"
+            );
+          },
+          nullptr
+      )
+  );
+  box->addChild(
+      term_frame::actionRow(
+          "! journal", 2, scale, m_journalRow,
+          [this]() {
+            markJournalSeen();
+            launchInTerminal("journal", "journalctl", "journalctl -b -p err");
+          },
+          nullptr
+      )
+  );
   for (term_frame::ActionRow* row : {&m_failedRow, &m_journalRow}) {
-    hidden(row->group);
+    setShown(row->group, false);
     m_fixedRows.push_back(row->row);
     m_detailLabels.push_back(row->detail);
   }
@@ -901,44 +1413,52 @@ std::unique_ptr<Flex> HomeTab::createUpkeepBox(float scale) {
   box->addChild(dimCaption(&m_upkeepSummary, scale));
 
   // Housekeeping: each key shows what it will do and asks before it runs.
-  box->addChild(term_frame::actionRow(
-      "update", 0, scale, m_updateRow,
-      [this]() {
-        pressConfirmed(m_updateRow.key, &m_updateRow, "runs yay -Syu in a terminal", "", [this]() {
-          launchInTerminal("update", "yay", "yay -Syu");
-        });
-      },
-      leave(m_updateRow.key)
-  ));
-  box->addChild(term_frame::actionRow(
-      "orphans", 0, scale, m_orphansRow,
-      [this]() {
-        const int count = static_cast<int>(numberValue(*m_upkeepJob, "orphans", -1));
-        if (count <= 0) {
-          clearArmed();
-          if (term_frame::setActionDetail(m_orphansRow, count == 0 ? "nothing to remove" : "not checked yet", Tone::Dim)) {
-            relayout();
-          }
-          return;
-        }
-        pressConfirmed(
-            m_orphansRow.key, &m_orphansRow,
-            std::format("pacman -Rns removes {} orphans; it lists them and asks first", count), "",
-            [this]() { launchInTerminal("orphans", "pacman -Rns", "sudo pacman -Rns $(pacman -Qdtq)"); }
-        );
-      },
-      leave(m_orphansRow.key)
-  ));
-  box->addChild(term_frame::actionRow(
-      "cache", 0, scale, m_cacheRow,
-      [this]() {
-        pressConfirmed(
-            m_cacheRow.key, &m_cacheRow, "paccache -rv keeps three versions of each package and deletes the rest", "",
-            [this]() { launchInTerminal("cache", "paccache", "sudo paccache -rv"); }
-        );
-      },
-      leave(m_cacheRow.key)
-  ));
+  box->addChild(
+      term_frame::actionRow(
+          "update", 0, scale, m_updateRow,
+          [this]() {
+            pressConfirmed(m_updateRow.key, &m_updateRow, "runs yay -Syu in a terminal", "", [this]() {
+              launchInTerminal("update", "yay", "yay -Syu");
+            });
+          },
+          leave(m_updateRow.key)
+      )
+  );
+  box->addChild(
+      term_frame::actionRow(
+          "orphans", 0, scale, m_orphansRow,
+          [this]() {
+            const int count = static_cast<int>(numberValue(*m_upkeepJob, "orphans", -1));
+            if (count <= 0) {
+              clearArmed();
+              if (term_frame::setActionDetail(
+                      m_orphansRow, count == 0 ? "nothing to remove" : "not checked yet", Tone::Dim
+                  )) {
+                relayout();
+              }
+              return;
+            }
+            pressConfirmed(
+                m_orphansRow.key, &m_orphansRow,
+                std::format("pacman -Rns removes {} orphans; it lists them and asks first", count), "",
+                [this]() { launchInTerminal("orphans", "pacman -Rns", "sudo pacman -Rns $(pacman -Qdtq)"); }
+            );
+          },
+          leave(m_orphansRow.key)
+      )
+  );
+  box->addChild(
+      term_frame::actionRow(
+          "cache", 0, scale, m_cacheRow,
+          [this]() {
+            pressConfirmed(
+                m_cacheRow.key, &m_cacheRow, "paccache -rv keeps three versions of each package and deletes the rest",
+                "", [this]() { launchInTerminal("cache", "paccache", "sudo paccache -rv"); }
+            );
+          },
+          leave(m_cacheRow.key)
+      )
+  );
   for (term_frame::ActionRow* row : {&m_updateRow, &m_orphansRow, &m_cacheRow}) {
     m_fixedRows.push_back(row->row);
     m_detailLabels.push_back(row->detail);
@@ -952,15 +1472,13 @@ void HomeTab::syncUpkeep() {
     return;
   }
   const ScriptJob& live = *m_liveJob;
-  const ScriptJob& slow = *m_upkeepJob;
-  bool changed = false;
-
-  const std::string running = scriptValue(live, "kernel_run");
-  const std::string installed = scriptValue(live, "kernel_inst");
-  const bool rebootNeeded = live.loaded && (scriptValue(live, "reboot") == "1" || (!running.empty() && running != installed));
+  const std::string_view running = scriptValue(live, "kernel_run");
+  const std::string_view installed = scriptValue(live, "kernel_inst");
+  const bool rebootNeeded =
+      live.loaded && (scriptValue(live, "reboot") == "1" || (!running.empty() && running != installed));
   const health::Level rootLevel = health::disk("root", m_rootUsed * 100.0);
-  const std::string failed = scriptValue(live, "failed");
-  const int failedCount = failed.empty() ? 0 : static_cast<int>(std::count(failed.begin(), failed.end(), ',')) + 1;
+  const std::string_view failed = scriptValue(live, "failed");
+  const int failedCount = failed.empty() ? 0 : static_cast<int>(std::ranges::count(failed, ',')) + 1;
   const long long journalTotal = numberValue(live, "journal_total", 0);
   // A check that started before the journal was opened still counts those errors as new; ignore it.
   const bool stale = live.startedAt < m_journalMarkedAt;
@@ -986,30 +1504,55 @@ void HomeTab::syncUpkeep() {
     );
   }
   if (showFailed) {
-    term_frame::setActionValue(m_failedRow, failedWarn ? unitList(failed) : "none now", failedWarn ? Tone::Warning : Tone::Dim);
+    term_frame::setActionValue(
+        m_failedRow, failedWarn ? unitList(failed) : "none now", failedWarn ? Tone::Warning : Tone::Dim
+    );
   }
   if (showJournal) {
     term_frame::setActionValue(
-        m_journalRow, std::format("{} new · {} total", journalNew, journalTotal), journalWarn ? Tone::Warning : Tone::Dim
+        m_journalRow, std::format("{} new · {} total", journalNew, journalTotal),
+        journalWarn ? Tone::Warning : Tone::Dim
     );
   }
 
   // What is fine collapses into one dim line.
-  std::vector<std::string> fine;
+  std::string summary;
   if (live.loaded && failedCount == 0) {
-    fine.emplace_back("failed 0");
+    summary = "failed 0";
   }
   if (live.loaded && !journalWarn) {
-    fine.push_back(std::format("errors {} seen", journalTotal));
-  }
-  std::string summary;
-  for (const std::string& part : fine) {
-    summary += (summary.empty() ? "" : " · ") + part;
+    summary += (summary.empty() ? "" : " · ") + std::format("errors {} seen", journalTotal);
   }
   term_frame::setLabelTone(m_upkeepSummary, summary, Tone::Dim);
+  syncUpkeepHousekeeping();
 
-  // Housekeeping values.
-  std::string updates = m_upkeepJob->running ? "checking…" : "--";
+  // Header slot: how many of the warnings need action.
+  const int actions = (showReboot ? 1 : 0) + (showRoot ? 1 : 0) + (failedWarn ? 1 : 0) + (journalWarn ? 1 : 0);
+  setUpkeepHeader(*m_upkeepFrame, live.loaded, actions);
+
+  // Warnings first, then the housekeeping keys, then the dim lines; what does not fit is left out. An armed or failed
+  // row takes its detail lines with it.
+  const auto group = [this](const term_frame::ActionRow& row) { return 1 + detailLines(row.detail); };
+  const std::vector<FitItem> items{
+      {m_rebootRow.row, 1, showReboot},
+      {m_rootRow.row, 1, showRoot},
+      {m_failedRow.group, group(m_failedRow), showFailed},
+      {m_journalRow.group, group(m_journalRow), showJournal},
+      {m_updateRow.group, group(m_updateRow), true},
+      {m_orphansRow.group, group(m_orphansRow), true},
+      {m_cacheRow.group, group(m_cacheRow), true},
+      {m_upkeepSummary, 1, !summary.empty()},
+      {m_lastUpdate, 1, !m_lastUpdate->text().empty()},
+  };
+  if (fitItems(items, m_capacity[TileUpkeep])) {
+    relayout();
+  }
+}
+
+// The housekeeping rows (updates, orphans, cache) and the last-upgrade line, from the slow package check.
+void HomeTab::syncUpkeepHousekeeping() {
+  const ScriptJob& slow = *m_upkeepJob;
+  std::string updates = slow.running ? "checking…" : "--";
   Tone updateTone = Tone::Dim;
   if (slow.loaded) {
     const long long repo = std::max(0LL, numberValue(slow, "repo", 0));
@@ -1032,48 +1575,16 @@ void HomeTab::syncUpkeep() {
       orphans > 0 ? Tone::Normal : Tone::Dim
   );
 
-  std::string cache = "--";
   const long long cacheBytes = numberValue(slow, "cache", -1);
-  if (slow.loaded && cacheBytes >= 0) {
-    const double gib = static_cast<double>(cacheBytes) / (1024.0 * 1024.0 * 1024.0);
-    cache = gib >= 1.0 ? std::format("{:.1f} GiB", gib) : std::format("{:.0f} MiB", gib * 1024.0);
-  }
-  term_frame::setActionValue(m_cacheRow, cache, Tone::Normal);
+  term_frame::setActionValue(
+      m_cacheRow, slow.loaded && cacheBytes >= 0 ? formatCacheSize(cacheBytes) : std::string{"--"}, Tone::Normal
+  );
 
   const long long last = numberValue(slow, "last", 0);
-  const std::string lastText = last > 0 ? "updated " + formatAgo(std::time(nullptr) - static_cast<std::time_t>(last)) : "";
-  term_frame::setLabelTone(m_lastUpdate, lastText, Tone::Dim);
-
-  // Header slot: how many of the warnings need action.
-  const int actions = (showReboot ? 1 : 0) + (showRoot ? 1 : 0) + (failedWarn ? 1 : 0) + (journalWarn ? 1 : 0);
-  if (!live.loaded) {
-    m_upkeepFrame->setInfo("checking…");
-    m_upkeepFrame->setInfoColor(colorSpecFromRole(ColorRole::OnSurface));
-  } else if (actions == 0) {
-    m_upkeepFrame->setInfo("all clear");
-    m_upkeepFrame->setInfoColor(colorSpecFromRole(ColorRole::OnSurface));
-  } else {
-    m_upkeepFrame->setInfo(std::format("! {} {} action", actions, actions == 1 ? "needs" : "need"));
-    m_upkeepFrame->setInfoColor(colorSpecFromRole(ColorRole::Warning));
-  }
-  // Warnings first, then the housekeeping keys, then the dim lines; what does not fit is left out. An armed or failed
-  // row takes its detail lines with it.
-  const auto group = [this](const term_frame::ActionRow& row) { return 1 + detailLines(row.detail); };
-  const std::vector<FitItem> items{
-      {m_rebootRow.row, 1, showReboot},
-      {m_rootRow.row, 1, showRoot},
-      {m_failedRow.group, group(m_failedRow), showFailed},
-      {m_journalRow.group, group(m_journalRow), showJournal},
-      {m_updateRow.group, group(m_updateRow), true},
-      {m_orphansRow.group, group(m_orphansRow), true},
-      {m_cacheRow.group, group(m_cacheRow), true},
-      {m_upkeepSummary, 1, !summary.empty()},
-      {m_lastUpdate, 1, !lastText.empty()},
-  };
-  changed |= fitItems(items, m_capacity[TileUpkeep]);
-  if (changed) {
-    relayout();
-  }
+  term_frame::setLabelTone(
+      m_lastUpdate, last > 0 ? "updated " + formatAgo(std::time(nullptr) - static_cast<std::time_t>(last)) : "",
+      Tone::Dim
+  );
 }
 
 void HomeTab::markJournalSeen() {
@@ -1107,25 +1618,29 @@ std::unique_ptr<Flex> HomeTab::createInboxBox(float scale) {
   addHiddenRows(*box, scale, m_clipRows, m_fixedRows, [this](std::size_t i) {
     return [this, i]() { copyClipboardEntry(i); };
   });
-  box->addChild(ui::label({
-      .out = &m_clipFull,
-      .fontSize = term_frame::kBtopFontSize * scale,
-      .fontFamily = std::string(term_frame::kFont),
-      .color = term_frame::dimColor(),
-      .maxLines = 3,
-      .visible = false,
-      .participatesInLayout = false,
-  }));
+  box->addChild(
+      ui::label({
+          .out = &m_clipFull,
+          .fontSize = term_frame::kBtopFontSize * scale,
+          .fontFamily = std::string(term_frame::kFont),
+          .color = term_frame::dimColor(),
+          .maxLines = 3,
+          .visible = false,
+          .participatesInLayout = false,
+      })
+  );
   m_detailLabels.push_back(m_clipFull);
-  box->addChild(ui::label({
-      .out = &m_inboxDetail,
-      .fontSize = term_frame::kBtopFontSize * scale,
-      .fontFamily = std::string(term_frame::kFont),
-      .color = term_frame::toneColor(Tone::Error),
-      .maxLines = 3,
-      .visible = false,
-      .participatesInLayout = false,
-  }));
+  box->addChild(
+      ui::label({
+          .out = &m_inboxDetail,
+          .fontSize = term_frame::kBtopFontSize * scale,
+          .fontFamily = std::string(term_frame::kFont),
+          .color = term_frame::toneColor(Tone::Error),
+          .maxLines = 3,
+          .visible = false,
+          .participatesInLayout = false,
+      })
+  );
   m_detailLabels.push_back(m_inboxDetail);
   syncInbox();
   return box;
@@ -1135,92 +1650,34 @@ void HomeTab::syncInbox() {
   if (m_inboxFrame == nullptr) {
     return;
   }
-  bool changed = false;
   const auto now = std::chrono::system_clock::now();
+  const std::size_t rowLimit = static_cast<std::size_t>(m_capacity[TileInbox]);
 
-  // Newest unread first: the bar's own history (its newest entry is at the back), then what mako still shows.
-  struct NoteLine {
-    std::string title;
-    std::string age;
-    std::string makoId; // empty for the bar's own notifications
-  };
-  std::vector<NoteLine> lines;
+  // Newest unread first: the bar's own history, then what mako still shows. ● marks a notification.
   std::size_t unread = 0;
-  if (m_notifications != nullptr) {
-    const auto& history = m_notifications->history();
-    for (auto it = history.rbegin(); it != history.rend(); ++it) {
-      if (it->seen) {
-        continue;
-      }
-      ++unread;
-      if (lines.size() < kInboxNotes) {
-        const Notification& note = it->notification;
-        NoteLine line;
-        const std::string headline = note.summary.empty() ? note.body : note.summary;
-        line.title = oneLine(note.appName.empty() ? headline : note.appName + ": " + headline);
-        if (note.receivedWallClock.has_value()) {
-          line.age =
-              formatAgeShort(std::chrono::duration_cast<std::chrono::seconds>(now - *note.receivedWallClock).count());
-        }
-        lines.push_back(std::move(line));
-      }
-    }
-  }
-  const long long makoCount = numberValue(*m_notesJob, "count", 0);
-  unread += static_cast<std::size_t>(std::max(0LL, makoCount));
-  for (int n = 1; n <= static_cast<int>(kInboxNotes) && lines.size() < kInboxNotes && n <= makoCount; ++n) {
-    const std::string entry = scriptValue(*m_notesJob, std::format("note_{}", n));
-    const std::size_t tab = entry.find('\t');
-    if (tab == std::string::npos) {
-      continue;
-    }
-    lines.push_back({.title = oneLine(entry.substr(tab + 1)), .age = "dismiss", .makoId = entry.substr(0, tab)});
-  }
-  std::array<bool, kInboxNotes> noteWanted{};
+  const std::vector<NoteLine> notes = collectNotes(m_notifications, *m_notesJob, kInboxNotes, now, unread);
+  const std::array<bool, kInboxNotes> noteWanted = fillRows(m_noteRows, notes, rowLimit, [](const NoteLine& note) {
+    return std::pair{"● " + note.title, note.age};
+  });
   for (std::size_t i = 0; i < kInboxNotes; ++i) {
-    term_frame::ToggleRow& row = m_noteRows[i];
-    noteWanted[i] = i < lines.size();
-    if (!noteWanted[i] || row.button == nullptr) {
-      m_noteMako[i].clear();
-      continue;
-    }
-    m_noteMako[i] = lines[i].makoId;
-    const std::string shown = "● " + lines[i].title; // ● marks a notification
-    setRowName(row, shown);
-    term_frame::setToggleRow(row, true, false, lines[i].age);
+    m_noteMako[i] = i < notes.size() ? notes[i].makoId : std::string{};
   }
   m_inboxFrame->setInfo(std::format("{} unread", unread));
 
-  // The last clipboard entries, newest first.
-  const InputArea* focused = inputDispatcher() != nullptr ? inputDispatcher()->focusedArea() : nullptr;
+  // The last clipboard entries, newest first. ▸ marks one.
+  static const std::deque<ClipboardEntry> kNoClips;
+  const std::deque<ClipboardEntry>& clips =
+      m_services.clipboard != nullptr ? m_services.clipboard->history() : kNoClips;
+  const std::array<bool, kInboxClips> clipWanted =
+      fillRows(m_clipRows, clips, rowLimit, [&](const ClipboardEntry& clip) {
+        const bool hasTime = clip.capturedAt.time_since_epoch().count() > 0;
+        return std::pair{"▸ " + clipTitle(clip), hasTime ? ageShort(now, clip.capturedAt) : std::string{}};
+      });
   std::string fullText; // the whole text of the focused clipboard row
-  std::array<bool, kInboxClips> clipWanted{};
-  if (m_services.clipboard != nullptr) {
-    const auto& history = m_services.clipboard->history();
-    for (std::size_t i = 0; i < kInboxClips; ++i) {
-      term_frame::ToggleRow& row = m_clipRows[i];
-      clipWanted[i] = i < history.size();
-      if (!clipWanted[i] || row.button == nullptr) {
-        continue;
-      }
-      const ClipboardEntry& entry = history[i];
-      // Entries that look like secrets are masked; their text shows only while their row has the focus.
-      const bool secret = !entry.isImage() && secret_shape::looksSensitive(entry.textPreview);
-      std::string title = entry.isImage() ? std::string{"[image]"} : oneLine(entry.textPreview);
-      if (secret) {
-        title = std::string(secret_shape::kMaskedPreview);
-      } else if (title.empty()) {
-        title = "[data]";
-      }
-      const std::string shown = "▸ " + title; // ▸ marks a clipboard entry
-      setRowName(row, shown);
-      std::string age;
-      if (entry.capturedAt.time_since_epoch().count() > 0) {
-        age = formatAgeShort(std::chrono::duration_cast<std::chrono::seconds>(now - entry.capturedAt).count());
-      }
-      term_frame::setToggleRow(row, true, false, age);
-      if (focused != nullptr && row.button->inputArea() == focused && !entry.isImage()) {
-        fullText = oneLine(entry.textPreview).substr(0, 240);
+  if (const InputArea* focused = inputDispatcher() != nullptr ? inputDispatcher()->focusedArea() : nullptr) {
+    for (std::size_t i = 0; i < std::min(clips.size(), kInboxClips); ++i) {
+      if (m_clipRows[i].button != nullptr && m_clipRows[i].button->inputArea() == focused && !clips[i].isImage()) {
+        fullText = oneLine(clips[i].textPreview).substr(0, kClipFullChars);
       }
     }
   }
@@ -1237,8 +1694,7 @@ void HomeTab::syncInbox() {
     items.push_back({m_clipRows[i].button, 1, clipWanted[i]});
   }
   items.push_back({m_clipFull, 2, !fullText.empty()});
-  changed |= fitItems(items, capacity);
-  if (changed) {
+  if (fitItems(items, capacity)) {
     relayout();
   }
 }
@@ -1252,14 +1708,13 @@ void HomeTab::activateNote(std::size_t slot) {
   const bool started = process::runAsync(
       std::vector<std::string>{"makoctl", "dismiss", "-n", m_noteMako[slot]},
       process::RunCallbacks{
-          .onExit =
-              [mailbox = m_mailbox](process::RunResult result) {
-                const std::string why = result.exitCode != 0 ? failureReason(result) : std::string{};
-                DeferredCall::callLater([mailbox, why = std::move(why)]() {
-                  mailbox->done.push_back({.id = "inbox", .exitCode = why.empty() ? 0 : 1, .error = why});
-                  PanelManager::instance().refresh();
-                });
-              },
+          .onExit = [mailbox = m_mailbox](process::RunResult result) {
+            const std::string why = result.exitCode != 0 ? failureReason(result) : std::string{};
+            DeferredCall::callLater([mailbox, why = std::move(why)]() {
+              mailbox->done.push_back({.id = "inbox", .exitCode = why.empty() ? 0 : 1, .error = why});
+              PanelManager::instance().refresh();
+            });
+          },
       }
   );
   if (!started) {
@@ -1305,7 +1760,7 @@ std::unique_ptr<Flex> HomeTab::createTogglesBox(float scale) {
   auto box = term_frame::btopBox("²", "toggles", scale, &m_togglesFrame);
   const auto& shortcuts =
       m_config != nullptr ? m_config->config().controlCenter.shortcuts : std::vector<ShortcutConfig>{};
-  const std::size_t count = std::min(shortcuts.size(), std::size_t{6});
+  const std::size_t count = std::min(shortcuts.size(), kMaxToggleRows);
 
   auto list = ui::column({
       .out = &m_togglesList,
@@ -1321,17 +1776,6 @@ std::unique_ptr<Flex> HomeTab::createTogglesBox(float scale) {
   }
   m_shortcutPads.clear();
 
-  auto takeReusable = [&previous](std::string_view type) -> std::unique_ptr<Shortcut> {
-    for (auto it = previous.begin(); it != previous.end(); ++it) {
-      if (*it != nullptr && (*it)->id() == type) {
-        auto found = std::move(*it);
-        previous.erase(it);
-        return found;
-      }
-    }
-    return nullptr;
-  };
-
   // A plugin shortcut seeds its Luau runtime once, at construction. Plugin settings changed
   // since the last build means every reusable plugin instance is stale, so drop it and let
   // ShortcutRegistry::create() re-seed from the current config.
@@ -1342,7 +1786,7 @@ std::unique_ptr<Flex> HomeTab::createTogglesBox(float scale) {
 
   for (std::size_t i = 0; i < count; ++i) {
     const auto& sc = shortcuts[i];
-    auto shortcut = takeReusable(sc.type);
+    auto shortcut = takeShortcut(previous, sc.type);
     // Match on the id syntax, not the registry: a disabled plugin has already left the registry.
     if (shortcut != nullptr && pluginsChanged && scripting::isValidPluginEntryId(sc.type)) {
       shortcut.reset();
@@ -1357,40 +1801,7 @@ std::unique_ptr<Flex> HomeTab::createTogglesBox(float scale) {
     if (reused) {
       shortcut->onPanelOpen();
     }
-
-    const std::size_t padIdx = m_shortcutPads.size();
-    ShortcutPad pad;
-    auto row = term_frame::toggleRow(
-        toggleName(*shortcut), scale, pad.row,
-        [this, padIdx]() {
-          if (padIdx < m_shortcutPads.size()) {
-            m_shortcutPads[padIdx].shortcut->onClick();
-          }
-        },
-        [this, padIdx]() {
-          if (padIdx < m_shortcutPads.size()) {
-            m_shortcutPads[padIdx].shortcut->onRightClick();
-          }
-        }
-    );
-    if (auto* ia = pad.row.button->inputArea(); ia != nullptr) {
-      ia->setOnAxisHandler([this, padIdx](const InputArea::PointerData& data) -> bool {
-        if (data.axis != WL_POINTER_AXIS_VERTICAL_SCROLL || padIdx >= m_shortcutPads.size()) {
-          return false;
-        }
-        const float steps = data.scrollSteps();
-        if (steps == 0.0F) {
-          return false;
-        }
-        // Scroll up moves forward (toward performance); Wayland reports up as a negative delta.
-        m_shortcutPads[padIdx].shortcut->onScroll(steps > 0.0F ? -1 : 1);
-        return true;
-      });
-    }
-    m_fixedRows.push_back(pad.row.button);
-    pad.shortcut = std::move(shortcut);
-    m_shortcutPads.push_back(std::move(pad));
-    list->addChild(std::move(row));
+    addShortcutRow(*list, std::move(shortcut), scale);
   }
 
   if (!m_shortcutPads.empty()) {
@@ -1399,6 +1810,42 @@ std::unique_ptr<Flex> HomeTab::createTogglesBox(float scale) {
     m_togglesList = nullptr;
   }
   return box;
+}
+
+void HomeTab::addShortcutRow(Flex& list, std::unique_ptr<Shortcut> shortcut, float scale) {
+  const std::size_t padIdx = m_shortcutPads.size();
+  ShortcutPad pad;
+  auto row = term_frame::toggleRow(
+      toggleName(*shortcut), scale, pad.row,
+      [this, padIdx]() {
+        if (padIdx < m_shortcutPads.size()) {
+          m_shortcutPads[padIdx].shortcut->onClick();
+        }
+      },
+      [this, padIdx]() {
+        if (padIdx < m_shortcutPads.size()) {
+          m_shortcutPads[padIdx].shortcut->onRightClick();
+        }
+      }
+  );
+  if (auto* area = pad.row.button->inputArea(); area != nullptr) {
+    area->setOnAxisHandler([this, padIdx](const InputArea::PointerData& data) -> bool {
+      if (data.axis != WL_POINTER_AXIS_VERTICAL_SCROLL || padIdx >= m_shortcutPads.size()) {
+        return false;
+      }
+      const float steps = data.scrollSteps();
+      if (steps == 0.0F) {
+        return false;
+      }
+      // Scroll up moves forward (toward performance); Wayland reports up as a negative delta.
+      m_shortcutPads[padIdx].shortcut->onScroll(steps > 0.0F ? -1 : 1);
+      return true;
+    });
+  }
+  m_fixedRows.push_back(pad.row.button);
+  pad.shortcut = std::move(shortcut);
+  m_shortcutPads.push_back(std::move(pad));
+  list.addChild(std::move(row));
 }
 
 void HomeTab::syncShortcuts() {
@@ -1432,7 +1879,8 @@ std::string HomeTab::toggleDetail(const Shortcut& shortcut, bool on) {
     }
     const auto minutes = std::chrono::duration_cast<std::chrono::minutes>(
                              std::chrono::steady_clock::now() - m_services.idleInhibitor->enabledSince()
-    ).count();
+    )
+                             .count();
     return minutes >= 60 ? std::format("· for {}h {}m", minutes / 60, minutes % 60) : std::format("· for {}m", minutes);
   }
   if (id == "nightlight") {
@@ -1488,10 +1936,9 @@ void HomeTab::addTimerRows(Flex& box, float scale) {
   for (std::size_t i = 0; i < kTimerPresetMinutes.size(); ++i) {
     const int minutes = kTimerPresetMinutes[i];
     idle->addChild(
-        term_frame::makeKeyword(
-            m_timerPresetKeys[i], std::to_string(minutes), kNoHotkey, scale,
-            [this, minutes]() { setTimerDuration(std::chrono::minutes{minutes}); }
-        )
+        term_frame::makeKeyword(m_timerPresetKeys[i], std::to_string(minutes), kNoHotkey, scale, [this, minutes]() {
+          setTimerDuration(std::chrono::minutes{minutes});
+        })
     );
   }
   m_fixedRows.push_back(m_timerIdleRow);
@@ -1520,18 +1967,12 @@ void HomeTab::addTimerRows(Flex& box, float scale) {
   first->addChild(term_frame::makeKeyword(m_timerControlKeys[0], "pause", 1, scale, [this]() { toggleTimer(); }));
   first->addChild(term_frame::makeKeyword(m_timerControlKeys[1], "reset", 1, scale, [this]() { resetTimer(); }));
   auto second = ui::row({.align = FlexAlign::Center, .gap = 0.0F});
-  second->addChild(
-      term_frame::makeKeyword(
-          m_timerControlKeys[2], "-1m", kNoHotkey, scale,
-          [this]() { setTimerDuration(m_timerDuration - std::chrono::minutes{1}); }
-      )
-  );
-  second->addChild(
-      term_frame::makeKeyword(
-          m_timerControlKeys[3], "+1m", kNoHotkey, scale,
-          [this]() { setTimerDuration(m_timerDuration + std::chrono::minutes{1}); }
-      )
-  );
+  second->addChild(term_frame::makeKeyword(m_timerControlKeys[2], "-1m", kNoHotkey, scale, [this]() {
+    setTimerDuration(m_timerDuration - std::chrono::minutes{1});
+  }));
+  second->addChild(term_frame::makeKeyword(m_timerControlKeys[3], "+1m", kNoHotkey, scale, [this]() {
+    setTimerDuration(m_timerDuration + std::chrono::minutes{1});
+  }));
   controls->addChild(std::move(first));
   controls->addChild(std::move(second));
   run->addChild(std::move(controls));
@@ -1542,15 +1983,16 @@ void HomeTab::addTimerRows(Flex& box, float scale) {
 }
 
 int HomeTab::timerGoal() const {
-  const int goal = m_config != nullptr ? m_config->config().controlCenter.timerDailyGoal : 6;
-  return std::clamp(goal, 1, 12);
+  const int goal = m_config != nullptr ? m_config->config().controlCenter.timerDailyGoal : kDefaultTimerGoal;
+  return std::clamp(goal, kMinTimerGoal, kMaxTimerGoal);
 }
 
 std::chrono::milliseconds HomeTab::timerRemaining() const {
   if (m_timerState != TimerState::Running) {
     return m_timerRemaining;
   }
-  const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(m_timerEnd - std::chrono::steady_clock::now());
+  const auto left =
+      std::chrono::duration_cast<std::chrono::milliseconds>(m_timerEnd - std::chrono::steady_clock::now());
   return std::max(left, std::chrono::milliseconds{0});
 }
 
@@ -1661,16 +2103,10 @@ void HomeTab::syncTimer() {
   if (m_timerTime == nullptr) {
     return;
   }
-  const auto remaining = timerRemaining();
-  m_timerShown = ceilSeconds(remaining);
-  const std::string timeText = formatTimer(m_timerShown);
-  if (m_timerTime->text() != timeText) {
-    m_timerTime->setText(timeText);
-  }
-  // The idle line shows the length that will start.
-  const std::string idleText = formatTimer(m_timerDuration);
-  if (m_timerIdleTime != nullptr && m_timerIdleTime->text() != idleText) {
-    m_timerIdleTime->setText(idleText);
+  m_timerShown = ceilSeconds(timerRemaining());
+  m_timerTime->setText(formatTimer(m_timerShown));
+  if (m_timerIdleTime != nullptr) {
+    m_timerIdleTime->setText(formatTimer(m_timerDuration)); // the idle line shows the length that will start
   }
 
   const bool running = m_timerState == TimerState::Running;
@@ -1691,47 +2127,20 @@ void HomeTab::syncTimer() {
       m_timerTime->setColor(colorSpecFromRole(ColorRole::Primary));
     }
   }
-
   if (m_timerStatus != nullptr) {
-    const std::string status = m_timerState == TimerState::Done ? "done" : "ready";
-    if (m_timerStatus->text() != status) {
-      m_timerStatus->setText(status);
-    }
+    m_timerStatus->setText(m_timerState == TimerState::Done ? "done" : "ready");
   }
 
-  // Session squares in the tile's header slot: filled for each counted session, empty up to the goal.
-  {
-    rollTimerDay();
-    const int goal = timerGoal();
-    const int filled = std::min(m_timerSessions, goal);
-    std::string squares;
-    for (int i = 0; i < goal; ++i) {
-      squares += i < filled ? "■" : "□";
-    }
-    squares += std::format(" {}/{}", filled, goal);
-    if (m_timerSessions > goal) {
-      squares += std::format(" +{}", m_timerSessions - goal);
-    }
-    m_squaresText = squares;
-    updateTodayHeader();
-  }
+  // Session squares in the tile's header slot.
+  rollTimerDay();
+  m_squaresText = sessionSquares(m_timerSessions, timerGoal());
+  updateTodayHeader();
 
-  const auto syncKey = [](term_frame::Keyword& key, std::string_view word, std::size_t hot, bool block) {
-    if (key.word != word || key.block != block || key.hot != hot) {
-      key.word = std::string(word);
-      key.hot = hot;
-      key.block = block;
-      key.blockText = key.word;
-      term_frame::refreshKeyword(key);
-    }
-  };
   // `start` and `pause` share the letter `a`.
-  syncKey(m_timerControlKeys[0], running ? "pause" : "start", running ? 1 : 2, false);
+  syncKeyword(m_timerControlKeys[0], running ? "pause" : "start", running ? 1 : 2, false);
   for (std::size_t i = 0; i < m_timerPresetKeys.size(); ++i) {
-    syncKey(
-        m_timerPresetKeys[i], m_timerPresetKeys[i].word, m_timerPresetKeys[i].hot,
-        m_timerDuration == std::chrono::minutes{kTimerPresetMinutes[i]}
-    );
+    term_frame::Keyword& key = m_timerPresetKeys[i];
+    syncKeyword(key, key.word, key.hot, m_timerDuration == std::chrono::minutes{kTimerPresetMinutes[i]});
   }
   if (changed) {
     relayout();
@@ -1744,15 +2153,21 @@ void HomeTab::syncTimer() {
 std::unique_ptr<Flex> HomeTab::createTodayBox(float scale) {
   auto box = term_frame::btopBox("⁴", "today", scale, &m_todayFrame);
   addTimerRows(*box, scale);
-  addHiddenRows(*box, scale, m_eventRows, m_fixedRows, [](std::size_t) { return []() { openControlCenterTab("calendar"); }; });
-  addHiddenRows(*box, scale, m_taskRows, m_fixedRows, [](std::size_t) { return []() { openControlCenterTab("tasks"); }; });
-  box->addChild(ui::label({
-      .out = &m_weatherLine,
-      .fontSize = term_frame::kBtopFontSize * scale,
-      .fontFamily = std::string(term_frame::kFont),
-      .color = colorSpecFromRole(ColorRole::OnSurface),
-      .maxLines = 1,
-  }));
+  addHiddenRows(*box, scale, m_eventRows, m_fixedRows, [](std::size_t) {
+    return []() { openControlCenterTab("calendar"); };
+  });
+  addHiddenRows(*box, scale, m_taskRows, m_fixedRows, [](std::size_t) {
+    return []() { openControlCenterTab("tasks"); };
+  });
+  box->addChild(
+      ui::label({
+          .out = &m_weatherLine,
+          .fontSize = term_frame::kBtopFontSize * scale,
+          .fontFamily = std::string(term_frame::kFont),
+          .color = colorSpecFromRole(ColorRole::OnSurface),
+          .maxLines = 1,
+      })
+  );
   syncToday();
   return box;
 }
@@ -1770,114 +2185,26 @@ void HomeTab::syncToday() {
   if (m_todayFrame == nullptr) {
     return;
   }
-  bool changed = false;
   const auto now = std::chrono::system_clock::now();
-  const auto localDay = [](std::chrono::system_clock::time_point at) {
-    const std::time_t t = std::chrono::system_clock::to_time_t(at);
-    std::tm local{};
-    localtime_r(&t, &local);
-    return local.tm_year * 400 + local.tm_yday;
-  };
   const int today = localDay(now);
+  const std::size_t rowLimit = static_cast<std::size_t>(m_capacity[TileToday]);
 
-  // Events that have not ended yet, soonest first.
-  std::vector<const CalendarEvent*> upcoming;
-  const bool calendarOn = m_calendar != nullptr && m_calendar->enabled() && m_calendar->hasData();
-  if (calendarOn) {
-    for (const CalendarEvent& event : m_calendar->snapshot().events) {
-      if (event.end > now) {
-        upcoming.push_back(&event);
-      }
-    }
-    std::ranges::sort(upcoming, [](const CalendarEvent* a, const CalendarEvent* b) { return a->start < b->start; });
-  }
-  std::array<bool, kTodayItems> eventWanted{};
-  for (std::size_t i = 0; i < kTodayItems; ++i) {
-    term_frame::ToggleRow& row = m_eventRows[i];
-    eventWanted[i] = i < upcoming.size();
-    if (!eventWanted[i] || row.button == nullptr) {
-      continue;
-    }
-    const CalendarEvent& event = *upcoming[i];
-    std::string when;
-    if (event.allDay) {
-      when = "all day";
-    } else if (event.start <= now) {
-      when = "now";
-    } else {
-      const std::string clock = clockText(event.start);
-      const int days = localDay(event.start) - today;
-      if (days == 0) {
-        when = clock;
-      } else if (days == 1) {
-        when = "tmrw " + clock;
-      } else {
-        const std::time_t t = std::chrono::system_clock::to_time_t(event.start);
-        std::tm local{};
-        localtime_r(&t, &local);
-        char weekday[8];
-        std::strftime(weekday, sizeof(weekday), "%a", &local);
-        when = std::string(weekday) + " " + clock;
-      }
-    }
-    const std::string title = "◇ " + oneLine(event.title); // ◇ marks an event
-    setRowName(row, title);
-    term_frame::setToggleRow(row, true, false, when);
-  }
-
-  // Open tasks, marked with an empty box so they read apart from the events above them.
-  std::vector<const TaskItem*> open;
-  if (m_tasks != nullptr) {
-    for (const TaskItem& item : m_tasks->snapshot().items) {
-      if (!item.completed) {
-        open.push_back(&item);
-      }
-    }
-  }
+  // Events that have not ended yet, soonest first; then the open tasks, marked with an empty box so they read apart
+  // from the events above them.
+  const std::vector<const CalendarEvent*> upcoming = upcomingEvents(m_calendar, now);
+  const std::array<bool, kTodayItems> eventWanted =
+      fillRows(m_eventRows, upcoming, rowLimit, [&](const CalendarEvent* event) {
+        return std::pair{"◇ " + oneLine(event->title), eventWhen(*event, now, today)};
+      }); // ◇ marks an event
   const std::string todayKey = localDateKey();
-  std::array<bool, kTodayItems> taskWanted{};
-  for (std::size_t i = 0; i < kTodayItems; ++i) {
-    term_frame::ToggleRow& row = m_taskRows[i];
-    taskWanted[i] = i < open.size();
-    if (!taskWanted[i] || row.button == nullptr) {
-      continue;
-    }
-    const TaskItem& item = *open[i];
-    const std::string title = "□ " + oneLine(item.title);
-    setRowName(row, title);
-    std::string due;
-    if (!item.dueDate.empty()) {
-      due = item.dueDate == todayKey ? "today" : (item.dueDate < todayKey ? "late" : item.dueDate.substr(std::min<std::size_t>(5, item.dueDate.size())));
-    }
-    term_frame::setToggleRow(row, true, false, due);
-  }
-
-  // One weather line: now, the sky, today's range.
-  std::string weather = "weather --";
-  if (m_services.weather != nullptr && m_services.weather->snapshot().valid) {
-    const WeatherSnapshot& snapshot = m_services.weather->snapshot();
-    weather = std::format(
-        "{:.0f}° {}", snapshot.current.temperatureC,
-        StringUtils::toLower(WeatherService::shortDescriptionForCode(snapshot.current.weatherCode))
-    );
-    if (!snapshot.forecastDays.empty()) {
-      weather += std::format(
-          " · {:.0f}°–{:.0f}°", snapshot.forecastDays.front().temperatureMinC, snapshot.forecastDays.front().temperatureMaxC
-      );
-    }
-  }
-  term_frame::setLabelTone(m_weatherLine, weather, Tone::Normal);
+  const std::vector<const TaskItem*> open = openTasks(m_tasks);
+  const std::array<bool, kTodayItems> taskWanted = fillRows(m_taskRows, open, rowLimit, [&](const TaskItem* item) {
+    return std::pair{"□ " + oneLine(item->title), taskDue(item->dueDate, todayKey)};
+  });
+  term_frame::setLabelTone(m_weatherLine, weatherText(m_services.weather), Tone::Normal);
 
   // Header slot: the countdown to the next timed event today; the session squares only when there is none.
-  m_nextText.clear();
-  for (const CalendarEvent* event : upcoming) {
-    if (event->allDay || event->start <= now || localDay(event->start) != today) {
-      continue;
-    }
-    const auto minutes = std::chrono::duration_cast<std::chrono::minutes>(event->start - now).count();
-    m_nextText = minutes < 60 ? std::format("in {}m", minutes + 1) : std::format("in {}h {}m", minutes / 60, minutes % 60);
-    break;
-  }
+  m_nextText = nextEventCountdown(upcoming, now, today);
   updateTodayHeader();
 
   // The timer line comes first and keeps its lines (one idle, two running); then events, tasks and the weather, in
@@ -1891,8 +2218,7 @@ void HomeTab::syncToday() {
     items.push_back({m_taskRows[i].button, 1, taskWanted[i]});
   }
   items.push_back({m_weatherLine, 1, true});
-  changed |= fitItems(items, capacity);
-  if (changed) {
+  if (fitItems(items, capacity)) {
     relayout();
   }
 }
@@ -1905,20 +2231,26 @@ void HomeTab::syncToday() {
 std::unique_ptr<Flex> HomeTab::createFleetBox(float scale) {
   auto box = term_frame::btopBox("⁶", "fleet", scale, &m_fleetFrame);
   for (std::size_t i = 0; i < kFleetRows; ++i) {
-    box->addChild(term_frame::toggleRow(kFleetNames[i], scale, m_fleetRows[i], [this, i]() { activateFleet(i); }, nullptr));
+    box->addChild(
+        term_frame::toggleRow(kFleetNames[i], scale, m_fleetRows[i], [this, i]() { activateFleet(i); }, nullptr)
+    );
     m_fixedRows.push_back(m_fleetRows[i].button);
   }
   // One row per tailscale peer; shown instead of the summary line when the tile has room.
-  addHiddenRows(*box, scale, m_peerRows, m_fixedRows, [](std::size_t) { return []() { openControlCenterTab("network"); }; });
-  box->addChild(ui::label({
-      .out = &m_fleetDetail,
-      .fontSize = term_frame::kBtopFontSize * scale,
-      .fontFamily = std::string(term_frame::kFont),
-      .color = term_frame::toneColor(Tone::Error),
-      .maxLines = 3,
-      .visible = false,
-      .participatesInLayout = false,
-  }));
+  addHiddenRows(*box, scale, m_peerRows, m_fixedRows, [](std::size_t) {
+    return []() { openControlCenterTab("network"); };
+  });
+  box->addChild(
+      ui::label({
+          .out = &m_fleetDetail,
+          .fontSize = term_frame::kBtopFontSize * scale,
+          .fontFamily = std::string(term_frame::kFont),
+          .color = term_frame::toneColor(Tone::Error),
+          .maxLines = 3,
+          .visible = false,
+          .participatesInLayout = false,
+      })
+  );
   m_detailLabels.push_back(m_fleetDetail);
   syncFleet();
   return box;
@@ -1937,110 +2269,46 @@ void HomeTab::syncFleet() {
     std::filesystem::create_directories(fleetPath().parent_path(), error);
     std::ofstream(fleetPath(), std::ios::trunc) << m_fleetAt << '\n' << job.out;
   }
-  const long long age = m_fleetAt > 0 ? std::time(nullptr) - m_fleetAt : -1;
-  const bool stale = job.running || age < 0 || age > 90;
+  const long long nowSeconds = std::time(nullptr);
+  const long long age = m_fleetAt > 0 ? nowSeconds - m_fleetAt : -1;
+  const bool stale = job.running || age < 0 || age > kFleetStaleSeconds;
   const std::string ageText = age >= 0 ? " · " + formatAgeShort(age) : std::string{};
 
-  struct Line {
-    bool show = true;
-    bool down = false;
-    bool live = false; // read straight from a service, never stale
-    std::string value = "unknown";
+  // In FleetRow order.
+  const std::array<FleetLine, kFleetRows> lines{
+      serverLine(job), syncthingLine(job), radicaleLine(m_calendar), tailscaleLine(job)
   };
-  std::array<Line, kFleetRows> lines;
-
-  const std::string tailscale = scriptValue(job, "tailscale");
-  const std::string server = scriptValue(job, "server");
-  if (tailscale == "absent" || server == "none") {
-    lines[0].show = false;
-  } else if (server == "online") {
-    const std::string ms = scriptValue(job, "server_ms");
-    lines[0].value = ms.empty() ? std::string{"online"} : "online · " + ms + " ms";
-  } else if (server == "offline") {
-    lines[0].down = true;
-    lines[0].value = "offline";
-  }
-
-  const std::string syncthing = scriptValue(job, "syncthing");
-  if (syncthing == "absent") {
-    lines[1].show = false;
-  } else if (syncthing == "ok") {
-    lines[1].value = "up to date";
-  } else if (syncthing.starts_with("syncing:")) {
-    lines[1].value = "syncing " + syncthing.substr(8) + "%";
-  } else if (syncthing == "out") {
-    lines[1].down = true;
-    lines[1].value = "out of sync";
-  }
-
-  // Radicale: the calendar service's own connection; no check of ours.
-  if (m_calendar == nullptr || !m_calendar->enabled()) {
-    lines[2].show = false;
-  } else {
-    lines[2].live = true;
-    switch (m_calendar->syncError()) {
-    case CalendarService::SyncError::None:
-      lines[2].value = m_calendar->hasData() ? "reachable" : "unknown";
-      break;
-    case CalendarService::SyncError::NoCalendars:
-      lines[2].value = "reachable";
-      break;
-    case CalendarService::SyncError::Unreachable:
-      lines[2].down = true;
-      lines[2].value = "unreachable";
-      break;
-    case CalendarService::SyncError::AuthFailed:
-      lines[2].down = true;
-      lines[2].value = "auth failed";
-      break;
-    case CalendarService::SyncError::Failed:
-      lines[2].down = true;
-      lines[2].value = "sync failed";
-      break;
-    }
-  }
-
-  const std::string state = scriptValue(job, "ts_state");
-  if (tailscale == "absent") {
-    lines[3].show = false;
-  } else if (state == "Running") {
-    lines[3].value = std::format(
-        "{} of {} peers online", numberValue(job, "ts_online", 0), numberValue(job, "ts_total", 0)
-    );
-  } else if (!state.empty() && state != "unknown") {
-    lines[3].down = true;
-    lines[3].value = StringUtils::toLower(state);
-  }
-
   std::size_t down = 0;
   std::size_t unknown = 0;
   bool changed = false;
   for (std::size_t i = 0; i < kFleetRows; ++i) {
     term_frame::ToggleRow& row = m_fleetRows[i];
-    changed |= setShown(row.button, lines[i].show);
-    if (!lines[i].show || row.button == nullptr) {
+    const FleetLine& line = lines[i];
+    changed |= setShown(row.button, line.show);
+    if (!line.show || row.button == nullptr) {
       continue;
     }
-    const Line& line = lines[i];
     const bool fresh = line.live || !stale;
-    const bool warn = line.down && fresh;
     down += line.down ? 1 : 0;
     unknown += line.value == "unknown" ? 1 : 0;
-    const std::string name = std::string(line.down ? "! " : "") + kFleetNames[i];
-    setRowName(row, name);
+    setRowName(row, std::string(line.down ? "! " : "") + kFleetNames[i]);
     term_frame::setToggleRow(row, true, false, line.value + (fresh || line.value == "unknown" ? "" : ageText));
-    setRowTone(row, warn ? Tone::Warning : Tone::Dim);
+    setRowTone(row, line.down && fresh ? Tone::Warning : Tone::Dim);
   }
 
   // Peers: with room, one row each (state, or when it was last seen) replaces the summary line; otherwise the
   // summary stays. Offline peers are not "down": only the server and the tailscale daemon are.
   const int fleetCapacity = m_capacity[TileFleet] - detailLines(m_fleetDetail);
-  const int baseRows = (lines[0].show ? 1 : 0) + (lines[1].show ? 1 : 0) + (lines[2].show ? 1 : 0);
-  const long long peerCount = tailscale == "absent" || state != "Running" ? 0 : numberValue(job, "peer_count", 0);
-  const bool showPeers = peerCount > 0 && peerCount <= static_cast<long long>(kPeerRows)
+  const int baseRows =
+      (lines[FleetServer].show ? 1 : 0) + (lines[FleetSyncthing].show ? 1 : 0) + (lines[FleetRadicale].show ? 1 : 0);
+  const long long peerCount =
+      !lines[FleetTailscale].show || scriptValue(job, "ts_state") != "Running" ? 0 : numberValue(job, "peer_count", 0);
+  const bool showPeers = peerCount > 0
+      && peerCount <= static_cast<long long>(kPeerRows)
       && baseRows + static_cast<int>(peerCount) <= fleetCapacity;
-  changed |= setShown(m_fleetRows[3].button, lines[3].show && !showPeers && baseRows + 1 <= fleetCapacity);
-  const long long nowSeconds = std::time(nullptr);
+  changed |= setShown(
+      m_fleetRows[FleetTailscale].button, lines[FleetTailscale].show && !showPeers && baseRows + 1 <= fleetCapacity
+  );
   for (std::size_t i = 0; i < kPeerRows; ++i) {
     term_frame::ToggleRow& row = m_peerRows[i];
     const bool show = showPeers && static_cast<long long>(i) < peerCount;
@@ -2048,44 +2316,12 @@ void HomeTab::syncFleet() {
     if (!show || row.button == nullptr) {
       continue;
     }
-    const std::string entry = scriptValue(job, std::format("peer_{}", i + 1));
-    const std::size_t first = entry.find('\t');
-    const std::size_t second = first == std::string::npos ? first : entry.find('\t', first + 1);
-    std::string name = entry.substr(0, first);
-    std::string status = "unknown";
-    if (first != std::string::npos && second != std::string::npos) {
-      long long lastSeen = 0;
-      const std::string seen = entry.substr(second + 1);
-      std::from_chars(seen.data(), seen.data() + seen.size(), lastSeen);
-      if (entry.substr(first + 1, second - first - 1) == "online") {
-        status = "online";
-      } else if (lastSeen > 100000000) {
-        const long long ago = std::max(0LL, nowSeconds - lastSeen);
-        status = ago < 3600 ? std::format("last seen {}m", ago / 60)
-            : ago < 86400   ? std::format("last seen {}h", ago / 3600)
-                            : std::format("last seen {}d", ago / 86400);
-      } else {
-        status = "offline";
-      }
-    }
-    name = "· " + name;
-    setRowName(row, name);
-    term_frame::setToggleRow(row, true, false, status);
+    const PeerText peer = peerText(scriptValue(job, std::format("peer_{}", i + 1)), nowSeconds);
+    setRowName(row, "· " + peer.name);
+    term_frame::setToggleRow(row, true, false, peer.status);
     setRowTone(row, Tone::Dim);
   }
-  const bool headerStale = stale && down == 0;
-  if (down > 0) {
-    m_fleetFrame->setInfo(
-        unknown > 0 ? std::format("! {} down · {} unknown", down, unknown) : std::format("! {} down", down)
-    );
-    m_fleetFrame->setInfoColor(colorSpecFromRole(stale ? ColorRole::OnSurfaceVariant : ColorRole::Warning));
-  } else if (unknown > 0 || headerStale) {
-    m_fleetFrame->setInfo(unknown > 0 ? std::format("{} unknown", unknown) : std::format("all ok{}", ageText));
-    m_fleetFrame->setInfoColor(colorSpecFromRole(ColorRole::OnSurfaceVariant));
-  } else {
-    m_fleetFrame->setInfo("all ok");
-    m_fleetFrame->setInfoColor(colorSpecFromRole(ColorRole::OnSurface));
-  }
+  setFleetHeader(*m_fleetFrame, down, unknown, stale, ageText);
   if (changed) {
     relayout();
   }
@@ -2093,32 +2329,29 @@ void HomeTab::syncFleet() {
 
 // Enter: syncthing opens its web UI, server and tailscale the network panel, radicale the calendar tab.
 void HomeTab::activateFleet(std::size_t row) {
-  if (row == 2) {
+  if (row == FleetRadicale) {
     openControlCenterTab("calendar");
     return;
   }
-  if (row != 1) {
+  if (row != FleetSyncthing) {
     openControlCenterTab("network");
     return;
   }
-  std::string url = scriptValue(*m_fleetJob, "syncthing_url");
+  std::string url(scriptValue(*m_fleetJob, "syncthing_url"));
   if (url.empty()) {
-    url = "http://127.0.0.1:8384";
+    url = kSyncthingDefaultUrl;
   }
   const bool started = process::runAsync(
       std::vector<std::string>{"xdg-open", url},
       process::RunCallbacks{
-          .onExit =
-              [mailbox = m_mailbox, url](process::RunResult result) {
-                if (result.exitCode == 0) {
-                  return;
-                }
-                const std::string why = failureReason(result);
-                DeferredCall::callLater([mailbox, url, why = std::move(why)]() {
-                  mailbox->done.push_back({.id = "fleet", .exitCode = 1, .error = "could not open " + url + ": " + why});
-                  PanelManager::instance().refresh();
-                });
-              },
+          .onExit = [mailbox = m_mailbox, url](process::RunResult result) {
+            if (result.exitCode != 0) {
+              reportOutcome(
+                  mailbox,
+                  {.id = "fleet", .exitCode = 1, .error = "could not open " + url + ": " + failureReason(result)}
+              );
+            }
+          },
       }
   );
   if (!started) {
@@ -2133,60 +2366,56 @@ void HomeTab::activateFleet(std::size_t row) {
 // block asking "confirm?") and a second press runs it. Leaving the key, any other key, or five seconds disarms it.
 // A failed action says why in the middle of the strip.
 std::unique_ptr<Flex> HomeTab::createSystemBox(float scale) {
+  static_assert(kPowerKeys.size() == kPowerKeyCount);
   auto box = term_frame::btopBox("⁷", "system", scale, &m_systemFrame);
-  struct KeySpec {
-    const char* word;
-    std::size_t hot;
-    bool warning;
-  };
-  const auto addKey = [&](Flex& row, std::size_t index, const KeySpec& spec) {
-    row.addChild(
-        term_frame::makeKeyword(
-            m_powerKeys[index], spec.word, spec.hot, scale, [this, index]() { pressPower(index); },
-            [this, index]() {
-              if (m_armed == &m_powerKeys[index]) {
-                clearArmed();
-              }
-            },
-            1.5F, 0.85F, spec.warning
-        )
-    );
+  const auto addKeys = [&](Flex& row, std::size_t first, std::size_t last) {
+    for (std::size_t index = first; index < last; ++index) {
+      const PowerKey& spec = kPowerKeys[index];
+      row.addChild(
+          term_frame::makeKeyword(
+              m_powerKeys[index], spec.word, spec.hot, scale, [this, index]() { pressPower(index); },
+              [this, index]() {
+                if (m_armed == &m_powerKeys[index]) {
+                  clearArmed();
+                }
+              },
+              term_frame::kActionKeyPaddingH, term_frame::kActionKeyRestAlpha, spec.warning
+          )
+      );
+    }
   };
   auto strip = ui::row({.out = &m_stripRow, .align = FlexAlign::Center, .gap = Style::spaceMd * scale});
   auto plain = ui::row({.align = FlexAlign::Center, .gap = Style::spaceMd * scale});
-  addKey(*plain, 0, {"lock", 0, false});
-  addKey(*plain, 1, {"sleep", 0, false});
-  addKey(*plain, 2, {"logout", 2, false});
+  addKeys(*plain, 0, kFirstDangerKey);
   strip->addChild(std::move(plain));
 
   auto middle = ui::column({.align = FlexAlign::Center, .justify = FlexJustify::Center, .flexGrow = 1.0F});
-  middle->addChild(ui::label({
-      .out = &m_systemDetail,
-      .fontSize = term_frame::kBtopFontSize * scale,
-      .fontFamily = std::string(term_frame::kFont),
-      .color = term_frame::toneColor(Tone::Error),
-      .maxLines = 1,
-      .visible = false,
-      .participatesInLayout = false,
-      .configure = [](Label& detail) { detail.setEllipsize(TextEllipsize::End); },
-  }));
+  middle->addChild(
+      ui::label({
+          .out = &m_systemDetail,
+          .fontSize = term_frame::kBtopFontSize * scale,
+          .fontFamily = std::string(term_frame::kFont),
+          .color = term_frame::toneColor(Tone::Error),
+          .maxLines = 1,
+          .visible = false,
+          .participatesInLayout = false,
+          .configure = [](Label& detail) { detail.setEllipsize(TextEllipsize::End); },
+      })
+  );
   strip->addChild(std::move(middle));
 
-  // The two that cannot be undone, on capital letters (Shift held).
   auto danger = ui::row({.align = FlexAlign::Center, .gap = Style::spaceMd * scale});
-  addKey(*danger, 3, {"R reboot", 0, true});
-  addKey(*danger, 4, {"D shutdown", 0, true});
+  addKeys(*danger, kFirstDangerKey, kPowerKeyCount);
   strip->addChild(std::move(danger));
   box->addChild(std::move(strip));
   return box;
 }
 
 void HomeTab::pressPower(std::size_t index) {
-  constexpr std::size_t kFirstConfirmed = 2; // logout, reboot, shutdown
   if (index >= kPowerKeyCount) {
     return;
   }
-  if (index >= kFirstConfirmed) {
+  if (index >= kFirstConfirmedKey) {
     pressConfirmed(m_powerKeys[index], nullptr, "", "confirm?", [this, index]() { runPower(index); });
     return;
   }
@@ -2195,8 +2424,7 @@ void HomeTab::pressPower(std::size_t index) {
 }
 
 void HomeTab::runPower(std::size_t index) {
-  constexpr std::array<const char*, kPowerKeyCount> kActions{"lock", "suspend", "logout", "reboot", "shutdown"};
-  const std::string action = kActions[index];
+  const std::string action = kPowerKeys[index].action;
   const std::string id = "power:" + action;
   if (setShown(m_systemDetail, false)) {
     relayout();
@@ -2204,17 +2432,11 @@ void HomeTab::runPower(std::size_t index) {
   const bool started = process::runAsync(
       std::vector<std::string>{"terminus-bar", "msg", "session", action},
       process::RunCallbacks{
-          .onExit =
-              [mailbox = m_mailbox, id](process::RunResult result) {
-                if (result.exitCode == 0) {
-                  return;
-                }
-                const std::string why = failureReason(result, true);
-                DeferredCall::callLater([mailbox, id, code = result.exitCode, why = std::move(why)]() {
-                  mailbox->done.push_back({.id = id, .exitCode = code, .error = why});
-                  PanelManager::instance().refresh();
-                });
-              },
+          .onExit = [mailbox = m_mailbox, id](process::RunResult result) {
+            if (result.exitCode != 0) {
+              reportOutcome(mailbox, {.id = id, .exitCode = result.exitCode, .error = failureReason(result, true)});
+            }
+          },
       }
   );
   if (!started) {
@@ -2268,11 +2490,14 @@ void HomeTab::noteKey(std::uint32_t sym, std::uint32_t /*modifiers*/, bool press
   if (sym >= XKB_KEY_Shift_L && sym <= XKB_KEY_Hyper_R) {
     return;
   }
-  if (KeySymbol::isEnterOrSpace(sym) && focused != nullptr && m_armed->button != nullptr
+  if (KeySymbol::isEnterOrSpace(sym)
+      && focused != nullptr
+      && m_armed->button != nullptr
       && focused == m_armed->button->inputArea()) {
     return;
   }
-  if (m_armed->hot < m_armed->word.size() && (sym | 0x20U) == static_cast<std::uint32_t>(m_armed->word[m_armed->hot] | 0x20)) {
+  if (m_armed->hot < m_armed->word.size()
+      && lowerKeysym(sym) == lowerKeysym(static_cast<unsigned char>(m_armed->word[m_armed->hot]))) {
     return;
   }
   clearArmed();
@@ -2312,26 +2537,26 @@ void HomeTab::launchInTerminal(const std::string& id, const std::string& what, c
   std::error_code error;
   std::filesystem::remove(rc, error);
   const std::string script = std::format(
-      "{}; rc=$?; echo $rc > '{}'; printf '\\n[ exit %s · press enter to close ]' \"$rc\"; read _; exit $rc", command, rc
+      "{}; rc=$?; echo $rc > '{}'; printf '\\n[ exit %s · press enter to close ]' \"$rc\"; read _; exit $rc", command,
+      rc
   );
   const bool started = process::runAsync(
       std::vector<std::string>{"uwsm-app", "--", "ghostty", "-e", "sh", "-c", script},
       process::RunCallbacks{
-          .onExit =
-              [mailbox = m_mailbox, id, rc, launched = std::chrono::steady_clock::now()](process::RunResult result) {
-                // Only a terminal that dies at once, before its shell wrote an exit code, never started; a window
-                // closed later exits non-zero too, and that is not a failure of the action.
-                std::error_code ec;
-                const bool early = std::chrono::steady_clock::now() - launched < std::chrono::seconds{5};
-                if (result.exitCode == 0 || !early || std::filesystem::exists(rc, ec)) {
-                  return;
-                }
-                const std::string why = failureReason(result);
-                DeferredCall::callLater([mailbox, id, code = result.exitCode, why = std::move(why)]() {
-                  mailbox->done.push_back({.id = id, .exitCode = code, .error = "terminal did not start: " + why});
-                  PanelManager::instance().refresh();
-                });
-              },
+          .onExit = [mailbox = m_mailbox, id, rc,
+                     launched = std::chrono::steady_clock::now()](process::RunResult result) {
+            // Only a terminal that dies at once, before its shell wrote an exit code, never started; a window
+            // closed later exits non-zero too, and that is not a failure of the action.
+            std::error_code ec;
+            const bool early = std::chrono::steady_clock::now() - launched < kTerminalStartWindow;
+            if (result.exitCode == 0 || !early || std::filesystem::exists(rc, ec)) {
+              return;
+            }
+            reportOutcome(
+                mailbox,
+                {.id = id, .exitCode = result.exitCode, .error = "terminal did not start: " + failureReason(result)}
+            );
+          },
       }
   );
   if (!started) {
@@ -2340,7 +2565,7 @@ void HomeTab::launchInTerminal(const std::string& id, const std::string& what, c
   }
   m_pending.push_back({.id = id, .what = what, .rcFile = rc, .startedAt = std::chrono::steady_clock::now()});
   if (!m_actionPoll.active()) {
-    m_actionPoll.startRepeating(std::chrono::seconds{2}, [this]() { pollTerminalActions(); });
+    m_actionPoll.startRepeating(kActionPollInterval, [this]() { pollTerminalActions(); });
   }
 }
 
@@ -2399,7 +2624,7 @@ void HomeTab::collectOutcomes() {
       }
     } else if (outcome.id == "inbox") {
       // A dismissed mako notification: refresh the list, and say why when it failed.
-      runScriptJob(m_notesJob, kNotesScript, true, std::chrono::seconds{5});
+      runScriptJob(m_notesJob, kNotesScript, true, kNotesRefreshInterval);
       const std::string text = outcome.error.empty() ? std::string{} : "dismiss failed: " + outcome.error;
       term_frame::setLabelTone(m_inboxDetail, text, Tone::Error);
       if (setShown(m_inboxDetail, !text.empty())) {
@@ -2413,7 +2638,9 @@ void HomeTab::collectOutcomes() {
       }
     } else {
       m_pending.erase(
-          std::remove_if(m_pending.begin(), m_pending.end(), [&](const PendingAction& p) { return p.id == outcome.id; }),
+          std::remove_if(
+              m_pending.begin(), m_pending.end(), [&](const PendingAction& p) { return p.id == outcome.id; }
+          ),
           m_pending.end()
       );
       setActionFailure(outcome.id, outcome.error);
@@ -2425,41 +2652,26 @@ void HomeTab::collectOutcomes() {
 // tile has to be selected first. Capital letters (R, D) need Shift. Key repeat arrives as more presses, so a held
 // letter acts once.
 bool HomeTab::handleHotkey(std::uint32_t sym, std::uint32_t modifiers, bool pressed) {
+  const std::uint32_t letter = lowerKeysym(sym);
   // A release always frees the letter, even one that arrives with a modifier down.
-  if (!pressed && m_hotkeyHeld != 0U && (sym | 0x20U) == m_hotkeyHeld) {
+  if (!pressed && m_hotkeyHeld == letter) {
     m_hotkeyHeld = 0;
   }
   const bool shifted = modifiers == KeyMod::Shift;
   const bool upper = sym >= 'A' && sym <= 'Z'; // a capital keysym counts as Shift even when the modifier is absent
-  const bool letter = (sym >= 'a' && sym <= 'z') || upper;
-  if (!letter || (modifiers != 0U && !shifted)) {
+  const bool isLetter = (sym >= 'a' && sym <= 'z') || upper;
+  if (!isLetter || (modifiers != 0U && !shifted)) {
     return false;
   }
   for (const HotKey& entry : m_hotkeys) {
-    term_frame::Keyword& key = *entry.key;
-    if (!key.activate || key.button == nullptr || key.hot >= key.word.size()) {
+    if (!hotkeyMatches(*entry.key, letter, shifted, upper) || (entry.gate != nullptr && !entry.gate->visible())) {
       continue;
     }
-    const char hot = key.word[key.hot];
-    const bool capital = hot >= 'A' && hot <= 'Z';
-    if (static_cast<std::uint32_t>(hot | 0x20) != (sym | 0x20U) || (capital ? !(shifted || upper) : shifted)) {
-      continue;
+    if (pressed && m_hotkeyHeld != letter) {
+      m_hotkeyHeld = letter;
+      const auto activate = entry.key->activate; // a copy: running it may rebuild the keyword
+      activate();
     }
-    if (entry.gate != nullptr && !entry.gate->visible()) {
-      continue;
-    }
-    if (!pressed) {
-      if (m_hotkeyHeld == (sym | 0x20U)) {
-        m_hotkeyHeld = 0;
-      }
-      return true;
-    }
-    if (m_hotkeyHeld == (sym | 0x20U)) {
-      return true;
-    }
-    m_hotkeyHeld = sym | 0x20U;
-    const auto activate = key.activate;
-    activate();
     return true;
   }
   return false;
@@ -2501,34 +2713,20 @@ void HomeTab::doLayout(Renderer& renderer, float contentWidth, float bodyHeight)
     return;
   }
   const float scale = contentScale();
-  const float gap = Style::spaceSm * scale;
-  const float width = std::max(1.0F, contentWidth);
-  const float height = std::max(1.0F, bodyHeight > 0.0F ? bodyHeight : 600.0F * scale);
-  const float inset = term_frame::boxInset(scale);
+  const GridMetrics grid = gridMetrics(contentWidth, bodyHeight, scale);
   const float chrome = term_frame::btopChrome(scale);
   const float rowHeight = kHomeRowHeight * scale;
   const float rowGap = Style::spaceXs * scale;
-
-  const float margin = gap;
-  const float gridWidth = std::max(1.0F, width - margin);
-  const float leftWidth = std::max(1.0F, std::floor((gridWidth - gap) * 0.5F));
-  const float rightWidth = std::max(1.0F, gridWidth - gap - leftWidth);
-  const float stripHeight = chrome + rowHeight;
-  const float available = std::max(3.0F, height - stripHeight - 3.0F * gap);
-  const float baseHeight = std::floor(available / 3.0F);
-  const std::array<float, 3> rowHeights{baseHeight, baseHeight, available - 2.0F * baseHeight};
-  const float inner = std::max(1.0F, std::min(leftWidth, rightWidth) - 2.0F * inset);
-  const float stripInner = std::max(1.0F, gridWidth - 2.0F * inset);
-  m_innerWidth = inner;
+  m_innerWidth = grid.inner;
 
   for (Flex* row : m_fixedRows) {
     if (row != nullptr) {
-      term_frame::pinSize(*row, inner, rowHeight);
+      term_frame::pinSize(*row, grid.inner, rowHeight);
     }
   }
   for (Label* detail : m_detailLabels) {
     if (detail != nullptr) {
-      detail->setMaxWidth(inner);
+      detail->setMaxWidth(grid.inner);
     }
   }
 
@@ -2537,48 +2735,28 @@ void HomeTab::doLayout(Renderer& renderer, float contentWidth, float bodyHeight)
     return std::max(1, static_cast<int>(std::floor((tileHeight - chrome + rowGap) / (rowHeight + rowGap))));
   };
   const std::array<int, TileCount> capacity{
-      capacityOf(rowHeights[0]),
-      std::max(1, static_cast<int>(std::floor((rowHeights[0] - chrome) / rowHeight))),
-      capacityOf(rowHeights[1]),
-      capacityOf(rowHeights[1]),
-      capacityOf(rowHeights[2]),
-      capacityOf(rowHeights[2]),
+      capacityOf(grid.rowHeights[0]),
+      std::max(1, static_cast<int>(std::floor((grid.rowHeights[0] - chrome) / rowHeight))),
+      capacityOf(grid.rowHeights[1]),
+      capacityOf(grid.rowHeights[1]),
+      capacityOf(grid.rowHeights[2]),
+      capacityOf(grid.rowHeights[2]),
   };
   if (capacity != m_capacity) {
     m_capacity = capacity;
     relayout();
   }
 
-  // Host: the avatar is two rows tall, the user and host sit beside it.
-  if (m_hostHeader != nullptr && m_avatarFrame != nullptr) {
-    const float avatar = 2.0F * rowHeight + rowGap;
-    m_avatarSize = avatar;
-    m_avatarFrame->setSize(avatar, avatar);
-    if (m_avatarArea != nullptr) {
-      m_avatarArea->setSize(avatar, avatar);
-    }
-    const float avatarInner = std::max(1.0F, avatar - 2.0F * Style::borderWidth);
-    if (m_avatar != nullptr) {
-      m_avatar->setSize(avatarInner, avatarInner);
-    }
-    if (m_avatarHint != nullptr) {
-      m_avatarHint->setMaxWidth(avatarInner);
-    }
-    const float textWidth = std::max(1.0F, inner - avatar - Style::spaceSm * scale);
-    m_hostUser->setMaxWidth(textWidth);
-    m_hostName->setMaxWidth(textWidth);
-    term_frame::pinSize(*m_hostText, textWidth, avatar);
-    term_frame::pinSize(*m_hostHeader, inner, avatar);
-  }
+  layoutHostHeader(grid.inner, rowHeight, rowGap, scale);
   if (m_hostInfoBox != nullptr) {
-    m_hostInfoBox->setMinWidth(inner);
-    m_hostInfoBox->setMaxWidth(inner);
+    m_hostInfoBox->setMinWidth(grid.inner);
+    m_hostInfoBox->setMaxWidth(grid.inner);
   }
   if (m_timerTime != nullptr) {
     m_timerTime->setFontSize(kTimerFontSize * scale);
   }
   if (m_systemDetail != nullptr) {
-    m_systemDetail->setMaxWidth(stripInner * 0.4F);
+    m_systemDetail->setMaxWidth(grid.stripInner * kSystemDetailWidthShare);
   }
 
   const auto pin = [](Flex* node, float w, float h) {
@@ -2587,24 +2765,49 @@ void HomeTab::doLayout(Renderer& renderer, float contentWidth, float bodyHeight)
     }
   };
   if (m_margin != nullptr) {
-    m_margin->setMinWidth(margin);
-    m_margin->setMaxWidth(margin);
+    m_margin->setMinWidth(grid.margin);
+    m_margin->setMaxWidth(grid.margin);
   }
-  pin(m_grid, gridWidth, height);
+  pin(m_grid, grid.gridWidth, grid.height);
   for (std::size_t i = 0; i < m_gridRows.size(); ++i) {
-    pin(m_gridRows[i], gridWidth, rowHeights[i]);
+    pin(m_gridRows[i], grid.gridWidth, grid.rowHeights[i]);
   }
-  pin(m_hostFrame, leftWidth, rowHeights[0]);
-  pin(m_togglesFrame, rightWidth, rowHeights[0]);
-  pin(m_upkeepFrame, leftWidth, rowHeights[1]);
-  pin(m_todayFrame, rightWidth, rowHeights[1]);
-  pin(m_inboxFrame, leftWidth, rowHeights[2]);
-  pin(m_fleetFrame, rightWidth, rowHeights[2]);
-  pin(m_systemFrame, gridWidth, stripHeight);
-  pin(m_stripRow, stripInner, rowHeight);
-  m_rootLayout->setMinWidth(width);
-  m_rootLayout->setMaxWidth(width);
+  pin(m_hostFrame, grid.leftWidth, grid.rowHeights[0]);
+  pin(m_togglesFrame, grid.rightWidth, grid.rowHeights[0]);
+  pin(m_upkeepFrame, grid.leftWidth, grid.rowHeights[1]);
+  pin(m_todayFrame, grid.rightWidth, grid.rowHeights[1]);
+  pin(m_inboxFrame, grid.leftWidth, grid.rowHeights[2]);
+  pin(m_fleetFrame, grid.rightWidth, grid.rowHeights[2]);
+  pin(m_systemFrame, grid.gridWidth, grid.stripHeight);
+  pin(m_stripRow, grid.stripInner, rowHeight);
+  m_rootLayout->setMinWidth(grid.width);
+  m_rootLayout->setMaxWidth(grid.width);
   m_rootLayout->layout(renderer);
+}
+
+// The avatar is two rows tall; the user and host sit beside it.
+void HomeTab::layoutHostHeader(float inner, float rowHeight, float rowGap, float scale) {
+  if (m_hostHeader == nullptr || m_avatarFrame == nullptr) {
+    return;
+  }
+  const float avatar = 2.0F * rowHeight + rowGap;
+  m_avatarSize = avatar;
+  m_avatarFrame->setSize(avatar, avatar);
+  if (m_avatarArea != nullptr) {
+    m_avatarArea->setSize(avatar, avatar);
+  }
+  const float avatarInner = std::max(1.0F, avatar - 2.0F * Style::borderWidth);
+  if (m_avatar != nullptr) {
+    m_avatar->setSize(avatarInner, avatarInner);
+  }
+  if (m_avatarHint != nullptr) {
+    m_avatarHint->setMaxWidth(avatarInner);
+  }
+  const float textWidth = std::max(1.0F, inner - avatar - Style::spaceSm * scale);
+  m_hostUser->setMaxWidth(textWidth);
+  m_hostName->setMaxWidth(textWidth);
+  term_frame::pinSize(*m_hostText, textWidth, avatar);
+  term_frame::pinSize(*m_hostHeader, inner, avatar);
 }
 
 void HomeTab::doUpdate(Renderer& renderer) {
@@ -2710,7 +2913,7 @@ void HomeTab::onClose() {
 void HomeTab::sync() {
   collectOutcomes();
   refreshLive(false);
-  runScriptJob(m_notesJob, kNotesScript, false, std::chrono::seconds{5});
+  runScriptJob(m_notesJob, kNotesScript, false, kNotesRefreshInterval);
   syncHost();
   syncUpkeep();
   syncInbox();
@@ -2762,7 +2965,9 @@ void HomeTab::chooseAvatar() {
     return;
   }
   std::vector<std::string> args{
-      "zenity", "--file-selection", "--title=Choose profile picture",
+      "zenity",
+      "--file-selection",
+      "--title=Choose profile picture",
       "--file-filter=Images | *.png *.jpg *.jpeg *.webp *.gif",
   };
   if (!m_avatarPath.empty()) {
@@ -2776,19 +2981,18 @@ void HomeTab::chooseAvatar() {
   const bool started = process::runAsync(
       args,
       process::RunCallbacks{
-          .onExit =
-              [config, accounts, busy](process::RunResult result) {
-                std::string picked = result.exitCode == 0 ? std::move(result.out) : std::string{};
-                DeferredCall::callLater([config, accounts, busy, picked = std::move(picked)]() {
-                  busy->store(false);
-                  if (picked.empty()) {
-                    return;
-                  }
-                  if (shell::applyAvatarPath(accounts, config, picked).success()) {
-                    PanelManager::instance().refresh();
-                  }
-                });
-              },
+          .onExit = [config, accounts, busy](process::RunResult result) {
+            std::string picked = result.exitCode == 0 ? std::move(result.out) : std::string{};
+            DeferredCall::callLater([config, accounts, busy, picked = std::move(picked)]() {
+              busy->store(false);
+              if (picked.empty()) {
+                return;
+              }
+              if (shell::applyAvatarPath(accounts, config, picked).success()) {
+                PanelManager::instance().refresh();
+              }
+            });
+          },
       }
   );
   if (!started) {

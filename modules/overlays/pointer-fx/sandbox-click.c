@@ -14,6 +14,11 @@
 
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 
+#define DEFAULT_COUNT 1
+#define DEFAULT_INTERVAL_MS 150
+#define DEFAULT_BUTTON 272         // BTN_LEFT
+#define PRESS_HOLD_US 40000        // press-to-release time of one click
+
 static struct wl_seat *seat;
 static struct zwlr_virtual_pointer_manager_v1 *manager;
 
@@ -33,9 +38,9 @@ static uint32_t ms(void) {
 }
 
 int main(int argc, char **argv) {
-  int count = argc > 1 ? atoi(argv[1]) : 1;
-  int interval = argc > 2 ? atoi(argv[2]) : 150;
-  uint32_t button = argc > 3 ? (uint32_t)atoi(argv[3]) : 272;
+  int count = argc > 1 ? atoi(argv[1]) : DEFAULT_COUNT;
+  int interval_ms = argc > 2 ? atoi(argv[2]) : DEFAULT_INTERVAL_MS;
+  uint32_t button = argc > 3 ? (uint32_t)atoi(argv[3]) : DEFAULT_BUTTON;
   struct wl_display *display = wl_display_connect(NULL);
   if (!display) {
     fprintf(stderr, "sandbox-click: no Wayland compositor\n");
@@ -46,6 +51,7 @@ int main(int argc, char **argv) {
   wl_display_roundtrip(display);
   if (!manager) {
     fprintf(stderr, "sandbox-click: compositor has no wlr-virtual-pointer\n");
+    wl_display_disconnect(display);
     return 1;
   }
   struct zwlr_virtual_pointer_v1 *pointer = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(manager, seat);
@@ -53,13 +59,16 @@ int main(int argc, char **argv) {
     zwlr_virtual_pointer_v1_button(pointer, ms(), button, WL_POINTER_BUTTON_STATE_PRESSED);
     zwlr_virtual_pointer_v1_frame(pointer);
     wl_display_roundtrip(display);
-    usleep(40000);
+    usleep(PRESS_HOLD_US);
     zwlr_virtual_pointer_v1_button(pointer, ms(), button, WL_POINTER_BUTTON_STATE_RELEASED);
     zwlr_virtual_pointer_v1_frame(pointer);
     wl_display_roundtrip(display);
-    if (i + 1 < count) usleep((useconds_t)interval * 1000);
+    if (i + 1 < count) usleep((useconds_t)interval_ms * 1000);
   }
   zwlr_virtual_pointer_v1_destroy(pointer);
   wl_display_roundtrip(display);
+  zwlr_virtual_pointer_manager_v1_destroy(manager);
+  wl_registry_destroy(registry);
+  wl_display_disconnect(display);
   return 0;
 }

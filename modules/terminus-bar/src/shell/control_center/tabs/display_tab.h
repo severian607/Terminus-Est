@@ -24,8 +24,7 @@ class WeatherService;
 class DisplayTab : public Tab {
 public:
   DisplayTab(
-      BrightnessService* brightness, GammaService* nightLight, ConfigService* config,
-      WeatherService* weather = nullptr
+      BrightnessService* brightness, GammaService* nightLight, ConfigService* config, WeatherService* weather = nullptr
   );
 
   std::unique_ptr<Flex> create() override;
@@ -33,7 +32,8 @@ public:
   void onClose() override;
   [[nodiscard]] float quickPanelHeight(float width, float fallback) const override;
   [[nodiscard]] std::string quickPanelHints() const override { return "r rescan  n schedule  o force"; }
-  [[nodiscard]] bool handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
+  [[nodiscard]] bool
+  handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
 
 private:
   struct BrightnessRow {
@@ -46,17 +46,35 @@ private:
   void doLayout(Renderer& renderer, float contentWidth, float bodyHeight) override;
   void doUpdate(Renderer& renderer) override;
 
+  struct OutputSummary {
+    int controllable = 0; // outputs that accept writes
+    float mean = 0.0F;    // mean brightness of those, shown on the `all` row
+    bool mixed = false;   // they differ noticeably
+  };
+  struct SunStrings {
+    std::string sunset; // "%H:%M"; both empty when unknown
+    std::string sunrise;
+  };
+
+  [[nodiscard]] std::unique_ptr<Flex> buildBrightnessBox(float scale);
+  [[nodiscard]] std::unique_ptr<Flex> buildNightBox(float scale);
+  void configureWarmthSlider();
+
   void rebuildBrightnessRows(float scale);
+  [[nodiscard]] OutputSummary summarizeOutputs() const;
   void syncBrightness();
+  void syncBrightnessRow(BrightnessRow& row, const OutputSummary& outputs, float minimum);
   void syncNightLight();
+  void syncWarmth(bool warmthLive);
+  void syncNightStatus(const SunStrings& sun, bool forced);
   [[nodiscard]] bool brightnessDragging() const;
   [[nodiscard]] float minimumBrightness() const;
 
   void rescanDisplays();
   void toggleSchedule();
   void toggleForce();
-  // Sunset/sunrise as "%H:%M", same sources as the Home night-light toggle; empty strings when unknown.
-  void sunTimeStrings(std::string& sunset, std::string& sunrise) const;
+  // Same sources as the Home night-light toggle.
+  [[nodiscard]] SunStrings sunTimeStrings() const;
 
   void queueBrightness(const std::string& displayId, float value);
   void flushPendingBrightness();
@@ -97,10 +115,7 @@ private:
   std::string m_pendingDisplayId;
   bool m_pendingValid = false;
   float m_pendingBrightness = -1.0F;
-  float m_lastSentBrightness = -1.0F;
-  std::string m_lastSentId;
   std::chrono::steady_clock::time_point m_lastCommitAt;
-  std::chrono::steady_clock::time_point m_ignoreStateUntil;
   Timer m_debounceTimer;
 
   // Warmth write debounce: persisting rewrites settings.toml and reloads, so coalesce a drag.

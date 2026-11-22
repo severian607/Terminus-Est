@@ -8,14 +8,14 @@ usage: terminus-motion-demo-windows cycle           open A, open B, close B, clo
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from picker_style import read_theme  # noqa: E402
-
-import gi  # noqa: E402
+import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from picker_style import read_theme
 
 CSS = """
 window.demo { background: @bg@; color: @fg@; font-family: '@font@', monospace; font-size: 13px; }
@@ -39,7 +39,8 @@ class Demo(Gtk.Application):
         provider = Gtk.CssProvider()
         provider.load_from_data(read_theme(CSS)[0])
         Gtk.StyleContext.add_provider_for_display(
-            Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
         for seconds, action in self.steps:
             GLib.timeout_add(int(seconds * 1000), action)
 

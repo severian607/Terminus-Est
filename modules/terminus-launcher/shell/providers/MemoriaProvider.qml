@@ -49,45 +49,18 @@ Provider {
 
     // ===== the list =====
 
-    property var listProc: null
-
-    Component {
-        id: runComponent
-
-        Process {
-            id: p
-            property var done: null
-            stdout: StdioCollector {
-                onStreamFinished: {
-                    if (p.done)
-                        p.done(text)
-                    p.done = null
-                }
-            }
-            onExited: Qt.callLater(p.destroy)
-        }
-    }
-
-    // Runs `terminus-bar msg <args>` and hands its stdout to done (unless cancelled through the returned process).
+    // Runs `terminus-bar msg <args>` and hands its stdout to done (unless the returned process is silenced: done = null).
     function msg(args, done) {
-        const p = runComponent.createObject(root, { done: done, command: ["terminus-bar", "msg"].concat(args) })
-        p.running = true
-        return p
+        return root.spawn(["terminus-bar", "msg"].concat(args), done)
     }
 
     function cancel() {
-        if (root.listProc) {
-            root.listProc.done = null
-            root.listProc.running = false
-            root.listProc = null
-        }
+        root.cancelLane("list")
     }
 
     function query(text, token, prefixed) {
-        root.cancel()
         const q = text.trim().toLowerCase()
-        root.listProc = root.msg(["clipboard-list"], out => {
-            root.listProc = null
+        root.launch("list", ["terminus-bar", "msg", "clipboard-list"], out => {
             let list = []
             try {
                 const j = JSON.parse(out)

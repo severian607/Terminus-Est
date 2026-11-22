@@ -9,11 +9,11 @@ menu() {
 
 show_capture_menu() {
   case $(menu "Capture" "  Screenshot\n  Screenrecord\n󰴑  Text Extraction\n󰃉  Color") in
-  *Screenshot*) terminus-capture-screenshot ;;
-  *Screenrecord*) terminus-capture-screenrecording ;;
-  *Text*) terminus-capture-text-extraction ;;
-  *Color*) pkill hyprpicker || hyprpicker -a ;;
-  *) return ;;
+    *Screenshot*) terminus-capture-screenshot ;;
+    *Screenrecord*) terminus-capture-screenrecording ;;
+    *Text*) terminus-capture-text-extraction ;;
+    *Color*) pkill hyprpicker || hyprpicker -a ;;
+    *) return ;;
   esac
 }
 
@@ -26,8 +26,6 @@ show_custom_reminder_input() {
   elif [[ -n $minutes ]]; then
     terminus-notification-send "󰔛" "Invalid reminder" "Enter the number of minutes" -u critical
     show_custom_reminder_input
-  else
-    return
   fi
 }
 
@@ -52,6 +50,6 @@ case "${1:-}" in
   system) exec terminus-bar msg panel-toggle session ;;
   theme) exec terminus-settings appearance ;;
   background) exec terminus-bar msg panel-toggle wallpaper ;;
-  toggle|hardware) exec terminus-bar msg panel-toggle control-center ;;
+  toggle | hardware) exec terminus-bar msg panel-toggle control-center ;;
   *) exec terminus-settings "$@" ;;
 esac

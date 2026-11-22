@@ -2,19 +2,24 @@
 # Terminus-Est update: fast-forward from GitHub, then bring the machine in line with what changed.
 #   terminus-update           pull and apply; exit status shows failures
 #   terminus-update --hook    same, but never fails; the bar build runs detached (pacman hook after yay/pacman upgrades)
+# No -e: every step may fail on its own and the rest still apply; --hook must never fail.
 set -uo pipefail
 
 hook=0
 [[ ${1:-} == --hook ]] && hook=1
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
 say() { echo "terminus-update: $*"; }
-stop() { say "$*"; exit $((1 - hook)); }
+stop() {
+  say "$*"
+  exit $((1 - hook))
+}
 
 cd "$root" || exit $((1 - hook))
 # The hook runs outside the session; find the user bus and the running compositor.
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 [[ -S $XDG_RUNTIME_DIR/bus ]] && export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
 if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} && -d $XDG_RUNTIME_DIR/hypr ]]; then
+  # shellcheck disable=SC2012  # entries are instance signatures (hex and underscores), safe to parse
   signature=$(ls -t "$XDG_RUNTIME_DIR/hypr" 2>/dev/null | head -1)
   [[ -n $signature ]] && export HYPRLAND_INSTANCE_SIGNATURE=$signature
 fi
@@ -23,12 +28,23 @@ build_bar() {
   local bar=$root/modules/terminus-bar
   say "building terminusbar (this can take several minutes)"
   [[ -f $bar/build-release/build.ninja ]] || meson setup "$bar/build-release" "$bar" -Dbuildtype=release -Dcpp_std=c++23 -Dtests=disabled >/dev/null
-  if ninja -C "$bar/build-release" -j"$(( $(nproc) / 2 > 0 ? $(nproc) / 2 : 1 ))" terminusbar >/dev/null; then
+  local jobs=$(($(nproc) / 2))
+  ((jobs > 0)) || jobs=1
+  if ninja -C "$bar/build-release" -j"$jobs" terminusbar >/dev/null; then
     systemctl --user try-restart terminus-bar.service
   else
     say "bar build failed; the previous binary stays in use"
   fi
 }
+# rebuild_plugin DIR LABEL: rebuild a Hyprland plugin and report the outcome.
+rebuild_plugin() {
+  if make -B -C "$1" >/dev/null 2>&1; then
+    say "rebuilt the $2 plugin"
+  else
+    say "$2 plugin did not build"
+  fi
+}
+
 if [[ ${1:-} == --build-bar ]]; then
   build_bar
   exit 0
@@ -60,15 +76,18 @@ for pair in "config/systemd/user:$HOME/.config/systemd/user" "config/dbus-1/serv
   done
 done
 changed_in '^config/systemd/user/' && reload=1
-(( reload )) && systemctl --user daemon-reload
+((reload)) && systemctl --user daemon-reload
 
 # The bar is built on this machine; rebuild when its sources changed or no binary exists.
 bar=$root/modules/terminus-bar
 if changed_in '^modules/terminus-bar/(src|include|subprojects)/|^modules/terminus-bar/meson' || [[ ! -x $bar/build-release/terminusbar ]]; then
-  if (( hook )); then
+  if ((hook)); then
     # Inside the pacman transaction the lock is held; build in a user unit instead.
-    systemd-run --user --no-block --collect --quiet --unit=terminus-bar-build "$root/bin/terminus-update" --build-bar \
-      && say "bar build started in the background (journalctl --user -u terminus-bar-build)" || build_bar
+    if systemd-run --user --no-block --collect --quiet --unit=terminus-bar-build "$root/bin/terminus-update" --build-bar; then
+      say "bar build started in the background (journalctl --user -u terminus-bar-build)"
+    else
+      build_bar
+    fi
   else
     build_bar
   fi
@@ -77,9 +96,9 @@ fi
 # The menu blur plugin must match the installed Hyprland.
 plugin=$root/modules/terminus-bar-menu-blur
 if pkg-config --exists hyprland 2>/dev/null &&
-   { [[ ! -f $plugin/build/terminus-bar-menu-blur.so ]] || [[ $plugin/build/terminus-bar-menu-blur.so -ot /usr/bin/Hyprland ]] ||
-     changed_in '^modules/terminus-bar-menu-blur/'; }; then
-  make -B -C "$plugin" >/dev/null 2>&1 && say "rebuilt the menu blur plugin" || say "menu blur plugin did not build"
+  { [[ ! -f $plugin/build/terminus-bar-menu-blur.so ]] || [[ $plugin/build/terminus-bar-menu-blur.so -ot /usr/bin/Hyprland ]] ||
+    changed_in '^modules/terminus-bar-menu-blur/'; }; then
+  rebuild_plugin "$plugin" "menu blur"
 fi
 
 # So must the plugins behind the motion picker's window and pointer effects; a stale one is refused by Hyprland.
@@ -88,7 +107,7 @@ if pkg-config --exists hyprland 2>/dev/null; then
     plugin=${plugin%/}
     artifact=$plugin/build/${plugin##*/}.so
     if [[ ! -f $artifact || $artifact -ot /usr/bin/Hyprland ]] || changed_in "^modules/hyprland-plugins/${plugin##*/}/"; then
-      make -B -C "$plugin" >/dev/null 2>&1 && say "rebuilt the ${plugin##*/} plugin" || say "${plugin##*/} plugin did not build"
+      rebuild_plugin "$plugin" "${plugin##*/}"
     fi
   done
 fi
@@ -100,6 +119,10 @@ changed_in '^lib/symbol_panel.py' && systemctl --user try-restart terminus-symbo
 
 terminus-settings apply >/dev/null 2>&1 || say "terminus-settings apply failed; run it by hand"
 if changed_in '^config/(hyprland|hosts)/'; then
-  hyprctl reload >/dev/null 2>&1 && say "reloaded Hyprland" || say "Hyprland is not running; the change applies at next start"
+  if hyprctl reload >/dev/null 2>&1; then
+    say "reloaded Hyprland"
+  else
+    say "Hyprland is not running; the change applies at next start"
+  fi
 fi
 exit 0

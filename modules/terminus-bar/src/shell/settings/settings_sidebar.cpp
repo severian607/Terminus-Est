@@ -139,25 +139,23 @@ namespace settings {
                 }
               },
       });
-      const auto addTag = [&](const std::string& text) {
+      if (item.count > 0) {
         button->addChild(
             ui::label({
-                .text = text,
+                .text = std::to_string(item.count),
                 .fontSize = Style::fontSizeCaption * scale,
                 .fontFamily = std::string(term_frame::kFont),
                 .maxLines = 1,
             })
         );
-      };
-      if (item.count > 0) {
-        addTag(std::to_string(item.count));
       }
       return button;
     }
 
-    void addNavButton(RovingListNavHost& nav, std::unique_ptr<Button> button, std::function<void()> onClick) {
-      Button* raw = button.get();
-      nav.registerItem(raw, std::move(onClick));
+    // One index row, reachable by click and by the roving keyboard navigation.
+    void addIndexRow(RovingListNavHost& nav, const IndexItem& item, float scale) {
+      auto button = makeIndexButton(item, scale);
+      nav.registerItem(button.get(), item.onClick);
       nav.addChild(std::move(button));
     }
 
@@ -168,15 +166,12 @@ namespace settings {
     }
 
     // Action row (`+ new bar`): same geometry as an index row, never selected.
-    std::unique_ptr<Button>
-    makeActionButton(std::string text, bool indent, float scale, std::function<void()> onClick) {
-      return makeIndexButton(
-          IndexItem{
-              .label = "+ " + lowerLabel(text),
-              .dim = true,
-              .indent = indent,
-              .onClick = std::move(onClick),
-          },
+    void addActionRow(
+        RovingListNavHost& nav, const std::string& text, bool indent, float scale, std::function<void()> onClick
+    ) {
+      addIndexRow(
+          nav,
+          IndexItem{.label = "+ " + lowerLabel(text), .dim = true, .indent = indent, .onClick = std::move(onClick)},
           scale
       );
     }
@@ -328,18 +323,15 @@ namespace settings {
       const std::string sectionId(settingsSectionId(section));
       const bool selected = showActiveTab && sectionId == *selectedSection;
       const auto onClick = [navigate, sectionId]() { navigate(sectionId, {}, {}); };
-      addNavButton(
+      addIndexRow(
           *nav,
-          makeIndexButton(
-              IndexItem{
-                  .label = settingsIndexLabel(sectionId),
-                  .count = countFor(settingsPageScopeKey(sectionId, {}, {})),
-                  .selected = selected,
-                  .onClick = onClick,
-              },
-              scale
-          ),
-          onClick
+          IndexItem{
+              .label = settingsIndexLabel(sectionId),
+              .count = countFor(settingsPageScopeKey(sectionId, {}, {})),
+              .selected = selected,
+              .onClick = onClick,
+          },
+          scale
       );
     };
 
@@ -348,18 +340,15 @@ namespace settings {
     for (const std::string_view page : kCentralPages) {
       const std::string id(page);
       const auto onClick = [navigate, id]() { navigate(id, {}, {}); };
-      addNavButton(
+      addIndexRow(
           *nav,
-          makeIndexButton(
-              IndexItem{
-                  .label = id,
-                  .count = countFor(id),
-                  .selected = showActiveTab && *selectedSection == id,
-                  .onClick = onClick,
-              },
-              scale
-          ),
-          onClick
+          IndexItem{
+              .label = id,
+              .count = countFor(id),
+              .selected = showActiveTab && *selectedSection == id,
+              .onClick = onClick,
+          },
+          scale
       );
     }
 
@@ -369,18 +358,15 @@ namespace settings {
       const bool barSelected =
           showActiveTab && *selectedSection == "bar" && *selectedBarName == barName && selectedMonitorOverride->empty();
       const auto onBarClick = [navigate, barName]() { navigate("bar", barName, {}); };
-      addNavButton(
+      addIndexRow(
           *nav,
-          makeIndexButton(
-              IndexItem{
-                  .label = lowerLabel(i18n::tr("settings.entities.bar.label", "name", barName)),
-                  .count = countFor(settingsPageScopeKey("bar", barName, {})),
-                  .selected = barSelected,
-                  .onClick = onBarClick,
-              },
-              scale
-          ),
-          onBarClick
+          IndexItem{
+              .label = lowerLabel(i18n::tr("settings.entities.bar.label", "name", barName)),
+              .count = countFor(settingsPageScopeKey("bar", barName, {})),
+              .selected = barSelected,
+              .onClick = onBarClick,
+          },
+          scale
       );
 
       const auto* bar = settings::findBar(cfg, barName);
@@ -395,19 +381,16 @@ namespace settings {
             && *selectedMonitorOverride == ovr.match;
         const std::string match = ovr.match;
         const auto onMonitorClick = [navigate, barName, match]() { navigate("bar", barName, match); };
-        addNavButton(
+        addIndexRow(
             *nav,
-            makeIndexButton(
-                IndexItem{
-                    .label = lowerLabel(i18n::tr("settings.entities.monitor-override.label", "name", ovr.match)),
-                    .count = countFor(settingsPageScopeKey("bar", barName, match)),
-                    .selected = ovrSelected,
-                    .indent = true,
-                    .onClick = onMonitorClick,
-                },
-                scale
-            ),
-            onMonitorClick
+            IndexItem{
+                .label = lowerLabel(i18n::tr("settings.entities.monitor-override.label", "name", ovr.match)),
+                .count = countFor(settingsPageScopeKey("bar", barName, match)),
+                .selected = ovrSelected,
+                .indent = true,
+                .onClick = onMonitorClick,
+            },
+            scale
         );
       }
 
@@ -422,10 +405,7 @@ namespace settings {
           openMonitorOverrideCreate(barName);
         }
       };
-      addNavButton(
-          *nav, makeActionButton(i18n::tr("settings.entities.monitor-override.new"), true, scale, onNewMonitorClick),
-          onNewMonitorClick
-      );
+      addActionRow(*nav, i18n::tr("settings.entities.monitor-override.new"), true, scale, onNewMonitorClick);
     }
 
     const auto onNewBarClick = [creatingBarName, nextBarName, clearTransientState, requestRebuild]() {
@@ -433,9 +413,7 @@ namespace settings {
       *creatingBarName = nextBarName;
       requestRebuild();
     };
-    addNavButton(
-        *nav, makeActionButton(i18n::tr("settings.entities.bar.new"), false, scale, onNewBarClick), onNewBarClick
-    );
+    addActionRow(*nav, i18n::tr("settings.entities.bar.new"), false, scale, onNewBarClick);
 
     if (!creatingBarName->empty()) {
       auto createPanel = ui::column({

@@ -18,9 +18,10 @@ fzf_args=(
 pkg_names=$(pacman -Slq | fzf "${fzf_args[@]}")
 
 if [[ -n $pkg_names ]]; then
+  # shellcheck source=/dev/null  # resolved through PATH at run time
   source terminus-sudo-keepalive || exit 1
 
-  # Convert newline-separated selections to space-separated for pacman
-  echo "$pkg_names" | tr '\n' ' ' | xargs sudo pacman -S --noconfirm
+  # One package name per line in, one argument each out.
+  xargs -d '\n' sudo pacman -S --noconfirm <<<"$pkg_names"
   terminus-show-done
 fi

@@ -1,24 +1,21 @@
 #!/bin/bash
+# Focused-window transparency (runs on a key press): Obsidian toggles blur, every other window toggles opacity.
+set -euo pipefail
 
-# Focused-window transparency
-# Obsidian toggles blur; every other window toggles opacity.
-
-active_window=$(hyprctl activewindow -j)
-address=$(jq -r '.address // empty' <<<"$active_window")
+# Hyprland prints "{}" when no window is focused, leaving the address empty.
+IFS=$'\t' read -r address class < <(hyprctl activewindow -j | jq -r '[.address // "", .class // ""] | @tsv')
 [[ -n $address ]] || exit 0
-class=$(jq -r '.class' <<<"$active_window")
 
-if [[ "${class,,}" == *obsidian* ]]; then
-  no_blur=$(hyprctl getprop "address:$address" no_blur)
-  if [[ "$no_blur" == "true" ]]; then
-    next_no_blur=0
-  else
-    next_no_blur=1
-  fi
+# set_prop PROP VALUE: Lua dispatcher on the focused window, by address.
+set_prop() {
+  hyprctl dispatch "hl.dsp.window.set_prop({ prop = \"$1\", value = \"$2\", window = \"address:$address\" })"
+}
 
-  hyprctl dispatch "hl.dsp.window.set_prop({ prop = \"opaque\", value = \"0\", window = \"address:$address\" })" >/dev/null
-  hyprctl dispatch "hl.dsp.window.set_prop({ prop = \"no_blur\", value = \"$next_no_blur\", window = \"address:$address\" })"
-  exit 0
+if [[ ${class,,} == *obsidian* ]]; then
+  next_no_blur=1
+  [[ $(hyprctl getprop "address:$address" no_blur) == true ]] && next_no_blur=0
+  set_prop opaque 0 >/dev/null
+  set_prop no_blur "$next_no_blur"
+else
+  set_prop opaque toggle
 fi
-
-hyprctl dispatch "hl.dsp.window.set_prop({ prop = \"opaque\", value = \"toggle\", window = \"address:$address\" })"

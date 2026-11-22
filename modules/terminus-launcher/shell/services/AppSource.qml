@@ -85,6 +85,7 @@ Scope {
                 generic: generic,
                 comment: a.comment || "",
                 nameL: name.toLowerCase(),
+                commentL: (a.comment || "").toLowerCase(),
                 genericL: generic.toLowerCase(),
                 keywordsL: (a.keywords || []).join(" ").toLowerCase()
             }

@@ -16,19 +16,35 @@ from pathlib import Path
 
 KEYBOARD = Path.home() / ".local/share/mechvibes/soundpacks/keyboard"
 SRC = KEYBOARD / "mv-353e190917ea49aaa3d0cafbe6e67999"
+CENTS_PER_SEMITONE = 100
+# sox effect chain: pitch goes between the pre-gain and these.
+SOX_PRE_PITCH = ("gain", "-6")
+SOX_POST_PITCH = ("bass", "+8", "120", "treble", "-4", "3500", "norm", "-1")
 
-ap = argparse.ArgumentParser()
-ap.add_argument("--semitones", type=float, default=7)
-ap.add_argument("--out", type=Path, default=KEYBOARD / "aetherspeak-deep")
-args = ap.parse_args()
 
-args.out.mkdir(parents=True, exist_ok=True)
-for src in sorted(SRC.glob("*.ogg")):
-    subprocess.run(["sox", str(src), str(args.out / src.name), "gain", "-6", "pitch", str(-args.semitones * 100),
-                    "bass", "+8", "120", "treble", "-4", "3500", "norm", "-1"], check=True)
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--semitones", type=float, default=7)
+    parser.add_argument("--out", type=Path, default=KEYBOARD / "aetherspeak-deep")
+    args = parser.parse_args()
 
-config = json.loads((SRC / "config.json").read_text())
-config.update(id="aetherspeak-deep", name="Aetherspeak Deep", author="Terminus-Est",
-              description="Aetherspeak, pitched down into a deep voice.")
-(args.out / "config.json").write_text(json.dumps(config, indent=2))
-print(f"wrote {len(list(args.out.glob('*.ogg')))} samples to {args.out}")
+    args.out.mkdir(parents=True, exist_ok=True)
+    pitch = ("pitch", str(-args.semitones * CENTS_PER_SEMITONE))
+    for sample in sorted(SRC.glob("*.ogg")):
+        subprocess.run(
+            ["sox", str(sample), str(args.out / sample.name), *SOX_PRE_PITCH, *pitch, *SOX_POST_PITCH], check=True
+        )
+
+    config = json.loads((SRC / "config.json").read_text())
+    config.update(
+        id="aetherspeak-deep",
+        name="Aetherspeak Deep",
+        author="Terminus-Est",
+        description="Aetherspeak, pitched down into a deep voice.",
+    )
+    (args.out / "config.json").write_text(json.dumps(config, indent=2))
+    print(f"wrote {len(list(args.out.glob('*.ogg')))} samples to {args.out}")
+
+
+if __name__ == "__main__":
+    main()

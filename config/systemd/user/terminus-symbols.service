@@ -1,3 +1,4 @@
+# Preloaded picker panel: bin/terminus-symbols only activates this D-Bus service, so the key press starts no Python or GTK.
 [Unit]
 Description=Standalone one-key Unicode symbol panel
 After=graphical-session.target

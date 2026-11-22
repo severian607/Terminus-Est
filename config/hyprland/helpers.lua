@@ -1,20 +1,34 @@
--- # Hyprland binding, window-rule and application helpers.
+-- # Vocabulary for the other modules: o.bind, o.window, o.launch, o.classes and file/command probes.
 
 o = o or {}
 
-function o.bind(keys, description, dispatcher, options)
+local project_root = assert(os.getenv("HOME"), "HOME is required") .. "/Projects/Terminus-Est"
+
+-- # Window class patterns that both the behaviour rules (windows.lua) and the opacity rules (look_and_feel.lua) name.
+o.classes = {
+  web_calls = "(chrome-youtube\\.com__-Default|chrome-app\\.zoom\\.us__wc_home-Default)",
+  opaque_media = "^(zoom|vlc|mpv|org.kde.kdenlive|com.obsproject.Studio|com.github.PintaProject.Pinta|imv|org.gnome.NautilusPreviewer)$",
+  obsidian = "^md\\.obsidian\\.Obsidian$",
+  zed = "^dev\\.zed\\.Zed$",
+  strata = "^io\\.github\\.lgse\\.Strata$",
+}
+
+-- # o.bind(keys, description, action [, options]): a string action runs as a shell command. `options` is
+-- # hl.bind's table (locked, repeating, mouse, ...); it is filled in with the description, so pass a fresh one.
+function o.bind(keys, description, action, options)
   local opts = options or {}
   if description then
     opts.description = description
   end
 
-  if type(dispatcher) == "string" then
-    dispatcher = hl.dsp.exec_cmd(dispatcher)
+  if type(action) == "string" then
+    action = hl.dsp.exec_cmd(action)
   end
 
-  return hl.bind(keys, dispatcher, opts)
+  return hl.bind(keys, action, opts)
 end
 
+-- # o.window(match, rules): `match` is a class pattern or a table of match fields (title, tag, float, ...).
 function o.window(match, rules)
   rules.match = rules.match or {}
 
@@ -33,12 +47,6 @@ function o.launch(command)
   return "uwsm-app -- " .. command
 end
 
-function o.launch_on_start(command)
-  hl.on("hyprland.start", function()
-    hl.exec_cmd(o.launch(command))
-  end)
-end
-
 function o.file_exists(path)
   local file = io.open(path, "r")
   if not file then
@@ -48,11 +56,11 @@ function o.file_exists(path)
   return true
 end
 
+-- # True when `command` is a file in a directory of the PATH the desktop sessions use (the same order as envs.lua).
 function o.command_exists(command)
-  local home = assert(os.getenv("HOME"), "HOME is required")
-  local path = home .. "/Projects/Terminus-Est/bin:"
-    .. home .. "/Projects/Terminus-Est/modules/desktop/bin:"
-    .. home .. "/.local/bin:"
+  local path = project_root .. "/bin:"
+    .. project_root .. "/modules/desktop/bin:"
+    .. os.getenv("HOME") .. "/.local/bin:"
     .. (os.getenv("PATH") or "/usr/bin")
 
   for directory in path:gmatch("[^:]+") do

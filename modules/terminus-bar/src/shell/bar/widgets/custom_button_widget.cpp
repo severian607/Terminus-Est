@@ -18,6 +18,7 @@
 #include <format>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <utility>
 
@@ -66,41 +67,51 @@ namespace {
     );
   }
 
+  // Strips `<marker>NN` from `token` and returns NN (keeps `fallback` when NN is not a number).
+  int takeNumericSuffix(std::string_view& token, char marker, int fallback) {
+    const std::size_t pos = token.find(marker);
+    if (pos == std::string_view::npos) {
+      return fallback;
+    }
+    const std::string_view digits = token.substr(pos + 1);
+    int value = fallback;
+    std::from_chars(digits.data(), digits.data() + digits.size(), value);
+    token = token.substr(0, pos);
+    return value;
+  }
+
+  // `role`, `role*SS`, `role/NN` or `role*SS/NN` -> `#rrggbb`; nullopt when `role` is not a palette role.
+  std::optional<std::string> resolvePaletteToken(std::string_view token) {
+    const int percent = takeNumericSuffix(token, '/', 100);
+    const int saturation = takeNumericSuffix(token, '*', 100);
+    const auto role = colorRoleFromToken(token);
+    if (!role.has_value()) {
+      return std::nullopt;
+    }
+    Color color = saturate(colorForRole(*role), static_cast<float>(saturation) / 100.0F);
+    if (percent < 100) {
+      const Color base = colorForRole(ColorRole::Surface);
+      const float t = static_cast<float>(std::clamp(percent, 0, 100)) / 100.0F;
+      color =
+          rgba(color.r * t + base.r * (1.0F - t), color.g * t + base.g * (1.0F - t), color.b * t + base.b * (1.0F - t));
+    }
+    return toHex(color);
+  }
+
   // Replaces `@role@`, `@role*SS@`, `@role/NN@` and `@role*SS/NN@` in markup with a `#rrggbb` taken from the current
   // palette, so labels follow the wallpaper palette. `SS` is the saturation in percent (default 100) and `NN` the
   // percentage of the colour mixed over the surface colour (default 100). Anything else between two `@` stays as
-  // written.
+  // written. Runs per label on create and on palette change, never per frame.
   std::string expandPaletteTokens(std::string_view text) {
     std::string out;
     out.reserve(text.size());
     std::size_t i = 0;
     while (i < text.size()) {
       if (text[i] == '@') {
-        if (const std::size_t end = text.find('@', i + 1); end != std::string_view::npos) {
-          std::string_view token = text.substr(i + 1, end - i - 1);
-          int percent = 100;
-          if (const std::size_t slash = token.find('/'); slash != std::string_view::npos) {
-            const std::string_view digits = token.substr(slash + 1);
-            std::from_chars(digits.data(), digits.data() + digits.size(), percent);
-            token = token.substr(0, slash);
-          }
-          int saturation = 100;
-          if (const std::size_t star = token.find('*'); star != std::string_view::npos) {
-            const std::string_view digits = token.substr(star + 1);
-            std::from_chars(digits.data(), digits.data() + digits.size(), saturation);
-            token = token.substr(0, star);
-          }
-          if (const auto role = colorRoleFromToken(token); role.has_value()) {
-            Color color = saturate(colorForRole(*role), static_cast<float>(saturation) / 100.0F);
-            if (percent < 100) {
-              const Color base = colorForRole(ColorRole::Surface);
-              const float t = static_cast<float>(std::clamp(percent, 0, 100)) / 100.0F;
-              color = rgba(
-                  color.r * t + base.r * (1.0F - t), color.g * t + base.g * (1.0F - t),
-                  color.b * t + base.b * (1.0F - t)
-              );
-            }
-            out += toHex(color);
+        const std::size_t end = text.find('@', i + 1);
+        if (end != std::string_view::npos) {
+          if (const auto hex = resolvePaletteToken(text.substr(i + 1, end - i - 1))) {
+            out += *hex;
             i = end + 1;
             continue;
           }

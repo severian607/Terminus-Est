@@ -1,3 +1,4 @@
+# Preloaded picker panel: bin/terminus-shaders only activates this D-Bus service, so the key press starts no Python or GTK.
 [Unit]
 Description=Standalone screen shader picker
 After=graphical-session.target

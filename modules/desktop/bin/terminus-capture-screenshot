@@ -6,6 +6,7 @@
 # terminus:examples=terminus screenshot | terminus capture screenshot region
 # terminus:aliases=terminus screenshot
 
+# shellcheck source=/dev/null  # the user's XDG directories, absent on some systems
 [[ -f ~/.config/user-dirs.dirs ]] && source ~/.config/user-dirs.dirs
 OUTPUT_DIR="${TERMINUS_SCREENSHOT_DIR:-${XDG_PICTURES_DIR:-$HOME/Pictures}}"
 
@@ -18,8 +19,11 @@ pkill slurp && exit 0
 
 MODE="${1:-smart}"
 PROCESSING="${2:-slurp}"
+PICKER_SETTLE_SECONDS=.1 # hyprpicker needs this long to paint the frozen frame before slurp starts
+MIN_SELECTION_AREA_PX=20 # a smaller drag is a click
 
 # accounting for portrait/transformed displays
+# shellcheck disable=SC2016  # jq program, not shell
 JQ_MONITOR_GEO='
   def format_geo:
     .x as $x | .y as $y |
@@ -34,65 +38,68 @@ JQ_MONITOR_GEO='
 '
 
 get_rectangles() {
-  local active_workspace=$(hyprctl monitors -j | jq -r '.[] | select(.focused == true) | .activeWorkspace.id')
-  hyprctl monitors -j | jq -r --arg ws "$active_workspace" "${JQ_MONITOR_GEO} .[] | select(.activeWorkspace.id == (\$ws | tonumber)) | format_geo"
+  local monitors active_workspace
+  monitors=$(hyprctl monitors -j)
+  active_workspace=$(jq -r '.[] | select(.focused == true) | .activeWorkspace.id' <<<"$monitors")
+  jq -r --arg ws "$active_workspace" "${JQ_MONITOR_GEO} .[] | select(.activeWorkspace.id == (\$ws | tonumber)) | format_geo" <<<"$monitors"
   hyprctl clients -j | jq -r --arg ws "$active_workspace" '.[] | select(.workspace.id == ($ws | tonumber)) | "\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])"'
+}
+
+# A click (area under MIN_SELECTION_AREA_PX) selects whichever window or output it landed in, so a slip of the
+# hand does not take a 2px snapshot. Prints the selection, snapped to that rectangle when it was a click.
+snap_click_to_rect() {
+  local selection=$1 rects=$2 click_x click_y rect
+  if [[ ! $selection =~ ^(-?[0-9]+),(-?[0-9]+)[[:space:]]([0-9]+)x([0-9]+)$ ]] ||
+    ((BASH_REMATCH[3] * BASH_REMATCH[4] >= MIN_SELECTION_AREA_PX)); then
+    echo "$selection"
+    return
+  fi
+  click_x=${BASH_REMATCH[1]}
+  click_y=${BASH_REMATCH[2]}
+  while IFS= read -r rect; do
+    [[ $rect =~ ^(-?[0-9]+),(-?[0-9]+)[[:space:]]([0-9]+)x([0-9]+) ]] || continue
+    if ((click_x >= BASH_REMATCH[1] && click_x < BASH_REMATCH[1] + BASH_REMATCH[3] && \
+      click_y >= BASH_REMATCH[2] && click_y < BASH_REMATCH[2] + BASH_REMATCH[4])); then
+      echo "${BASH_REMATCH[1]},${BASH_REMATCH[2]} ${BASH_REMATCH[3]}x${BASH_REMATCH[4]}"
+      return
+    fi
+  done <<<"$rects"
+  echo "$selection"
 }
 
 # Keep hyprpicker alive until after grim captures so the screenshot sees the
 # frozen overlay rather than live content shifting during teardown.
 cleanup_freeze() {
-  [[ -n $PID ]] && kill $PID 2>/dev/null
+  [[ -n $PID ]] && kill "$PID" 2>/dev/null
 }
 trap cleanup_freeze EXIT
 
 # Select based on mode
 case "$MODE" in
-region)
-  hyprpicker -r -z >/dev/null 2>&1 &
-  PID=$!
-  sleep .1
-  SELECTION=$(slurp 2>/dev/null)
-  ;;
-windows)
-  hyprpicker -r -z >/dev/null 2>&1 &
-  PID=$!
-  sleep .1
-  SELECTION=$(get_rectangles | slurp -r 2>/dev/null)
-  ;;
-fullscreen)
-  SELECTION=$(hyprctl monitors -j | jq -r "${JQ_MONITOR_GEO} .[] | select(.focused == true) | format_geo")
-  ;;
-smart | *)
-  RECTS=$(get_rectangles)
-  hyprpicker -r -z >/dev/null 2>&1 &
-  PID=$!
-  sleep .1
-  SELECTION=$(echo "$RECTS" | slurp 2>/dev/null)
+  region)
+    hyprpicker -r -z >/dev/null 2>&1 &
+    PID=$!
+    sleep $PICKER_SETTLE_SECONDS
+    SELECTION=$(slurp 2>/dev/null)
+    ;;
+  windows)
+    hyprpicker -r -z >/dev/null 2>&1 &
+    PID=$!
+    sleep $PICKER_SETTLE_SECONDS
+    SELECTION=$(get_rectangles | slurp -r 2>/dev/null)
+    ;;
+  fullscreen)
+    SELECTION=$(hyprctl monitors -j | jq -r "${JQ_MONITOR_GEO} .[] | select(.focused == true) | format_geo")
+    ;;
+  smart | *)
+    RECTS=$(get_rectangles)
+    hyprpicker -r -z >/dev/null 2>&1 &
+    PID=$!
+    sleep $PICKER_SETTLE_SECONDS
+    SELECTION=$(echo "$RECTS" | slurp 2>/dev/null)
 
-  # If the selection area is L * W < 20, we'll assume you were trying to select whichever
-  # window or output it was inside of to prevent accidental 2px snapshots
-  if [[ $SELECTION =~ ^(-?[0-9]+),(-?[0-9]+)[[:space:]]([0-9]+)x([0-9]+)$ ]]; then
-    if ((${BASH_REMATCH[3]} * ${BASH_REMATCH[4]} < 20)); then
-      click_x="${BASH_REMATCH[1]}"
-      click_y="${BASH_REMATCH[2]}"
-
-      while IFS= read -r rect; do
-        if [[ $rect =~ ^(-?[0-9]+),(-?[0-9]+)[[:space:]]([0-9]+)x([0-9]+) ]]; then
-          rect_x="${BASH_REMATCH[1]}"
-          rect_y="${BASH_REMATCH[2]}"
-          rect_width="${BASH_REMATCH[3]}"
-          rect_height="${BASH_REMATCH[4]}"
-
-          if ((click_x >= rect_x && click_x < rect_x + rect_width && click_y >= rect_y && click_y < rect_y + rect_height)); then
-            SELECTION="${rect_x},${rect_y} ${rect_width}x${rect_height}"
-            break
-          fi
-        fi
-      done <<<"$RECTS"
-    fi
-  fi
-  ;;
+    SELECTION=$(snap_click_to_rect "$SELECTION" "$RECTS")
+    ;;
 esac
 
 [[ -z $SELECTION ]] && exit 0

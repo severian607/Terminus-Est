@@ -1,3 +1,6 @@
+// Weather panel body: ¹now, ²hours (next 12) and ³days (7) boxes over an optional weather animation.
+// Hot path: doUpdate -> sync() runs on every panel update and rewrites each label from the snapshot.
+
 #include "shell/control_center/tabs/weather_tab.h"
 
 #include "config/config_service.h"
@@ -11,12 +14,16 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cmath>
-#include <cstdlib>
 #include <ctime>
 #include <format>
 #include <memory>
+#include <optional>
+#include <span>
+#include <string_view>
+#include <system_error>
 
 namespace {
 
@@ -30,30 +37,60 @@ namespace {
   constexpr float kDayBarHeight = 6.0F;
   constexpr float kBoxGap = 6.0F;
   constexpr float kInnerGap = 2.0F;
+  constexpr float kHourColumnGap = 1.0F;
   constexpr float kBarHeight = 22.0F;
+  constexpr float kMinDayTrackWidth = 40.0F;
   constexpr float kUvScale = 11.0F;
+  constexpr float kBoxFillAlpha = 0.94F;
+  constexpr float kVeilAlpha = 0.25F;
+  constexpr float kTrackAlpha = 0.5F;
+  constexpr int kBehindContentZ = -2; // effect, then its veil, both under the boxes
   constexpr std::size_t kKeyChars = 10;
   constexpr std::size_t kDayChars = 4;
   constexpr std::size_t kConditionChars = 10;
   constexpr std::size_t kDayTempChars = 4;
+  constexpr std::size_t kTempChars = 5; // width reserved for the big temperature
+  constexpr std::size_t kIsoDateLength = 10;
+  constexpr std::size_t kIsoMinuteLength = 16; // yyyy-mm-ddThh:mm
+
+  // Hour bars: height runs from kMinBarFraction (coldest) to 1 (warmest); flat days sit at kFlatBarFraction.
+  constexpr double kMinBarFraction = 0.3;
+  constexpr double kFlatTemperatureSpan = 0.01;
+  constexpr float kFlatBarFraction = 0.6F;
+  constexpr float kHourBarWidthFraction = 0.4F;
+  constexpr float kMinBarThickness = 3.0F; // px
+  constexpr float kMinBarLength = 2.0F;    // px
+
+  constexpr double kKmhToMph = 0.621371;
+  constexpr float kSecondsPerMillisecond = 0.001F;
+
+  // Open-Meteo wind bearings are where the wind comes from: eight 45° sectors.
+  constexpr int kDegreesPerCircle = 360;
+  constexpr double kDegreesPerSector = 45.0;
+  constexpr std::size_t kCompassPoints = 8;
+
+  [[nodiscard]] std::size_t compassSector(int degrees) {
+    const int normalized = ((degrees % kDegreesPerCircle) + kDegreesPerCircle) % kDegreesPerCircle;
+    return static_cast<std::size_t>(std::lround(normalized / kDegreesPerSector)) % kCompassPoints;
+  }
 
   const char* windDirectionLabel(int degrees) {
-    static constexpr std::array<const char*, 8> kDirs = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
-    const int normalized = ((degrees % 360) + 360) % 360;
-    const int index = static_cast<int>(std::lround(normalized / 45.0)) % 8;
-    return kDirs[static_cast<std::size_t>(index)];
+    static constexpr std::array<const char*, kCompassPoints> kDirs = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+    return kDirs[compassSector(degrees)];
   }
 
   // Arrow for the direction the wind blows toward (opposite of the meteorological "from" bearing).
   const char* windArrow(int degrees) {
-    static constexpr std::array<const char*, 8> kArrows = {"↓", "↙", "←", "↖", "↑", "↗", "→", "↘"};
-    const int normalized = ((degrees % 360) + 360) % 360;
-    const int index = static_cast<int>(std::lround(normalized / 45.0)) % 8;
-    return kArrows[static_cast<std::size_t>(index)];
+    static constexpr std::array<const char*, kCompassPoints> kArrows = {"↓", "↙", "←", "↖", "↑", "↗", "→", "↘"};
+    return kArrows[compassSector(degrees)];
   }
+
+  int roundedInt(double value) { return static_cast<int>(std::lround(value)); }
 
   ColorSpec accent() { return colorSpecFromRole(ColorRole::Primary); }
   ColorSpec text() { return colorSpecFromRole(ColorRole::OnSurface); }
+  ColorSpec dim() { return term_frame::dimColor(); }
+  ColorSpec trackColor() { return colorSpecFromRole(ColorRole::Outline, kTrackAlpha); }
 
   std::unique_ptr<Label> monoLabel(float size, const ColorSpec& color, Label** out = nullptr, std::string value = {}) {
     return ui::label({
@@ -81,9 +118,23 @@ namespace {
     return track;
   }
 
+  // A report box: the shared terminal frame with the panel's near-opaque fill.
+  std::unique_ptr<Flex> reportBox(std::string_view numeral, std::string_view title, float scale, Flex** out) {
+    auto box = term_frame::box(numeral, title, scale, out);
+    box->setFill(colorSpecFromRole(ColorRole::Surface, kBoxFillAlpha));
+    return box;
+  }
+
   std::string timeFormatOf(const ConfigService* config) {
     return config != nullptr && !config->config().shell.timeFormat.empty() ? config->config().shell.timeFormat
-                                                                             : std::string("%H:%M");
+                                                                           : std::string("%H:%M");
+  }
+
+  [[nodiscard]] bool isTwelveHourFormat(const std::string& format) {
+    return format.find("%I") != std::string::npos
+        || format.find("%l") != std::string::npos
+        || format.find("%p") != std::string::npos
+        || format.find("%r") != std::string::npos;
   }
 
 } // namespace
@@ -92,41 +143,14 @@ WeatherTab::WeatherTab(WeatherService* weather, ConfigService* config) : m_weath
 
 std::unique_ptr<Flex> WeatherTab::create() {
   const float scale = contentScale();
-  const float font = Style::fontSizeCaption * scale;
-  const float mini = Style::fontSizeMini * scale;
-  const ColorSpec dim = term_frame::dimColor();
-  const ColorSpec track = colorSpecFromRole(ColorRole::Outline, 0.5F);
 
   auto root = ui::column({
       .out = &m_root,
       .align = FlexAlign::Stretch,
       .gap = kBoxGap * scale,
   });
-  {
-    // Weather animation behind the whole report, then a surface veil so the text on top stays legible.
-    auto effect = std::make_unique<EffectNode>();
-    effect->setParticipatesInLayout(false);
-    effect->setZIndex(-2);
-    effect->setVisible(false);
-    effect->setRadius(0.0F);
-    m_effectNode = static_cast<EffectNode*>(m_root->addChild(std::move(effect)));
-    m_root->addChild(ui::box({
-        .out = &m_veil,
-        .fill = colorSpecFromRole(ColorRole::Surface, 0.25F),
-        .radius = 0.0F,
-        .participatesInLayout = false,
-    }));
-    m_veil->setZIndex(-1);
-  }
-
-  // Shown instead of the report while there is no data: disabled, no location, loading, unavailable.
-  auto stateBox = term_frame::box("¹", "weather", scale, &m_stateBox);
-  stateBox->setFill(colorSpecFromRole(ColorRole::Surface, 0.94F));
-  stateBox->addChild(monoLabel(font, text(), &m_stateTitle));
-  stateBox->addChild(monoLabel(font, dim, &m_stateBody));
-  m_stateBody->setMaxLines(4);
-  m_stateBody->setEllipsize(TextEllipsize::End);
-  root->addChild(std::move(stateBox));
+  addEffectLayer();
+  root->addChild(buildStateBox(scale));
 
   auto data = ui::column({
       .out = &m_data,
@@ -134,43 +158,84 @@ std::unique_ptr<Flex> WeatherTab::create() {
       .gap = kBoxGap * scale,
       .visible = false,
   });
+  data->addChild(buildNowBox(scale));
+  data->addChild(buildHoursBox(scale));
+  data->addChild(buildDaysBox(scale));
+  root->addChild(std::move(data));
+  return root;
+}
 
-  // --- ¹now ---
-  auto nowBox = term_frame::box("¹", "now", scale, &m_nowBox);
-  nowBox->setFill(colorSpecFromRole(ColorRole::Surface, 0.94F));
-  auto nowRow = ui::row({
+// Weather animation behind the whole report, then a surface veil so the text on top stays legible.
+void WeatherTab::addEffectLayer() {
+  auto effect = std::make_unique<EffectNode>();
+  effect->setParticipatesInLayout(false);
+  effect->setZIndex(kBehindContentZ);
+  effect->setVisible(false);
+  effect->setRadius(0.0F);
+  m_effectNode = static_cast<EffectNode*>(m_root->addChild(std::move(effect)));
+  m_root->addChild(
+      ui::box({
+          .out = &m_veil,
+          .fill = colorSpecFromRole(ColorRole::Surface, kVeilAlpha),
+          .radius = 0.0F,
+          .participatesInLayout = false,
+      })
+  );
+  m_veil->setZIndex(kBehindContentZ + 1);
+}
+
+// Shown instead of the report while there is no data: disabled, no location, loading, unavailable.
+std::unique_ptr<Flex> WeatherTab::buildStateBox(float scale) {
+  const float font = Style::fontSizeCaption * scale;
+  auto box = reportBox("¹", "weather", scale, &m_stateBox);
+  box->addChild(monoLabel(font, text(), &m_stateTitle));
+  box->addChild(monoLabel(font, dim(), &m_stateBody));
+  m_stateBody->setMaxLines(4);
+  m_stateBody->setEllipsize(TextEllipsize::End);
+  return box;
+}
+
+std::unique_ptr<Flex> WeatherTab::buildNowBox(float scale) {
+  const float font = Style::fontSizeCaption * scale;
+  auto box = reportBox("¹", "now", scale, &m_nowBox);
+  auto row = ui::row({
       .out = &m_nowRow,
       .align = FlexAlign::Center,
       .gap = Style::spaceSm * scale,
   });
-  nowRow->addChild(ui::label({
-      .out = &m_temp,
-      .text = "--",
-      .fontSize = kTempFontSize * scale,
-      .fontWeight = FontWeight::Bold,
-      .fontFamily = std::string(term_frame::kFont),
-      .color = accent(),
-      .maxLines = 1,
-  }));
-  nowRow->addChild(ui::glyph({
-      .out = &m_glyph,
-      .glyph = "weather-cloud",
-      .glyphSize = kNowGlyphSize * scale,
-      .color = accent(),
-  }));
-  nowRow->addChild(monoLabel(font, text(), &m_condition));
+  row->addChild(
+      ui::label({
+          .out = &m_temp,
+          .text = "--",
+          .fontSize = kTempFontSize * scale,
+          .fontWeight = FontWeight::Bold,
+          .fontFamily = std::string(term_frame::kFont),
+          .color = accent(),
+          .maxLines = 1,
+      })
+  );
+  row->addChild(
+      ui::glyph({
+          .out = &m_glyph,
+          .glyph = "weather-cloud",
+          .glyphSize = kNowGlyphSize * scale,
+          .color = accent(),
+      })
+  );
+  row->addChild(monoLabel(font, text(), &m_condition));
   m_condition->setFlexGrow(1.0F);
-  nowBox->addChild(std::move(nowRow));
-  nowBox->addChild(monoLabel(font, dim, &m_feels));
-  nowBox->addChild(term_frame::keyValueRow("wind", scale, m_wind, kKeyChars));
-  nowBox->addChild(term_frame::keyValueRow("hum", scale, m_humidity, kKeyChars));
-  nowBox->addChild(term_frame::dottedMeterRow("uv", scale, m_uv));
-  nowBox->addChild(term_frame::keyValueRow("sun", scale, m_sun, kKeyChars));
-  data->addChild(std::move(nowBox));
+  box->addChild(std::move(row));
+  box->addChild(monoLabel(font, dim(), &m_feels));
+  box->addChild(term_frame::keyValueRow("wind", scale, m_wind, kKeyChars));
+  box->addChild(term_frame::keyValueRow("hum", scale, m_humidity, kKeyChars));
+  box->addChild(term_frame::dottedMeterRow("uv", scale, m_uv));
+  box->addChild(term_frame::keyValueRow("sun", scale, m_sun, kKeyChars));
+  return box;
+}
 
-  // --- ²hours ---
-  auto hoursBox = term_frame::box("²", "hours", scale, &m_hoursBox);
-  hoursBox->setFill(colorSpecFromRole(ColorRole::Surface, 0.94F));
+std::unique_ptr<Flex> WeatherTab::buildHoursBox(float scale) {
+  const float mini = Style::fontSizeMini * scale;
+  auto box = reportBox("²", "hours", scale, &m_hoursBox);
   auto strip = ui::row({
       .out = &m_hoursStrip,
       .align = FlexAlign::Start,
@@ -181,29 +246,32 @@ std::unique_ptr<Flex> WeatherTab::create() {
     auto column = ui::column({
         .out = &hour.column,
         .align = FlexAlign::Center,
-        .gap = 1.0F * scale,
+        .gap = kHourColumnGap * scale,
     });
-    column->addChild(monoLabel(mini, dim, &hour.hour));
-    column->addChild(ui::glyph({
-        .out = &hour.glyph,
-        .glyph = "weather-cloud",
-        .glyphSize = kGlyphSize * scale,
-        .color = dim,
-    }));
-    column->addChild(barTrack(&hour.barTrack, &hour.bar, clearColorSpec(), dim));
+    column->addChild(monoLabel(mini, dim(), &hour.hour));
+    column->addChild(
+        ui::glyph({
+            .out = &hour.glyph,
+            .glyph = "weather-cloud",
+            .glyphSize = kGlyphSize * scale,
+            .color = dim(),
+        })
+    );
+    column->addChild(barTrack(&hour.barTrack, &hour.bar, clearColorSpec(), dim()));
     column->addChild(monoLabel(mini, text(), &hour.temp));
-    column->addChild(barTrack(&hour.rainTrack, &hour.rain, track, accent()));
-    column->addChild(monoLabel(mini, dim, &hour.percent));
+    column->addChild(barTrack(&hour.rainTrack, &hour.rain, trackColor(), accent()));
+    column->addChild(monoLabel(mini, dim(), &hour.percent));
     strip->addChild(std::move(column));
   }
-  hoursBox->addChild(std::move(strip));
-  hoursBox->addChild(monoLabel(mini, dim, &m_dryLabel, "dry next 12 h"));
+  box->addChild(std::move(strip));
+  box->addChild(monoLabel(mini, dim(), &m_dryLabel, "dry next 12 h"));
   m_dryLabel->setVisible(false);
-  data->addChild(std::move(hoursBox));
+  return box;
+}
 
-  // --- ³days ---
-  auto daysBox = term_frame::box("³", "days", scale, &m_daysBox);
-  daysBox->setFill(colorSpecFromRole(ColorRole::Surface, 0.94F));
+std::unique_ptr<Flex> WeatherTab::buildDaysBox(float scale) {
+  const float font = Style::fontSizeCaption * scale;
+  auto box = reportBox("³", "days", scale, &m_daysBox);
   for (auto& day : m_days) {
     auto row = ui::row({
         .out = &day.row,
@@ -211,23 +279,22 @@ std::unique_ptr<Flex> WeatherTab::create() {
         .gap = Style::spaceSm * scale,
     });
     row->addChild(monoLabel(font, text(), &day.day));
-    row->addChild(ui::glyph({
-        .out = &day.glyph,
-        .glyph = "weather-cloud",
-        .glyphSize = kGlyphSize * scale,
-        .color = dim,
-    }));
-    row->addChild(monoLabel(font, dim, &day.condition));
+    row->addChild(
+        ui::glyph({
+            .out = &day.glyph,
+            .glyph = "weather-cloud",
+            .glyphSize = kGlyphSize * scale,
+            .color = dim(),
+        })
+    );
+    row->addChild(monoLabel(font, dim(), &day.condition));
     row->addChild(monoLabel(font, text(), &day.low));
-    row->addChild(barTrack(&day.track, &day.bar, track, dim));
+    row->addChild(barTrack(&day.track, &day.bar, trackColor(), dim()));
     row->addChild(monoLabel(font, text(), &day.high));
     day.low->setTextAlign(TextAlign::End);
-    daysBox->addChild(std::move(row));
+    box->addChild(std::move(row));
   }
-  data->addChild(std::move(daysBox));
-
-  root->addChild(std::move(data));
-  return root;
+  return box;
 }
 
 void WeatherTab::onClose() {
@@ -256,7 +323,7 @@ void WeatherTab::onClose() {
   m_hours.fill({});
   m_daysBox = nullptr;
   m_days.fill({});
-  m_shapeKey = 0;
+  m_shape = {};
   m_laidOutWidth = 0.0F;
   m_hourCount = 0;
   m_dayCount = 0;
@@ -268,13 +335,9 @@ void WeatherTab::doLayout(Renderer& renderer, float contentWidth, float /*bodyHe
     return;
   }
   const float scale = contentScale();
-  const float font = Style::fontSizeCaption * scale;
-  const float mini = Style::fontSizeMini * scale;
-  const float gap = Style::spaceSm * scale;
   // The control center hands over its full body; the report keeps its compact width, left-aligned.
   const float width = std::max(1.0F, std::min(contentWidth, kMaxWidth * scale));
   const float inner = std::max(1.0F, width - 2.0F * term_frame::boxInset(scale));
-  const float rowHeight = kRowHeight * scale;
 
   m_root->setGap(kBoxGap * scale);
   m_data->setGap(kBoxGap * scale);
@@ -282,29 +345,40 @@ void WeatherTab::doLayout(Renderer& renderer, float contentWidth, float /*bodyHe
     box->setGap(kInnerGap * scale);
   }
   m_daysBox->setGap(0.0F);
-
   m_stateTitle->setMaxWidth(inner);
   m_stateBody->setMaxWidth(inner);
 
-  // ¹now
+  layoutNow(inner, scale);
+  layoutHours(inner, scale);
+  layoutDays(inner, scale);
+
+  m_laidOutWidth = width;
+  relayoutReport(renderer);
+}
+
+void WeatherTab::layoutNow(float inner, float scale) {
+  const float gap = Style::spaceSm * scale;
+  const float rowHeight = kRowHeight * scale;
   const float tempFont = kTempFontSize * scale;
   m_temp->setFontSize(tempFont);
   m_glyph->setGlyphSize(kNowGlyphSize * scale);
   term_frame::pinSize(*m_nowRow, inner, kNowHeight * scale);
   m_condition->setMaxWidth(
-      std::max(1.0F, inner - term_frame::monoWidth(5, tempFont) - kNowGlyphSize * scale - 2.0F * gap)
+      std::max(1.0F, inner - term_frame::monoWidth(kTempChars, tempFont) - kNowGlyphSize * scale - 2.0F * gap)
   );
   m_feels->setMaxWidth(inner);
   term_frame::layoutKeyValueRowH(m_wind, inner, rowHeight, scale, kKeyChars);
   term_frame::layoutKeyValueRowH(m_sun, inner, rowHeight, scale, kKeyChars);
   term_frame::layoutKeyValueRowH(m_humidity, inner, rowHeight, scale, kKeyChars);
   term_frame::layoutDottedMeterRow(m_uv, inner, scale);
+}
+
+void WeatherTab::layoutHours(float inner, float scale) {
+  const float mini = Style::fontSizeMini * scale;
+  const float gap = Style::spaceSm * scale;
+  const float colWidth = std::max(1.0F, std::floor(inner / static_cast<float>(kHourCount)));
   m_dryLabel->setFontSize(mini);
   m_dryLabel->setMaxWidth(inner);
-
-  // ²hours
-  const float colWidth = std::max(1.0F, std::floor(inner / static_cast<float>(kHourCount)));
-  const float barHeight = kBarHeight * scale;
   for (auto& hour : m_hours) {
     hour.column->setMinWidth(colWidth);
     hour.column->setMaxWidth(colWidth);
@@ -312,34 +386,37 @@ void WeatherTab::doLayout(Renderer& renderer, float contentWidth, float /*bodyHe
       label->setFontSize(mini);
       label->setMaxWidth(colWidth);
     }
-    term_frame::pinSize(*hour.barTrack, colWidth, barHeight);
+    term_frame::pinSize(*hour.barTrack, colWidth, kBarHeight * scale);
     term_frame::pinSize(*hour.rainTrack, std::max(1.0F, colWidth - 2.0F * gap), kRainHeight * scale);
   }
+}
 
-  // ³days
+// One row: day | glyph | condition | low | range track | high, separated by five gaps. The condition column
+// shrinks before the range track drops below its minimum.
+void WeatherTab::layoutDays(float inner, float scale) {
+  constexpr float kRowGaps = 5.0F;
+  const float font = Style::fontSizeCaption * scale;
+  const float gap = Style::spaceSm * scale;
   const float dayWidth = term_frame::monoWidth(kDayChars, font);
   const float tempWidth = term_frame::monoWidth(kDayTempChars, font);
-  const float glyphWidth = kGlyphSize * scale;
-  const float minTrack = 40.0F * scale;
+  const float minTrack = kMinDayTrackWidth * scale;
   float conditionWidth = term_frame::monoWidth(kConditionChars, font);
-  const float fixed = dayWidth + glyphWidth + 2.0F * tempWidth + 5.0F * gap;
+  const float fixed = dayWidth + kGlyphSize * scale + 2.0F * tempWidth + kRowGaps * gap;
   if (inner - fixed - conditionWidth < minTrack) {
     conditionWidth = std::max(1.0F, inner - fixed - minTrack);
   }
   const float trackWidth = std::max(1.0F, inner - fixed - conditionWidth);
   for (auto& day : m_days) {
-    term_frame::pinSize(*day.row, inner, rowHeight);
-    for (auto [label, labelWidth] : {std::pair{day.day, dayWidth}, std::pair{day.condition, conditionWidth},
-                                     std::pair{day.low, tempWidth}, std::pair{day.high, tempWidth}}) {
+    term_frame::pinSize(*day.row, inner, kRowHeight * scale);
+    for (auto [label, labelWidth] :
+         {std::pair{day.day, dayWidth}, std::pair{day.condition, conditionWidth}, std::pair{day.low, tempWidth},
+          std::pair{day.high, tempWidth}}) {
       label->setFontSize(font);
       label->setMinWidth(labelWidth);
       label->setMaxWidth(labelWidth);
     }
     term_frame::pinSize(*day.track, trackWidth, kDayBarHeight * scale);
   }
-
-  m_laidOutWidth = width;
-  relayoutReport(renderer);
 }
 
 // Lays the report out at the remembered width and records its content height (logical px) for quickPanelHeight().
@@ -355,8 +432,7 @@ void WeatherTab::relayoutReport(Renderer& renderer) {
   }
 }
 
-float WeatherTab::quickPanelHeight(float width, float fallback) const {
-  (void)width;
+float WeatherTab::quickPanelHeight(float /*width*/, float fallback) const {
   return m_contentHeight > 0.0F ? m_contentHeight : fallback;
 }
 
@@ -382,10 +458,15 @@ void WeatherTab::doUpdate(Renderer& renderer) {
     return;
   }
   // The visible rows changed (state box <-> report, fewer hours or days): measure again.
-  const std::size_t shape = (m_data->visible() ? 1U : 0U) | (m_dryLabel->visible() ? 2U : 0U) | (m_hourCount << 2U)
-      | (m_dayCount << 10U) | (m_stateBody->visible() ? (1U << 18U) : 0U);
-  if (shape != m_shapeKey && m_laidOutWidth > 0.0F) {
-    m_shapeKey = shape;
+  const ShapeKey shape{
+      .reportVisible = m_data->visible(),
+      .dryLabelVisible = m_dryLabel->visible(),
+      .stateBodyVisible = m_stateBody->visible(),
+      .hourCount = m_hourCount,
+      .dayCount = m_dayCount,
+  };
+  if (shape != m_shape && m_laidOutWidth > 0.0F) {
+    m_shape = shape;
     relayoutReport(renderer);
   }
   // Last, as a reopen may tear this tab's nodes down.
@@ -397,12 +478,8 @@ void WeatherTab::doUpdate(Renderer& renderer) {
 
 void WeatherTab::showState(const std::string& title, const std::string& body) {
   hideEffect();
-  if (m_data->visible()) {
-    m_data->setVisible(false);
-  }
-  if (!m_stateBox->visible()) {
-    m_stateBox->setVisible(true);
-  }
+  m_data->setVisible(false);
+  m_stateBox->setVisible(true);
   m_stateTitle->setText(term_frame::lowerAscii(title));
   m_stateBody->setText(term_frame::lowerAscii(body));
   m_stateBody->setVisible(!body.empty());
@@ -432,12 +509,8 @@ void WeatherTab::sync() {
     return;
   }
 
-  if (!m_data->visible()) {
-    m_data->setVisible(true);
-  }
-  if (m_stateBox->visible()) {
-    m_stateBox->setVisible(false);
-  }
+  m_data->setVisible(true);
+  m_stateBox->setVisible(false);
   syncNow(snapshot);
   syncEffect(snapshot);
   syncHours(snapshot);
@@ -446,18 +519,13 @@ void WeatherTab::sync() {
 }
 
 std::string WeatherTab::temperatureText(double celsius) const {
-  return std::format("{}°", static_cast<int>(std::lround(m_weather->displayTemperature(celsius))));
+  return std::format("{}°", roundedInt(m_weather->displayTemperature(celsius)));
 }
 
-std::string WeatherTab::hourLabel(const std::string& isoTime) const {
-  if (isoTime.size() < 16) {
+std::string WeatherTab::hourLabel(const std::string& isoTime, bool twelveHour) {
+  if (isoTime.size() < kIsoMinuteLength) {
     return isoTime;
   }
-  const std::string format = timeFormatOf(m_config);
-  const bool twelveHour = format.find("%I") != std::string::npos
-      || format.find("%l") != std::string::npos
-      || format.find("%p") != std::string::npos
-      || format.find("%r") != std::string::npos;
   const std::string label = formatIsoTime(isoTime, twelveHour ? "%I" : "%H");
   return label.empty() ? isoTime : label;
 }
@@ -466,130 +534,135 @@ void WeatherTab::syncNow(const WeatherSnapshot& snapshot) {
   const auto& current = snapshot.current;
   m_temp->setText(
       std::format(
-          "{}{}", static_cast<int>(std::lround(m_weather->displayTemperature(current.temperatureC))),
-          m_weather->displayTemperatureUnit()
+          "{}{}", roundedInt(m_weather->displayTemperature(current.temperatureC)), m_weather->displayTemperatureUnit()
       )
   );
   m_glyph->setGlyph(WeatherService::glyphForCode(current.weatherCode, current.isDay));
   m_condition->setText(term_frame::lowerAscii(WeatherService::descriptionForCode(current.weatherCode)));
-
-  std::string feels;
-  if (current.apparentTemperatureC.has_value()) {
-    feels = "feels " + temperatureText(*current.apparentTemperatureC);
-  }
-  if (!snapshot.forecastDays.empty()) {
-    const auto& today = snapshot.forecastDays.front();
-    feels += std::string(feels.empty() ? "" : "  ") + "min " + temperatureText(today.temperatureMinC) + "  max "
-        + temperatureText(today.temperatureMaxC);
-  }
-  m_feels->setText(feels);
-
-  const bool imperial = m_weather->useImperial();
-  const double windSpeed = imperial ? current.windSpeedKmh * 0.621371 : current.windSpeedKmh;
-  const std::string windUnit =
-      imperial ? "mph" : (snapshot.currentUnits.windSpeed.empty() ? "km/h" : snapshot.currentUnits.windSpeed);
-  m_wind.value->setText(
-      std::format(
-          "{} {} {} from {}", windArrow(current.windDirectionDeg), static_cast<int>(std::lround(windSpeed)), windUnit,
-          windDirectionLabel(current.windDirectionDeg)
-      )
-  );
-
+  m_feels->setText(feelsText(snapshot));
+  m_wind.value->setText(windText(snapshot));
   m_humidity.value->setText(std::format("{}%", current.relativeHumidityPercent));
   // UV only matters in daylight.
-  if (m_uv.row->visible() != current.isDay) {
-    m_uv.row->setVisible(current.isDay);
-  }
-  term_frame::setDottedMeterRow(m_uv, std::clamp(current.uvIndex / kUvScale, 0.0, 1.0), std::format("{:.1f}", current.uvIndex));
+  m_uv.row->setVisible(current.isDay);
+  term_frame::setDottedMeterRow(
+      m_uv, std::clamp(current.uvIndex / kUvScale, 0.0, 1.0), std::format("{:.1f}", current.uvIndex)
+  );
 
   if (snapshot.forecastDays.empty()) {
     m_sun.value->setText("--");
-  } else {
-    const std::string format = timeFormatOf(m_config);
-    const auto& today = snapshot.forecastDays.front();
-    m_sun.value->setText(
-        "rise " + formatIsoTime(today.sunriseIso, format.c_str()) + "  set "
-        + formatIsoTime(today.sunsetIso, format.c_str())
-    );
+    return;
   }
+  const std::string format = timeFormatOf(m_config);
+  const auto& today = snapshot.forecastDays.front();
+  m_sun.value->setText(
+      "rise "
+      + formatIsoTime(today.sunriseIso, format.c_str())
+      + "  set "
+      + formatIsoTime(today.sunsetIso, format.c_str())
+  );
+}
+
+// "feels 12°  min 8°  max 15°"; either part is dropped when unknown.
+std::string WeatherTab::feelsText(const WeatherSnapshot& snapshot) const {
+  std::string feels;
+  if (snapshot.current.apparentTemperatureC.has_value()) {
+    feels = "feels " + temperatureText(*snapshot.current.apparentTemperatureC);
+  }
+  if (!snapshot.forecastDays.empty()) {
+    const auto& today = snapshot.forecastDays.front();
+    feels += std::string(feels.empty() ? "" : "  ")
+        + "min "
+        + temperatureText(today.temperatureMinC)
+        + "  max "
+        + temperatureText(today.temperatureMaxC);
+  }
+  return feels;
+}
+
+// "↙ 12 km/h from NE": the arrow shows where the wind blows toward.
+std::string WeatherTab::windText(const WeatherSnapshot& snapshot) const {
+  const auto& current = snapshot.current;
+  const bool imperial = m_weather->useImperial();
+  const double speed = imperial ? current.windSpeedKmh * kKmhToMph : current.windSpeedKmh;
+  const std::string unit =
+      imperial ? "mph" : (snapshot.currentUnits.windSpeed.empty() ? "km/h" : snapshot.currentUnits.windSpeed);
+  return std::format(
+      "{} {} {} from {}", windArrow(current.windDirectionDeg), roundedInt(speed), unit,
+      windDirectionLabel(current.windDirectionDeg)
+  );
 }
 
 void WeatherTab::syncHours(const WeatherSnapshot& snapshot) {
   m_hourCount = std::min(kHourCount, snapshot.forecastHours.size());
-  double minTemp = 0.0;
-  double maxTemp = 0.0;
-  for (std::size_t i = 0; i < m_hourCount; ++i) {
-    const double temp = snapshot.forecastHours[i].temperatureC;
-    minTemp = i == 0 ? temp : std::min(minTemp, temp);
-    maxTemp = i == 0 ? temp : std::max(maxTemp, temp);
-  }
-  const double span = maxTemp - minTemp;
-  bool dry = m_hourCount > 0;
-  for (std::size_t i = 0; i < m_hourCount; ++i) {
-    dry = dry && snapshot.forecastHours[i].precipitationProbabilityPercent <= 0;
-  }
-  if (m_dryLabel->visible() != dry) {
-    m_dryLabel->setVisible(dry);
-  }
+  const auto hours = std::span(snapshot.forecastHours).first(m_hourCount);
+  const auto [coldest, warmest] =
+      std::minmax_element(hours.begin(), hours.end(), [](const WeatherForecastHour& a, const WeatherForecastHour& b) {
+        return a.temperatureC < b.temperatureC;
+      });
+  const double minTemp = hours.empty() ? 0.0 : coldest->temperatureC;
+  const double span = hours.empty() ? 0.0 : warmest->temperatureC - minTemp;
+  // Without any chance of rain the rain bars give way to one "dry" line.
+  const bool dry = !hours.empty() && std::all_of(hours.begin(), hours.end(), [](const WeatherForecastHour& hour) {
+    return hour.precipitationProbabilityPercent <= 0;
+  });
+  m_dryLabel->setVisible(dry);
+  const bool twelveHour = isTwelveHourFormat(timeFormatOf(m_config));
 
   for (std::size_t i = 0; i < kHourCount; ++i) {
     HourColumn& column = m_hours[i];
     const bool used = i < m_hourCount;
-    if (column.column->visible() != used) {
-      column.column->setVisible(used);
-    }
+    column.column->setVisible(used);
     if (!used) {
       continue;
     }
-    const auto& hour = snapshot.forecastHours[i];
+    const auto& hour = hours[i];
     const bool now = i == 0;
-    column.hour->setText(hourLabel(hour.timeIso));
-    column.hour->setColor(now ? accent() : term_frame::dimColor());
+    const ColorSpec tone = now ? accent() : dim();
+    column.hour->setText(hourLabel(hour.timeIso, twelveHour));
+    column.hour->setColor(tone);
     column.glyph->setGlyph(WeatherService::glyphForCode(hour.weatherCode, hour.isDay));
-    column.glyph->setColor(now ? accent() : term_frame::dimColor());
+    column.glyph->setColor(tone);
     column.temp->setText(temperatureText(hour.temperatureC));
-    if (column.percent->visible() == dry) {
-      column.percent->setVisible(!dry);
-    }
-    if (column.rainTrack->visible() == dry) {
-      column.rainTrack->setVisible(!dry);
-    }
+    column.percent->setVisible(!dry);
+    column.rainTrack->setVisible(!dry);
     column.percent->setText(std::format("{}%", hour.precipitationProbabilityPercent));
-    column.bar->setFill(now ? accent() : term_frame::dimColor());
-    column.barFraction = span > 0.01 ? static_cast<float>(0.3 + 0.7 * (hour.temperatureC - minTemp) / span) : 0.6F;
+    column.bar->setFill(tone);
+    column.barFraction = span > kFlatTemperatureSpan
+        ? static_cast<float>(kMinBarFraction + (1.0 - kMinBarFraction) * (hour.temperatureC - minTemp) / span)
+        : kFlatBarFraction;
     column.rainFraction = static_cast<float>(std::clamp(hour.precipitationProbabilityPercent, 0, 100)) / 100.0F;
   }
 }
 
 void WeatherTab::syncDays(const WeatherSnapshot& snapshot) {
   m_dayCount = std::min(kDayCount, snapshot.forecastDays.size());
-  double weekMin = 0.0;
-  double weekMax = 0.0;
-  for (std::size_t i = 0; i < m_dayCount; ++i) {
-    const auto& day = snapshot.forecastDays[i];
-    weekMin = i == 0 ? day.temperatureMinC : std::min(weekMin, day.temperatureMinC);
-    weekMax = i == 0 ? day.temperatureMaxC : std::max(weekMax, day.temperatureMaxC);
-  }
-  const double span = std::max(0.01, weekMax - weekMin);
+  const auto days = std::span(snapshot.forecastDays).first(m_dayCount);
+  const auto lowest = [](const WeatherForecastDay& a, const WeatherForecastDay& b) {
+    return a.temperatureMinC < b.temperatureMinC;
+  };
+  const auto highest = [](const WeatherForecastDay& a, const WeatherForecastDay& b) {
+    return a.temperatureMaxC < b.temperatureMaxC;
+  };
+  const double weekMin = days.empty() ? 0.0 : std::min_element(days.begin(), days.end(), lowest)->temperatureMinC;
+  const double weekMax = days.empty() ? 0.0 : std::max_element(days.begin(), days.end(), highest)->temperatureMaxC;
+  const double span = std::max(kFlatTemperatureSpan, weekMax - weekMin);
   const std::string today = todayIso(snapshot.utcOffsetSeconds);
 
   m_todayRow = kDayCount;
   for (std::size_t i = 0; i < kDayCount; ++i) {
     DayRow& row = m_days[i];
     const bool used = i < m_dayCount;
-    if (row.row->visible() != used) {
-      row.row->setVisible(used);
-    }
+    row.row->setVisible(used);
     if (!used) {
       continue;
     }
-    const auto& day = snapshot.forecastDays[i];
+    const auto& day = days[i];
     const bool isToday = day.dateIso == today;
     if (isToday) {
       m_todayRow = i;
     }
     const ColorSpec label = isToday ? accent() : text();
-    const ColorSpec muted = isToday ? accent() : term_frame::dimColor();
+    const ColorSpec muted = isToday ? accent() : dim();
     row.day->setText(weekdayLabel(day.dateIso));
     row.day->setColor(label);
     row.glyph->setGlyph(WeatherService::glyphForCode(day.weatherCode, true));
@@ -600,14 +673,17 @@ void WeatherTab::syncDays(const WeatherSnapshot& snapshot) {
     row.low->setColor(label);
     row.high->setText(temperatureText(day.temperatureMaxC));
     row.high->setColor(label);
-    row.bar->setFill(isToday ? accent() : term_frame::dimColor());
+    row.bar->setFill(isToday ? accent() : dim());
     row.rangeStart = static_cast<float>((day.temperatureMinC - weekMin) / span);
     row.rangeEnd = static_cast<float>((day.temperatureMaxC - weekMin) / span);
   }
 }
 
 std::string WeatherTab::quickPanelHints() const {
-  if (m_weather == nullptr || !m_weather->enabled() || !m_weather->locationConfigured() || !m_weather->snapshot().valid) {
+  if (m_weather == nullptr
+      || !m_weather->enabled()
+      || !m_weather->locationConfigured()
+      || !m_weather->snapshot().valid) {
     return {};
   }
   const WeatherSnapshot& snapshot = m_weather->snapshot();
@@ -620,7 +696,8 @@ std::string WeatherTab::quickPanelHints() const {
   updated = first == std::string::npos ? std::string{} : updated.substr(first, last - first + 1);
   std::string footer = "updated " + updated;
 
-  const auto age = std::chrono::duration_cast<std::chrono::minutes>(std::chrono::system_clock::now() - snapshot.fetchedAt);
+  const auto age =
+      std::chrono::duration_cast<std::chrono::minutes>(std::chrono::system_clock::now() - snapshot.fetchedAt);
   const long long minutes = std::max<long long>(0, age.count());
   footer += minutes < 60 ? std::format(" · {}m", minutes) : std::format(" · {}h", minutes / 60);
 
@@ -643,8 +720,8 @@ void WeatherTab::positionBars() {
     const float trackWidth = hour.barTrack->width();
     const float trackHeight = hour.barTrack->height();
     if (trackWidth > 0.0F && trackHeight > 0.0F) {
-      const float barWidth = std::max(3.0F, std::floor(trackWidth * 0.4F));
-      const float barHeight = std::clamp(std::round(trackHeight * hour.barFraction), 2.0F, trackHeight);
+      const float barWidth = std::max(kMinBarThickness, std::floor(trackWidth * kHourBarWidthFraction));
+      const float barHeight = std::clamp(std::round(trackHeight * hour.barFraction), kMinBarLength, trackHeight);
       hour.bar->setPosition(std::floor((trackWidth - barWidth) * 0.5F), trackHeight - barHeight);
       hour.bar->setSize(barWidth, barHeight);
     }
@@ -662,7 +739,8 @@ void WeatherTab::positionBars() {
     if (trackWidth <= 0.0F || trackHeight <= 0.0F) {
       continue;
     }
-    const float barWidth = std::min(trackWidth, std::max(3.0F, std::round((day.rangeEnd - day.rangeStart) * trackWidth)));
+    const float barWidth =
+        std::min(trackWidth, std::max(kMinBarThickness, std::round((day.rangeEnd - day.rangeStart) * trackWidth)));
     const float x = std::clamp(std::round(day.rangeStart * trackWidth), 0.0F, trackWidth - barWidth);
     day.bar->setPosition(x, 0.0F);
     day.bar->setSize(barWidth, trackHeight);
@@ -679,14 +757,27 @@ std::string WeatherTab::todayIso(std::int32_t utcOffsetSeconds) {
 }
 
 std::string WeatherTab::weekdayLabel(const std::string& isoDate) {
-  if (isoDate.size() != 10) {
+  if (isoDate.size() != kIsoDateLength) {
+    return isoDate;
+  }
+  // yyyy-mm-dd; a malformed field leaves the raw text rather than throwing out of the update loop.
+  const auto field = [&isoDate](std::size_t offset, std::size_t length) -> std::optional<int> {
+    int value = 0;
+    const char* begin = isoDate.data() + offset;
+    const auto [end, error] = std::from_chars(begin, begin + length, value);
+    return error == std::errc{} && end == begin + length ? std::optional<int>(value) : std::nullopt;
+  };
+  const auto year = field(0, 4);
+  const auto month = field(5, 2);
+  const auto day = field(8, 2);
+  if (!year || !month || !day) {
     return isoDate;
   }
 
   std::tm tm{};
-  tm.tm_year = std::stoi(isoDate.substr(0, 4)) - 1900;
-  tm.tm_mon = std::stoi(isoDate.substr(5, 2)) - 1;
-  tm.tm_mday = std::stoi(isoDate.substr(8, 2));
+  tm.tm_year = *year - 1900;
+  tm.tm_mon = *month - 1;
+  tm.tm_mday = *day;
   if (std::mktime(&tm) == -1) {
     return isoDate;
   }
@@ -738,7 +829,7 @@ void WeatherTab::onFrameTick(float deltaMs) {
   if (m_effectNode == nullptr || !m_effectNode->visible() || m_activeEffect == EffectType::None) {
     return;
   }
-  m_shaderTime += deltaMs * 0.001F;
+  m_shaderTime += deltaMs * kSecondsPerMillisecond;
   m_effectNode->setTime(m_shaderTime);
   // A redraw arms the surface's next frame tick; without it a hosted panel renders one frame and stops.
   PanelManager::instance().requestRedraw();
@@ -779,5 +870,7 @@ std::string WeatherTab::quickPanelStatus() const {
   if (!snapshot.valid) {
     return {};
   }
-  return term_frame::lowerAscii(snapshot.locationName.empty() ? i18n::tr("location.locations.current") : snapshot.locationName);
+  return term_frame::lowerAscii(
+      snapshot.locationName.empty() ? i18n::tr("location.locations.current") : snapshot.locationName
+  );
 }

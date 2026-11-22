@@ -8,14 +8,15 @@
 
 set -euo pipefail
 
-if (( $# != 1 )) || [[ ! $1 =~ ^[a-z0-9]{1,8}$ ]]; then
+if (($# != 1)) || [[ ! $1 =~ ^[a-z0-9]{1,8}$ ]]; then
   echo "usage: terminus-motion-demo-pointer NAME" >&2
   exit 2
 fi
 
 sandbox="$(dirname "$(readlink -f "$0")")/terminus-motion-sandbox"
 
-path=$(cat <<'LUA'
+path=$(
+  cat <<'LUA'
 if hl.plugin.dynamic_cursors then
   hl.config({ plugin = { dynamic_cursors = { ignore_warps = false } } })
 end

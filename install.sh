@@ -10,113 +10,9 @@
 # ~/.local/state/terminus-est/install-backup/<time>/ first. Running it again updates and relinks.
 set -euo pipefail
 
-main() {
-  local repo_url=https://github.com/severian607/Terminus-Est.git
-  local dir=$HOME/Projects/Terminus-Est
-  local backup=$HOME/.local/state/terminus-est/install-backup/$(date +%Y%m%d-%H%M%S)
-  local packages=1
-  for arg in "$@"; do
-    case $arg in
-      --no-packages) packages=0 ;;
-      *) die "unknown option $arg" ;;
-    esac
-  done
-
-  [[ $EUID -ne 0 ]] || die "run as your normal user; sudo is asked for when needed"
-  [[ -f /etc/arch-release ]] || die "Terminus-Est needs Arch Linux"
-
-  if (( packages )); then
-    step "packages"
-    local packages_wanted=("${PACKAGES[@]}")
-    # rustup provides cargo too; asking pacman for rust there would conflict and abort.
-    command -v cargo >/dev/null || packages_wanted+=(rust)
-    sudo pacman -S --needed "${packages_wanted[@]}" </dev/tty
-    local aur
-    aur=$(command -v paru || command -v yay || true)
-    if [[ -n $aur ]]; then
-      "$aur" -S --needed "${AUR_PACKAGES[@]}" </dev/tty || say "optional AUR packages failed; the rest works without them"
-    else
-      say "no AUR helper (paru, yay); skipped the optional ${AUR_PACKAGES[*]}"
-    fi
-  fi
-
-  step "launcher font"
-  # No grep -q: it would exit at the first match and SIGPIPE fc-list, which pipefail reports as failure.
-  if fc-list : family | grep "Consoleet Terminus" >/dev/null; then
-    say "Consoleet Terminus already installed"
-  else
-    install_font
-  fi
-
-  step "repository"
-  if [[ -d $dir/.git ]]; then
-    git -C "$dir" pull --ff-only --autostash
-  elif [[ -e $dir ]]; then
-    die "$dir exists and is not a git checkout; move it away first"
-  else
-    mkdir -p "$(dirname "$dir")"
-    git clone "$repo_url" "$dir"
-  fi
-
-  step "links"
-  link "$dir/config" "$HOME/.config/terminus-est"
-  local file
-  for file in "$dir"/bin/terminus*; do link "$file" "$HOME/.local/bin/$(basename "$file")"; done
-  link "$dir/modules/desktop" "$HOME/.local/share/terminus-est"
-  for file in hyprland.lua hyprsunset.conf xdph.conf; do link "$dir/config/hyprland/$file" "$HOME/.config/hypr/$file"; done
-  link "$dir/config/generated/hypridle.conf" "$HOME/.config/hypr/hypridle.conf"
-  for file in env default; do link "$dir/config/uwsm/$file" "$HOME/.config/uwsm/$file"; done
-  for file in hidden-apps.json launcher.json scale.json theme.json; do
-    link "$dir/config/terminus-launcher/$file" "$HOME/.config/terminus-launcher/$file"
-  done
-  link "$dir/config/generated/mako.ini" "$HOME/.config/mako/config"
-  link "$dir/config/zed" "$HOME/.config/zed"
-  link "$dir/config/swayosd" "$HOME/.config/swayosd"
-  follow_palette
-  link "$dir/wallpapers" "$HOME/Pictures/Wallpapers/Terminus Est"
-  for file in "$dir"/config/systemd/user/terminus-* "$dir"/config/systemd/user/swayosd-server.service; do
-    link "$file" "$HOME/.config/systemd/user/$(basename "$file")"
-  done
-  for file in "$dir"/config/dbus-1/services/*; do link "$file" "$HOME/.local/share/dbus-1/services/$(basename "$file")"; done
-  for file in "$dir"/modules/terminus-bar-plugins/*/; do
-    file=${file%/}
-    link "$file" "$HOME/.local/share/terminusbar/plugins/$(basename "$file")"
-  done
-
-  step "build and render (the bar takes several minutes the first time)"
-  PATH="$dir/bin:$HOME/.local/bin:$PATH" "$dir/bin/terminus-update"
-  [[ -x $dir/modules/terminus-bar/build-release/terminusbar ]] ||
-    die "the bar did not build; see: ninja -C $dir/modules/terminus-bar/build-release terminusbar"
-
-  # A new machine starts on the bar design from the screenshots; an existing bar state is left alone.
-  local bar_state=$HOME/.local/state/terminusbar/settings.toml
-  if [[ ! -e $bar_state ]]; then
-    mkdir -p "$(dirname "$bar_state")"
-    : > "$bar_state"
-    "$dir/bin/terminus-bar-style" set tmux || say "could not apply the bar preset; run: terminus-bar-style set tmux"
-  fi
-
-  step "user units"
-  systemctl --user daemon-reload
-  systemctl --user enable "${UNITS[@]}"
-  # The wallpaper daemon comes with the optional Skwd Wall.
-  systemctl --user enable skwd-walld.service 2>/dev/null || say "skwd-walld is not installed; wallpapers need Skwd Wall (AUR)"
-  if [[ -n ${WAYLAND_DISPLAY:-} ]]; then
-    systemctl --user restart terminus-bar.service terminus-launcher.service || true
-  fi
-
-  step "done"
-  [[ -d $backup ]] && say "replaced files are in $backup"
-  cat <<EOF
-Next:
-  - Log in to the "Hyprland (uwsm-managed)" session.
-  - Set your outputs in $dir/config/hyprland/monitors.lua, or per machine in
-    $dir/config/hosts/\$(cat /etc/hostname)/hyprland/monitors.lua.
-  - Turn on the bar's vitals plugin once it runs:  terminus-bar msg plugins enable terminus/vitals
-  - Optional, update on every pacman upgrade:
-      sed "s/@USER@/\$USER/g" $dir/config/pacman/terminus-est.hook | sudo install -Dm644 /dev/stdin /etc/pacman.d/hooks/terminus-est.hook
-EOF
-}
+REPO_URL=https://github.com/severian607/Terminus-Est.git
+REPO_DIR=$HOME/Projects/Terminus-Est
+BACKUP_DIR=$HOME/.local/state/terminus-est/install-backup/$(date +%Y%m%d-%H%M%S)
 
 PACKAGES=(
   # build
@@ -145,7 +41,10 @@ FONT_SHA256=207fb58272584429b9b83dcd21706c94522cfaf83676adae523664a96a69f121
 
 say() { printf '  %s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
-die() { printf 'terminus-est install: %s\n' "$*" >&2; exit 1; }
+die() {
+  printf 'terminus-est install: %s\n' "$*" >&2
+  exit 1
+}
 
 # Point $2 at $1. A link is replaced; anything else is moved into the backup folder first.
 link() {
@@ -154,8 +53,8 @@ link() {
     [[ $(readlink "$target") == "$source" ]] && return
     rm "$target"
   elif [[ -e $target ]]; then
-    mkdir -p "$backup$(dirname "$target")"
-    mv "$target" "$backup$target"
+    mkdir -p "$BACKUP_DIR$(dirname "$target")"
+    mv "$target" "$BACKUP_DIR$target"
     say "moved $target to the backup"
   fi
   mkdir -p "$(dirname "$target")"
@@ -171,7 +70,7 @@ follow_palette() {
     mkdir -p "$(dirname "$file")"
     if ! grep -qsF "$generated/gtk-colors.css" "$file"; then
       # @import is only valid before every other rule, so it goes first.
-      printf '%s\n%s\n' "$line" "$(cat "$file" 2>/dev/null)" > "$file.terminus-new"
+      printf '%s\n%s\n' "$line" "$(cat "$file" 2>/dev/null)" >"$file.terminus-new"
       mv "$file.terminus-new" "$file"
       say "GTK follows the palette: $file"
     fi
@@ -183,7 +82,7 @@ follow_palette() {
     'config-file = ?"~/.local/state/terminus-est/motion/ghostty.conf"' \
     'config-file = ?"~/.config/terminus-est/generated/ghostty-mode.conf"'; do
     if ! grep -qsF "$line" "$file"; then
-      printf '%s\n' "$line" >> "$file"
+      printf '%s\n' "$line" >>"$file"
       say "Ghostty include added: ${line#config-file = }"
     fi
   done
@@ -200,6 +99,136 @@ install_font() {
   rm -rf "$tmp"
   fc-cache -f "$HOME/.local/share/fonts" >/dev/null
   say "installed Consoleet Terminus (OFL) to ~/.local/share/fonts/ConsoleetTerminus"
+}
+
+# Steps, in the order main runs them.
+
+install_packages() {
+  step "packages"
+  local packages_wanted=("${PACKAGES[@]}") aur
+  # rustup provides cargo too; asking pacman for rust there would conflict and abort.
+  command -v cargo >/dev/null || packages_wanted+=(rust)
+  # The script arrives on stdin under curl | bash, so pacman and sudo prompts read the terminal instead.
+  # shellcheck disable=SC2024  # /dev/tty is readable by the user; the redirect needs no root
+  sudo pacman -S --needed "${packages_wanted[@]}" </dev/tty
+  aur=$(command -v paru || command -v yay || true)
+  if [[ -n $aur ]]; then
+    "$aur" -S --needed "${AUR_PACKAGES[@]}" </dev/tty || say "optional AUR packages failed; the rest works without them"
+  else
+    say "no AUR helper (paru, yay); skipped the optional ${AUR_PACKAGES[*]}"
+  fi
+}
+
+install_launcher_font() {
+  step "launcher font"
+  # No grep -q: it would exit at the first match and SIGPIPE fc-list, which pipefail reports as failure.
+  if fc-list : family | grep "Consoleet Terminus" >/dev/null; then
+    say "Consoleet Terminus already installed"
+  else
+    install_font
+  fi
+}
+
+fetch_repository() {
+  step "repository"
+  if [[ -d $REPO_DIR/.git ]]; then
+    git -C "$REPO_DIR" pull --ff-only --autostash
+  elif [[ -e $REPO_DIR ]]; then
+    die "$REPO_DIR exists and is not a git checkout; move it away first"
+  else
+    mkdir -p "$(dirname "$REPO_DIR")"
+    git clone "$REPO_URL" "$REPO_DIR"
+  fi
+}
+
+link_configuration() {
+  local dir=$REPO_DIR file
+  step "links"
+  link "$dir/config" "$HOME/.config/terminus-est"
+  for file in "$dir"/bin/terminus*; do link "$file" "$HOME/.local/bin/$(basename "$file")"; done
+  link "$dir/modules/desktop" "$HOME/.local/share/terminus-est"
+  for file in hyprland.lua hyprsunset.conf xdph.conf; do link "$dir/config/hyprland/$file" "$HOME/.config/hypr/$file"; done
+  link "$dir/config/generated/hypridle.conf" "$HOME/.config/hypr/hypridle.conf"
+  for file in env default; do link "$dir/config/uwsm/$file" "$HOME/.config/uwsm/$file"; done
+  for file in hidden-apps.json launcher.json scale.json theme.json; do
+    link "$dir/config/terminus-launcher/$file" "$HOME/.config/terminus-launcher/$file"
+  done
+  link "$dir/config/generated/mako.ini" "$HOME/.config/mako/config"
+  link "$dir/config/zed" "$HOME/.config/zed"
+  link "$dir/config/swayosd" "$HOME/.config/swayosd"
+  follow_palette
+  link "$dir/wallpapers" "$HOME/Pictures/Wallpapers/Terminus Est"
+  for file in "$dir"/config/systemd/user/terminus-* "$dir"/config/systemd/user/swayosd-server.service; do
+    link "$file" "$HOME/.config/systemd/user/$(basename "$file")"
+  done
+  for file in "$dir"/config/dbus-1/services/*; do link "$file" "$HOME/.local/share/dbus-1/services/$(basename "$file")"; done
+  for file in "$dir"/modules/terminus-bar-plugins/*/; do
+    file=${file%/}
+    link "$file" "$HOME/.local/share/terminusbar/plugins/$(basename "$file")"
+  done
+}
+
+build_and_render() {
+  local dir=$REPO_DIR
+  step "build and render (the bar takes several minutes the first time)"
+  PATH="$dir/bin:$HOME/.local/bin:$PATH" "$dir/bin/terminus-update"
+  [[ -x $dir/modules/terminus-bar/build-release/terminusbar ]] ||
+    die "the bar did not build; see: ninja -C $dir/modules/terminus-bar/build-release terminusbar"
+
+  # A new machine starts on the bar design from the screenshots; an existing bar state is left alone.
+  local bar_state=$HOME/.local/state/terminusbar/settings.toml
+  if [[ ! -e $bar_state ]]; then
+    mkdir -p "$(dirname "$bar_state")"
+    : >"$bar_state"
+    "$dir/bin/terminus-bar-style" set tmux || say "could not apply the bar preset; run: terminus-bar-style set tmux"
+  fi
+}
+
+enable_user_units() {
+  step "user units"
+  systemctl --user daemon-reload
+  systemctl --user enable "${UNITS[@]}"
+  # The wallpaper daemon comes with the optional Skwd Wall.
+  systemctl --user enable skwd-walld.service 2>/dev/null || say "skwd-walld is not installed; wallpapers need Skwd Wall (AUR)"
+  if [[ -n ${WAYLAND_DISPLAY:-} ]]; then
+    systemctl --user restart terminus-bar.service terminus-launcher.service || true
+  fi
+}
+
+print_next_steps() {
+  local dir=$REPO_DIR
+  step "done"
+  [[ -d $BACKUP_DIR ]] && say "replaced files are in $BACKUP_DIR"
+  cat <<EOF
+Next:
+  - Log in to the "Hyprland (uwsm-managed)" session.
+  - Set your outputs in $dir/config/hyprland/monitors.lua, or per machine in
+    $dir/config/hosts/\$(cat /etc/hostname)/hyprland/monitors.lua.
+  - Turn on the bar's vitals plugin once it runs:  terminus-bar msg plugins enable terminus/vitals
+  - Optional, update on every pacman upgrade:
+      sed "s/@USER@/\$USER/g" $dir/config/pacman/terminus-est.hook | sudo install -Dm644 /dev/stdin /etc/pacman.d/hooks/terminus-est.hook
+EOF
+}
+
+main() {
+  local want_packages=1 arg
+  for arg in "$@"; do
+    case $arg in
+      --no-packages) want_packages=0 ;;
+      *) die "unknown option $arg" ;;
+    esac
+  done
+
+  [[ $EUID -ne 0 ]] || die "run as your normal user; sudo is asked for when needed"
+  [[ -f /etc/arch-release ]] || die "Terminus-Est needs Arch Linux"
+
+  if ((want_packages)); then install_packages; fi
+  install_launcher_font
+  fetch_repository
+  link_configuration
+  build_and_render
+  enable_user_units
+  print_next_steps
 }
 
 main "$@"

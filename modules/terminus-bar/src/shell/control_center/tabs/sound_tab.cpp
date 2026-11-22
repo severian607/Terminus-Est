@@ -1,3 +1,6 @@
+// Sound quick panel: PipeWire devices and applications, bluetooth card profiles (pactl), equaliser (terminus-audiofx).
+// Layout: pure helpers, data lookups, body construction, sync, actions, keys, then pactl / audiofx parsing and jobs.
+
 #include "shell/control_center/tabs/sound_tab.h"
 
 #include "core/input/key_modifiers.h"
@@ -13,24 +16,21 @@
 #include "ui/controls/slider.h"
 #include "ui/style.h"
 
-#include <nlohmann/json.hpp>
-
-#include <xkbcommon/xkbcommon-keysyms.h>
-
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <format>
+#include <nlohmann/json.hpp>
 #include <string_view>
 #include <utility>
+#include <xkbcommon/xkbcommon-keysyms.h>
 
 namespace {
 
   constexpr const char* kAudioFxCommand = "terminus-audiofx";
-  constexpr std::array<const char*, SoundTab::kBandCount> kBandNames = {
-      "32", "64", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"
-  };
+  constexpr std::array<const char*, SoundTab::kBandCount> kBandNames = {"32", "64", "125", "250", "500",
+                                                                        "1k", "2k", "4k",  "8k",  "16k"};
   // Marker + name column shared by the volume and band rows, in monospace cells.
   constexpr std::size_t kTagCols = 14;
   // Fixed two-cell marker column in front of every row: `▸ ` when selected, blank otherwise (also for rows that
@@ -39,9 +39,9 @@ namespace {
   constexpr const char* kMarkerOff = "  ";
   constexpr std::size_t kValueCols = 5;
   constexpr float kRow = term_frame::kRowHeight;
-  constexpr float kSectionGap = Style::spaceSm;
-  // Box chrome: border + padding on both sides, the title row and the gap under it.
-  constexpr float kBoxChrome = 2.0F * (Style::spaceSm + Style::borderWidth) + 20.0F + Style::spaceXs;
+  using term_frame::escapeMarkup;
+  using term_frame::kBoxChrome;
+  using term_frame::kSectionGap;
   // Application rows counted into the panel height; more scroll with the whole body.
   constexpr std::size_t kMaxAppRows = 6;
   constexpr std::size_t kMaxMoveTargets = 9;
@@ -56,6 +56,13 @@ namespace {
   constexpr auto kPendingTimeout = std::chrono::milliseconds(3000);
   constexpr auto kPactlTimeout = std::chrono::milliseconds(5000);
   constexpr auto kAudioFxTimeout = std::chrono::milliseconds(8000);
+  // Keyword hot index meaning "no highlighted letter".
+  constexpr std::size_t kNoHotkey = 99;
+  constexpr std::size_t kStatusCols = 20;
+  constexpr std::size_t kDetailCols = 22;
+  constexpr double kSliderEpsilon = 0.0005;
+  constexpr auto kTickInterval = std::chrono::milliseconds(500);
+  constexpr auto kProfileSwitchTtl = std::chrono::milliseconds(15000);
 
   [[nodiscard]] std::string formatGain(float gain) { return std::format("{:+.1f}", gain); }
 
@@ -66,26 +73,6 @@ namespace {
   [[nodiscard]] float boxHeight(std::size_t rows) {
     const auto n = static_cast<float>(std::max<std::size_t>(1, rows));
     return kBoxChrome + n * kRow + (n - 1.0F) * Style::spaceXs;
-  }
-
-  [[nodiscard]] std::string escapeMarkup(std::string_view text) {
-    std::string out;
-    for (const char c : text) {
-      switch (c) {
-      case '&':
-        out += "&amp;";
-        break;
-      case '<':
-        out += "&lt;";
-        break;
-      case '>':
-        out += "&gt;";
-        break;
-      default:
-        out += c;
-      }
-    }
-    return out;
   }
 
   // At most `maxChars` code points of `text`, with an ellipsis when cut.
@@ -144,6 +131,58 @@ namespace {
     keyword.button->setOpacity(enabled ? 1.0F : 0.4F);
   }
 
+  // First stderr line of a failed command, else the reason it failed.
+  [[nodiscard]] std::string failureMessage(const process::RunResult& result, const char* timeoutText) {
+    std::string message = asynccmd::firstLine(result.err);
+    if (!message.empty()) {
+      return message;
+    }
+    return result.timedOut ? std::string(timeoutText) : std::format("exit code {}", result.exitCode);
+  }
+
+  [[nodiscard]] bool isUpKey(std::uint32_t sym) { return sym == XKB_KEY_Up || sym == XKB_KEY_k; }
+  [[nodiscard]] bool isDownKey(std::uint32_t sym) { return sym == XKB_KEY_Down || sym == XKB_KEY_j; }
+  [[nodiscard]] bool isEnterKey(std::uint32_t sym) { return sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter; }
+
+  // Dim one-line note inside a section (an empty list).
+  [[nodiscard]] std::unique_ptr<Label> dimLine(std::string text, float scale) {
+    return ui::label({
+        .text = std::move(text),
+        .fontSize = Style::fontSizeCaption * scale,
+        .fontFamily = std::string(term_frame::kFont),
+        .color = term_frame::dimColor(),
+        .height = kRow * scale,
+        .maxLines = 1,
+    });
+  }
+
+  // Marker + name column of a row (volume, equaliser line, band).
+  [[nodiscard]] std::unique_ptr<Label> tagLabel(Label** out, const std::string& base, float font) {
+    const float width = term_frame::monoWidth(kTagCols, font);
+    return ui::label({
+        .out = out,
+        .text = std::string(kMarkerOff) + base,
+        .fontSize = font,
+        .fontFamily = std::string(term_frame::kFont),
+        .color = term_frame::dimColor(),
+        .minWidth = width,
+        .maxWidth = width,
+        .maxLines = 1,
+        .ellipsize = TextEllipsize::End,
+    });
+  }
+
+  // Primary-coloured marker column of the inline menu rows.
+  [[nodiscard]] std::unique_ptr<Label> menuGutter(const char* text, float font) {
+    return ui::label({
+        .text = text,
+        .fontSize = font,
+        .fontFamily = std::string(term_frame::kFont),
+        .color = colorSpecFromRole(ColorRole::Primary),
+        .maxLines = 1,
+    });
+  }
+
   [[nodiscard]] std::string appDisplayName(const AudioNode& node) {
     for (const std::string* candidate :
          {&node.applicationName, &node.applicationBinary, &node.streamTitle, &node.name, &node.description}) {
@@ -154,41 +193,10 @@ namespace {
     return "application";
   }
 
-  // WirePlumber leaves `default.audio.source` unset when the configured microphone is unplugged, although
-  // `pactl get-default-source` still names the source it routes to; the tab reads that name once on open.
-  std::string g_fallbackSource;
-
-  // The default node. Asks the node list first (its `isDefault` flag is what the service resolves from the
-  // configured default name) and falls back to the named source, so a default that exists is never reported missing.
-  [[nodiscard]] const AudioNode* defaultNode(const PipeWireService* pw, bool input) {
-    if (pw == nullptr) {
-      return nullptr;
-    }
-    if (const AudioNode* node = input ? pw->defaultSource() : pw->defaultSink(); node != nullptr) {
-      return node;
-    }
-    if (input && !g_fallbackSource.empty()) {
-      for (const AudioNode& node : pw->state().sources) {
-        if (node.name == g_fallbackSource) {
-          return &node;
-        }
-      }
-    }
-    return nullptr;
-  }
-
-  [[nodiscard]] std::uint32_t defaultId(const PipeWireService* pw, bool input) {
-    if (pw == nullptr) {
-      return 0;
-    }
-    if (const AudioNode* node = defaultNode(pw, input); node != nullptr) {
-      return node->id;
-    }
-    return input ? pw->state().defaultSourceId : pw->state().defaultSinkId;
-  }
-
-  [[nodiscard]] bool isMonitorSource(const AudioNode& node) {
-    return node.name.ends_with(".monitor") || node.description.starts_with("Monitor of ");
+  // Monitors are hidden unless one is the default: a virtual default (Easy Effects, a loopback) is the input.
+  [[nodiscard]] bool isListedDevice(const AudioNode& node, bool input, std::uint32_t defaultNodeId) {
+    const bool monitor = node.name.ends_with(".monitor") || node.description.starts_with("Monitor of ");
+    return !input || !monitor || node.id == defaultNodeId;
   }
 
   [[nodiscard]] std::vector<std::string> splitDeviceWords(std::string_view text) {
@@ -243,9 +251,9 @@ namespace {
 
     if (nodeName.starts_with("bluez_")) {
       // The device alias; a leading vendor word is dropped when something remains.
-      constexpr std::array<std::string_view, 12> vendors = {"soundcore", "anker",  "sony",    "bose",
-                                                            "jbl",       "apple",  "samsung", "logitech",
-                                                            "jabra",     "beats",  "sennheiser", "marshall"};
+      constexpr std::array<std::string_view, 12> vendors = {"soundcore", "anker", "sony",       "bose",
+                                                            "jbl",       "apple", "samsung",    "logitech",
+                                                            "jabra",     "beats", "sennheiser", "marshall"};
       const std::string first = term_frame::lowerAscii(words.front());
       if (words.size() >= 2 && std::find(vendors.begin(), vendors.end(), first) != vendors.end()) {
         return joinWords(words, 1, words.size());
@@ -253,24 +261,24 @@ namespace {
       return joinWords(words, 0, words.size());
     }
 
-    constexpr std::array<std::string_view, 12> ports = {"hdmi",       "displayport", "analog", "digital",
-                                                        "spdif",      "optical",     "headphones", "headset",
-                                                        "speaker",    "speakers",    "microphone", "line"};
+    constexpr std::array<std::string_view, 12> ports = {"hdmi",    "displayport", "analog",     "digital",
+                                                        "spdif",   "optical",     "headphones", "headset",
+                                                        "speaker", "speakers",    "microphone", "line"};
     for (std::size_t i = 0; i < words.size(); ++i) {
       const std::string lower = term_frame::lowerAscii(words[i]);
       if (std::find(ports.begin(), ports.end(), lower) == ports.end()) {
         continue;
       }
-      const bool number = i + 1 < words.size() &&
-          std::all_of(words[i + 1].begin(), words[i + 1].end(), [](char c) { return c >= '0' && c <= '9'; });
+      const bool number = i + 1 < words.size()
+          && std::all_of(words[i + 1].begin(), words[i + 1].end(), [](char c) { return c >= '0' && c <= '9'; });
       return joinWords(words, i, number ? i + 2 : i + 1);
     }
 
-    constexpr std::array<std::string_view, 10> generic = {"stereo", "mono",   "surround", "source",     "sink",
-                                                          "output", "input",  "duplex",   "audio", "controller"};
+    constexpr std::array<std::string_view, 10> generic = {"stereo", "mono",  "surround", "source", "sink",
+                                                          "output", "input", "duplex",   "audio",  "controller"};
     std::size_t end = words.size();
-    while (end > 1 &&
-           std::find(generic.begin(), generic.end(), term_frame::lowerAscii(words[end - 1])) != generic.end()) {
+    while (end > 1
+           && std::find(generic.begin(), generic.end(), term_frame::lowerAscii(words[end - 1])) != generic.end()) {
       --end;
     }
     return joinWords(words, 0, end);
@@ -312,22 +320,26 @@ namespace {
     if (name.find("a2dp") != std::string::npos) {
       return "a2dp";
     }
-    if (name.find("head-unit") != std::string::npos || name.find("head_unit") != std::string::npos ||
-        name.find("handsfree") != std::string::npos || name.find("headset") != std::string::npos) {
+    if (name.find("head-unit") != std::string::npos
+        || name.find("head_unit") != std::string::npos
+        || name.find("handsfree") != std::string::npos
+        || name.find("headset") != std::string::npos) {
       return "headset";
     }
     return name;
   }
 
   // Selectable profiles of a card, one per kind (a2dp / headset), unavailable ones and `off` dropped.
-  template <typename Card> [[nodiscard]] std::vector<std::pair<std::string, std::string>> profileCandidates(const Card& card) {
+  template <typename Card>
+  [[nodiscard]] std::vector<std::pair<std::string, std::string>> profileCandidates(const Card& card) {
     std::vector<std::pair<std::string, std::string>> out; // short name, full name
     for (const auto& profile : card.profiles) {
       if (!profile.available || profile.name == "off") {
         continue;
       }
       const std::string shortName = shortProfile(profile.name);
-      const bool seen = std::any_of(out.begin(), out.end(), [&](const auto& entry) { return entry.first == shortName; });
+      const bool seen =
+          std::any_of(out.begin(), out.end(), [&](const auto& entry) { return entry.first == shortName; });
       if (!seen) {
         out.emplace_back(shortName, profile.name);
       }
@@ -352,17 +364,63 @@ SoundTab::~SoundTab() { *m_alive = false; }
 
 // ---- Data helpers -----------------------------------------------------------------------------------
 
+// WirePlumber leaves `default.audio.source` unset when the configured microphone is unplugged, although
+// `pactl get-default-source` still names the source it routes to; `m_fallbackSource` holds that name (read on open).
+// The node list is asked first (its `isDefault` flag is what the service resolves from the configured default
+// name), so a default that exists is never reported missing.
+const AudioNode* SoundTab::defaultNode(bool input) const {
+  if (m_pw == nullptr) {
+    return nullptr;
+  }
+  if (const AudioNode* node = input ? m_pw->defaultSource() : m_pw->defaultSink(); node != nullptr) {
+    return node;
+  }
+  if (input && !m_fallbackSource.empty()) {
+    for (const AudioNode& node : m_pw->state().sources) {
+      if (node.name == m_fallbackSource) {
+        return &node;
+      }
+    }
+  }
+  return nullptr;
+}
+
+std::uint32_t SoundTab::defaultId(bool input) const {
+  if (m_pw == nullptr) {
+    return 0;
+  }
+  if (const AudioNode* node = defaultNode(input); node != nullptr) {
+    return node->id;
+  }
+  return input ? m_pw->state().defaultSourceId : m_pw->state().defaultSinkId;
+}
+
+bool SoundTab::eqUsable() const { return m_eqLoaded && m_error.empty(); }
+
+std::size_t SoundTab::deviceCount(bool input) const {
+  if (m_pw == nullptr) {
+    return 0;
+  }
+  if (!input) {
+    return m_pw->state().sinks.size();
+  }
+  const std::uint32_t def = defaultId(true);
+  const auto& sources = m_pw->state().sources;
+  return static_cast<std::size_t>(std::count_if(sources.begin(), sources.end(), [def](const AudioNode& node) {
+    return isListedDevice(node, true, def);
+  }));
+}
+
 std::vector<AudioNode> SoundTab::devices(bool input) const {
   std::vector<AudioNode> list;
   if (m_pw == nullptr) {
     return list;
   }
+  const std::uint32_t def = defaultId(input);
   for (const AudioNode& node : input ? m_pw->state().sources : m_pw->state().sinks) {
-    // Monitors are hidden unless one is the default: a virtual default (Easy Effects, a loopback) is the input.
-    if (input && isMonitorSource(node) && node.id != defaultId(m_pw, true)) {
-      continue;
+    if (isListedDevice(node, input, def)) {
+      list.push_back(node);
     }
-    list.push_back(node);
   }
   std::stable_sort(list.begin(), list.end(), [](const AudioNode& a, const AudioNode& b) {
     const std::string la = term_frame::lowerAscii(audioDeviceLabel(a));
@@ -371,7 +429,6 @@ std::vector<AudioNode> SoundTab::devices(bool input) const {
   });
   if (input) {
     // The default input first (virtual or not), the physical microphones below it.
-    const std::uint32_t def = defaultId(m_pw, true);
     std::stable_partition(list.begin(), list.end(), [def](const AudioNode& n) { return n.id == def; });
   }
   return list;
@@ -406,7 +463,7 @@ const AudioNode* SoundTab::findNode(const Item& item) const {
   case Kind::OutVolume:
     return m_pw->defaultSink();
   case Kind::InVolume:
-    return defaultNode(m_pw, true);
+    return defaultNode(true);
   case Kind::OutDevice:
     return find(m_pw->state().sinks);
   case Kind::InDevice:
@@ -448,10 +505,10 @@ const SoundTab::Card* SoundTab::cardFor(const AudioNode& node) const {
 
 SoundTab::Shape SoundTab::currentShape() const {
   Shape shape;
-  shape.outs = devices(false).size();
-  shape.ins = devices(true).size();
+  shape.outs = deviceCount(false);
+  shape.ins = deviceCount(true);
   shape.apps = m_pw != nullptr ? m_pw->state().programOutputs.size() : 0;
-  const bool bands = m_eqLoaded && m_error.empty() && m_eq.enabled;
+  const bool bands = eqUsable() && m_eq.enabled;
   shape.eqRows = 1 + (bands ? kBandCount : 0) + (m_error.empty() ? 0 : 1);
   shape.menuRows = m_menuRows;
   return shape;
@@ -460,8 +517,12 @@ SoundTab::Shape SoundTab::currentShape() const {
 float SoundTab::heightFor(const Shape& shape) {
   const std::size_t appRows = std::min(std::max<std::size_t>(1, shape.apps), kMaxAppRows);
   const float menu = static_cast<float>(shape.menuRows) * (kRow + Style::spaceXs);
-  return boxHeight(1 + std::max<std::size_t>(1, shape.outs)) + boxHeight(1 + std::max<std::size_t>(1, shape.ins)) +
-         boxHeight(appRows) + boxHeight(shape.eqRows) + 3.0F * kSectionGap + menu;
+  return boxHeight(1 + std::max<std::size_t>(1, shape.outs))
+      + boxHeight(1 + std::max<std::size_t>(1, shape.ins))
+      + boxHeight(appRows)
+      + boxHeight(shape.eqRows)
+      + 3.0F * kSectionGap
+      + menu;
 }
 
 float SoundTab::quickPanelHeight(float width, float fallback) const {
@@ -506,7 +567,7 @@ void SoundTab::selectItem(const Item& item) {
 std::string SoundTab::structureKey() const {
   std::string key;
   for (const bool input : {false, true}) {
-    const std::uint32_t def = defaultId(m_pw, input);
+    const std::uint32_t def = defaultId(input);
     key += input ? "I|" : "O|";
     key += std::to_string(def) + '|';
     for (const AudioNode& node : devices(input)) {
@@ -532,6 +593,27 @@ std::string SoundTab::structureKey() const {
 void SoundTab::markDirty() {
   m_bodyDirty = true;
   PanelManager::instance().requestUpdateOnly();
+}
+
+// The `muted` badge at the end of a meter or device row; hidden until the node is muted.
+void SoundTab::addMutedBadge(Item& item, Flex& row, float scale) {
+  Item* self = &item;
+  item.badge = std::make_unique<term_frame::Keyword>();
+  row.addChild(term_frame::makeKeyword(*item.badge, "muted", kNoHotkey, scale, [this, self]() {
+    selectItem(*self);
+    toggleMute(*self);
+  }));
+  setKeyword(*item.badge, "muted", kNoHotkey, true, "muted", true);
+  showNode(item.badge->button, false);
+}
+
+void SoundTab::clearBody() {
+  m_sections.clear();
+  m_items.clear();
+  m_menuKw.clear();
+  m_bands.fill(nullptr);
+  m_eqNotice = nullptr;
+  m_menuRows = 0;
 }
 
 std::unique_ptr<Flex>
@@ -578,7 +660,7 @@ SoundTab::buildMeterRow(Item& item, std::string tag, std::function<void(double)>
           .fontSize = font,
           .fontFamily = std::string(term_frame::kFont),
           .color = term_frame::dimColor(),
-          .maxWidth = term_frame::monoWidth(20, font),
+          .maxWidth = term_frame::monoWidth(kStatusCols, font),
           .maxLines = 1,
           .ellipsize = TextEllipsize::End,
           .visible = false,
@@ -586,14 +668,7 @@ SoundTab::buildMeterRow(Item& item, std::string tag, std::function<void(double)>
   );
   item.status->setParticipatesInLayout(false);
 
-  Item* self = &item;
-  item.badge = std::make_unique<term_frame::Keyword>();
-  item.row->addChild(term_frame::makeKeyword(*item.badge, "muted", 99, scale, [this, self]() {
-    selectItem(*self);
-    toggleMute(*self);
-  }));
-  setKeyword(*item.badge, "muted", 99, true, "muted", true);
-  showNode(item.badge->button, false);
+  addMutedBadge(item, *item.row, scale);
   return row;
 }
 
@@ -647,7 +722,7 @@ std::unique_ptr<Flex> SoundTab::buildDeviceRow(Item& item, const AudioNode& node
           .fontSize = font,
           .fontFamily = std::string(term_frame::kFont),
           .color = term_frame::dimColor(),
-          .maxWidth = term_frame::monoWidth(22, font),
+          .maxWidth = term_frame::monoWidth(kDetailCols, font),
           .maxLines = 1,
           .ellipsize = TextEllipsize::End,
           .visible = false,
@@ -655,19 +730,13 @@ std::unique_ptr<Flex> SoundTab::buildDeviceRow(Item& item, const AudioNode& node
   );
   item.detail->setParticipatesInLayout(false);
 
-  item.badge = std::make_unique<term_frame::Keyword>();
-  row->addChild(term_frame::makeKeyword(*item.badge, "muted", 99, scale, [this, self]() {
-    selectItem(*self);
-    toggleMute(*self);
-  }));
-  setKeyword(*item.badge, "muted", 99, true, "muted", true);
-  showNode(item.badge->button, false);
+  addMutedBadge(item, *row, scale);
 
   item.defaultBadge = std::make_unique<term_frame::Keyword>();
-  row->addChild(term_frame::makeKeyword(*item.defaultBadge, "default", 99, scale, [this, self]() {
+  row->addChild(term_frame::makeKeyword(*item.defaultBadge, "default", kNoHotkey, scale, [this, self]() {
     selectItem(*self);
   }));
-  setKeyword(*item.defaultBadge, "default", 99, true, "default", true);
+  setKeyword(*item.defaultBadge, "default", kNoHotkey, true, "default", true);
   showNode(item.defaultBadge->button, false);
   return row;
 }
@@ -682,23 +751,10 @@ std::unique_ptr<Flex> SoundTab::buildEqRow(Item& item, float scale) {
       .minHeight = kRow * scale,
       .fillWidth = true,
   });
-  const float tagWidth = term_frame::monoWidth(kTagCols, font);
-  row->addChild(
-      ui::label({
-          .out = &item.tag,
-          .text = std::string(kMarkerOff) + item.base,
-          .fontSize = font,
-          .fontFamily = std::string(term_frame::kFont),
-          .color = term_frame::dimColor(),
-          .minWidth = tagWidth,
-          .maxWidth = tagWidth,
-          .maxLines = 1,
-          .ellipsize = TextEllipsize::End,
-      })
-  );
+  row->addChild(tagLabel(&item.tag, item.base, font));
   Item* self = &item;
   item.badge = std::make_unique<term_frame::Keyword>();
-  row->addChild(term_frame::makeKeyword(*item.badge, "off", 99, scale, [this, self]() {
+  row->addChild(term_frame::makeKeyword(*item.badge, "off", kNoHotkey, scale, [this, self]() {
     selectItem(*self);
     toggleEq();
   }));
@@ -718,7 +774,6 @@ std::unique_ptr<Flex> SoundTab::buildEqRow(Item& item, float scale) {
 
 std::unique_ptr<Flex> SoundTab::buildBandRow(Item& item, std::size_t band, float scale) {
   const float font = Style::fontSizeCaption * scale;
-  const float tagWidth = term_frame::monoWidth(kTagCols, font);
   Item* self = &item;
   item.base = kBandNames[band];
   auto row = ui::row({
@@ -728,19 +783,7 @@ std::unique_ptr<Flex> SoundTab::buildBandRow(Item& item, std::size_t band, float
       .minHeight = kRow * scale,
       .fillWidth = true,
   });
-  row->addChild(
-      ui::label({
-          .out = &item.tag,
-          .text = std::string(kMarkerOff) + item.base,
-          .fontSize = font,
-          .fontFamily = std::string(term_frame::kFont),
-          .color = term_frame::dimColor(),
-          .minWidth = tagWidth,
-          .maxWidth = tagWidth,
-          .maxLines = 1,
-          .ellipsize = TextEllipsize::End,
-      })
-  );
+  row->addChild(tagLabel(&item.tag, item.base, font));
   row->addChild(
       ui::button({
           .out = &item.meter,
@@ -756,7 +799,7 @@ std::unique_ptr<Flex> SoundTab::buildBandRow(Item& item, std::size_t band, float
           .flexGrow = 1.0F,
           .onPress =
               [this, self, band](float x, float, bool pressed) {
-                if (!m_eqLoaded || !m_error.empty()) {
+                if (!eqUsable()) {
                   return;
                 }
                 if (pressed) {
@@ -821,7 +864,7 @@ std::vector<SoundTab::MenuAction> SoundTab::menuActions(const Item& item) const 
     actions.push_back({'o', "move to device", 1});
     break;
   case Kind::EqMain:
-    if (m_eqLoaded && m_error.empty() && m_eq.enabled) {
+    if (eqUsable() && m_eq.enabled) {
       actions.push_back({'p', "preset", 0});
       actions.push_back({'r', "reset", 0});
     }
@@ -837,58 +880,22 @@ void SoundTab::buildMenu(Flex& box, Item& item, float scale) {
   if (!m_menuOpen || !(item.ident == m_selIdent)) {
     return;
   }
-  const float font = Style::fontSizeCaption * scale;
-  const auto gutter = [&](const char* text) {
-    return ui::label({
-        .text = text,
-        .fontSize = font,
-        .fontFamily = std::string(term_frame::kFont),
-        .color = colorSpecFromRole(ColorRole::Primary),
-        .maxLines = 1,
-    });
-  };
-
-  if (m_moveMode && item.ident.kind == Kind::App) {
-    const std::vector<AudioNode> outs = devices(false);
-    const std::vector<std::string> moveNames = shortDeviceNames(outs);
-    const std::size_t count = std::min(outs.size(), kMaxMoveTargets);
-    if (count == 0) {
-      m_moveMode = false;
-    } else {
-      m_moveSel = std::min(m_moveSel, count - 1);
-      for (std::size_t i = 0; i < count; ++i) {
-        auto row = ui::row({
-            .align = FlexAlign::Center,
-            .gap = 0.0F,
-            .minHeight = kRow * scale,
-            .fillWidth = true,
-        });
-        row->addChild(gutter(i == m_moveSel ? kMarkerOn : kMarkerOff));
-        auto keyword = std::make_unique<term_frame::Keyword>();
-        row->addChild(term_frame::makeKeyword(
-            *keyword, std::to_string(i + 1) + " " + truncateText(moveNames[i], kNameChars), 0, scale,
-            [this, i]() { executeMove(i); }
-        ));
-        m_menuKw.push_back(std::move(keyword));
-        box.addChild(std::move(row));
-      }
-      m_menuRows = count;
-      return;
-    }
+  if (m_moveMode && item.ident.kind == Kind::App && buildMoveMenu(box, scale)) {
+    return;
   }
-
   const std::vector<MenuAction> actions = menuActions(item);
   if (actions.empty()) {
     m_menuOpen = false;
     return;
   }
+  const float font = Style::fontSizeCaption * scale;
   auto row = ui::row({
       .align = FlexAlign::Center,
       .gap = Style::spaceSm * scale,
       .minHeight = kRow * scale,
       .fillWidth = true,
   });
-  row->addChild(gutter(kMarkerOff));
+  row->addChild(menuGutter(kMarkerOff, font));
   Item* self = &item;
   for (const MenuAction& action : actions) {
     auto keyword = std::make_unique<term_frame::Keyword>();
@@ -901,41 +908,73 @@ void SoundTab::buildMenu(Flex& box, Item& item, float scale) {
   }
   box.addChild(std::move(row));
   m_menuRows = 1;
-  if (item.ident.kind == Kind::OutDevice || item.ident.kind == Kind::InDevice) {
-    if (const AudioNode* node = findNode(item)) {
-      auto nameRow = ui::row({
-          .align = FlexAlign::Center,
-          .gap = 0.0F,
-          .minHeight = kRow * scale,
-          .fillWidth = true,
-      });
-      nameRow->addChild(gutter(kMarkerOff));
-      nameRow->addChild(
-          ui::label({
-              .text = "name: " + audioDeviceLabel(*node),
-              .fontSize = font,
-              .fontFamily = std::string(term_frame::kFont),
-              .color = term_frame::dimColor(),
-              .maxLines = 1,
-              .ellipsize = TextEllipsize::End,
-              .flexGrow = 1.0F,
-          })
-      );
-      box.addChild(std::move(nameRow));
-      m_menuRows = 2;
-    }
+  if (item.ident.kind != Kind::OutDevice && item.ident.kind != Kind::InDevice) {
+    return;
+  }
+  if (const AudioNode* node = findNode(item)) {
+    auto nameRow = ui::row({
+        .align = FlexAlign::Center,
+        .gap = 0.0F,
+        .minHeight = kRow * scale,
+        .fillWidth = true,
+    });
+    nameRow->addChild(menuGutter(kMarkerOff, font));
+    nameRow->addChild(
+        ui::label({
+            .text = "name: " + audioDeviceLabel(*node),
+            .fontSize = font,
+            .fontFamily = std::string(term_frame::kFont),
+            .color = term_frame::dimColor(),
+            .maxLines = 1,
+            .ellipsize = TextEllipsize::End,
+            .flexGrow = 1.0F,
+        })
+    );
+    box.addChild(std::move(nameRow));
+    m_menuRows = 2;
   }
 }
 
-void SoundTab::buildDeviceSection(Flex& content, bool input, float scale) {
+// One numbered row per output the stream can move to; false (move mode off) when there is none.
+bool SoundTab::buildMoveMenu(Flex& box, float scale) {
+  const std::vector<AudioNode> outs = devices(false);
+  const std::size_t count = std::min(outs.size(), kMaxMoveTargets);
+  if (count == 0) {
+    m_moveMode = false;
+    return false;
+  }
   const float font = Style::fontSizeCaption * scale;
+  const std::vector<std::string> moveNames = shortDeviceNames(outs);
+  m_moveSel = std::min(m_moveSel, count - 1);
+  for (std::size_t i = 0; i < count; ++i) {
+    auto row = ui::row({
+        .align = FlexAlign::Center,
+        .gap = 0.0F,
+        .minHeight = kRow * scale,
+        .fillWidth = true,
+    });
+    row->addChild(menuGutter(i == m_moveSel ? kMarkerOn : kMarkerOff, font));
+    auto keyword = std::make_unique<term_frame::Keyword>();
+    row->addChild(
+        term_frame::makeKeyword(
+            *keyword, std::to_string(i + 1) + " " + truncateText(moveNames[i], kNameChars), 0, scale,
+            [this, i]() { executeMove(i); }
+        )
+    );
+    m_menuKw.push_back(std::move(keyword));
+    box.addChild(std::move(row));
+  }
+  m_menuRows = count;
+  return true;
+}
+
+void SoundTab::buildDeviceSection(Flex& content, bool input, float scale) {
   Flex* box = nullptr;
   auto boxPtr = term_frame::box(input ? "²" : "¹", input ? "input" : "output", scale, &box);
 
   const std::vector<AudioNode> list = devices(input);
   const std::vector<std::string> names = shortDeviceNames(list);
-  const std::uint32_t defId =
-      defaultId(m_pw, input);
+  const std::uint32_t defId = defaultId(input);
   const bool defInList =
       defId != 0 && std::any_of(list.begin(), list.end(), [defId](const AudioNode& n) { return n.id == defId; });
 
@@ -949,7 +988,7 @@ void SoundTab::buildDeviceSection(Flex& content, bool input, float scale) {
           if (m_pw == nullptr) {
             return;
           }
-          const AudioNode* node = defaultNode(m_pw, input);
+          const AudioNode* node = defaultNode(input);
           if (node == nullptr) {
             return;
           }
@@ -968,16 +1007,7 @@ void SoundTab::buildDeviceSection(Flex& content, bool input, float scale) {
     addVolume();
   }
   if (list.empty()) {
-    boxPtr->addChild(
-        ui::label({
-            .text = std::string(kMarkerOff) + (input ? "no input devices" : "no output devices"),
-            .fontSize = font,
-            .fontFamily = std::string(term_frame::kFont),
-            .color = term_frame::dimColor(),
-            .height = kRow * scale,
-            .maxLines = 1,
-        })
-    );
+    boxPtr->addChild(dimLine(std::string(kMarkerOff) + (input ? "no input devices" : "no output devices"), scale));
   }
   for (std::size_t i = 0; i < list.size(); ++i) {
     const AudioNode& node = list[i];
@@ -993,21 +1023,11 @@ void SoundTab::buildDeviceSection(Flex& content, bool input, float scale) {
 }
 
 void SoundTab::buildAppsSection(Flex& content, float scale) {
-  const float font = Style::fontSizeCaption * scale;
   Flex* box = nullptr;
   auto boxPtr = term_frame::box("³", "apps", scale, &box);
   const std::vector<AudioNode> apps = sortedApps();
   if (apps.empty()) {
-    boxPtr->addChild(
-        ui::label({
-            .text = std::string(kMarkerOff) + "nothing playing",
-            .fontSize = font,
-            .fontFamily = std::string(term_frame::kFont),
-            .color = term_frame::dimColor(),
-            .height = kRow * scale,
-            .maxLines = 1,
-        })
-    );
+    boxPtr->addChild(dimLine(std::string(kMarkerOff) + "nothing playing", scale));
   }
   for (const AudioNode& node : apps) {
     Item& app = addItem(Kind::App, node.id, 0);
@@ -1049,7 +1069,7 @@ void SoundTab::buildEqSection(Flex& content, float scale) {
   boxPtr->addChild(buildEqRow(main, scale));
   buildMenu(*box, main, scale);
 
-  if (m_eqLoaded && m_error.empty() && m_eq.enabled) {
+  if (eqUsable() && m_eq.enabled) {
     for (std::size_t i = 0; i < kBandCount; ++i) {
       Item& band = addItem(Kind::Band, 0, i);
       m_bands[i] = &band;
@@ -1070,14 +1090,8 @@ void SoundTab::rebuildBody() {
   for (Flex* section : m_sections) {
     (void)content->removeChild(section);
   }
-  m_sections.clear();
-  m_items.clear();
-  m_menuKw.clear();
-  m_bands.fill(nullptr);
-  m_eqNotice = nullptr;
-  m_menuRows = 0;
+  clearBody();
   m_selected = 0;
-  m_selIdent = wanted;
 
   const float scale = contentScale();
   buildDeviceSection(*content, false, scale);
@@ -1121,21 +1135,17 @@ std::unique_ptr<Flex> SoundTab::create() {
       .scrollbarVisible = true,
       .viewportPaddingH = 0.0F,
       .viewportPaddingV = 0.0F,
-      .configure =
-          [](ScrollView& view) {
-            view.clearFill();
-            view.clearBorder();
-          },
+      .configure = [](ScrollView& view) {
+        view.clearFill();
+        view.clearBorder();
+      },
   });
   Flex* content = scroll->content();
   content->setDirection(FlexDirection::Vertical);
   content->setAlign(FlexAlign::Stretch);
   content->setGap(kSectionGap * scale);
 
-  m_sections.clear();
-  m_items.clear();
-  m_menuKw.clear();
-  m_bands.fill(nullptr);
+  clearBody();
   m_menuOpen = false;
   m_moveMode = false;
   m_selIdent = Ident{};
@@ -1144,7 +1154,7 @@ std::unique_ptr<Flex> SoundTab::create() {
   m_bodyKey = structureKey();
   m_shape = currentShape();
 
-  m_tickTimer.startRepeating(std::chrono::milliseconds(500), [this]() {
+  m_tickTimer.startRepeating(kTickInterval, [this]() {
     if (m_scroll != nullptr && (!m_statuses.empty() || !m_pending.empty())) {
       PanelManager::instance().requestUpdateOnly();
     }
@@ -1160,9 +1170,9 @@ void SoundTab::setActive(bool active) {
     enqueueStatus();
     m_cardsTried.clear();
     loadCards();
-    asynccmd::run({"pactl", "get-default-source"}, kPactlTimeout, m_alive, [](process::RunResult result) {
+    asynccmd::run({"pactl", "get-default-source"}, kPactlTimeout, m_alive, [this](process::RunResult result) {
       if (result) {
-        g_fallbackSource = asynccmd::firstLine(result.out);
+        m_fallbackSource = asynccmd::firstLine(result.out);
       }
     });
   }
@@ -1173,16 +1183,11 @@ void SoundTab::onClose() {
   m_commitTimer.stop();
   m_tickTimer.stop();
   m_scroll = nullptr;
-  m_eqNotice = nullptr;
-  m_sections.clear();
-  m_items.clear();
-  m_menuKw.clear();
-  m_bands.fill(nullptr);
+  clearBody();
   m_bodyKey.clear();
   m_bodyDirty = true;
   m_menuOpen = false;
   m_moveMode = false;
-  m_menuRows = 0;
   m_statuses.clear();
   m_pending.clear();
   m_statusRequested = false;
@@ -1198,7 +1203,7 @@ void SoundTab::setVolumeLocal(Item& item, float volume, bool muted) {
     return;
   }
   m_syncing = true;
-  if (std::abs(item.slider->value() - static_cast<double>(volume)) > 0.0005) {
+  if (std::abs(item.slider->value() - static_cast<double>(volume)) > kSliderEpsilon) {
     item.slider->setValue(static_cast<double>(volume));
   }
   m_syncing = false;
@@ -1226,9 +1231,9 @@ const SoundTab::RowStatus* SoundTab::statusFor(const std::string& key) const {
 
 void SoundTab::addPending(std::string key, std::function<bool()> done, std::chrono::milliseconds timeout) {
   std::erase_if(m_pending, [&key](const Pending& pending) { return pending.key == key; });
-  m_pending.push_back(Pending{
-      .key = std::move(key), .done = std::move(done), .deadline = std::chrono::steady_clock::now() + timeout
-  });
+  m_pending.push_back(
+      Pending{.key = std::move(key), .done = std::move(done), .deadline = std::chrono::steady_clock::now() + timeout}
+  );
   PanelManager::instance().requestUpdateOnly();
 }
 
@@ -1352,9 +1357,7 @@ void SoundTab::syncDeviceRow(Item& item, const AudioNode* node) {
   }
   const bool selected = m_selected < m_items.size() && m_items[m_selected].get() == &item;
   styleItem(item, selected);
-  const std::uint32_t def = m_pw != nullptr
-      ? defaultId(m_pw, item.ident.kind == Kind::InDevice)
-      : 0;
+  const std::uint32_t def = defaultId(item.ident.kind == Kind::InDevice);
   showNode(item.defaultBadge->button, node->id == def);
   showNode(item.badge->button, node->muted);
 
@@ -1374,7 +1377,7 @@ void SoundTab::syncDeviceRow(Item& item, const AudioNode* node) {
 }
 
 void SoundTab::syncEqControls() {
-  const bool usable = m_error.empty() && m_eqLoaded;
+  const bool usable = eqUsable();
 
   if (m_eqNotice != nullptr) {
     const bool show = !m_error.empty();
@@ -1390,9 +1393,9 @@ void SoundTab::syncEqControls() {
       continue;
     }
     if (usable && m_eq.enabled) {
-      setKeyword(*item.badge, "on", 99, true, "on", true);
+      setKeyword(*item.badge, "on", kNoHotkey, true, "on", true);
     } else {
-      setKeyword(*item.badge, "off", 99, false, {}, usable);
+      setKeyword(*item.badge, "off", kNoHotkey, false, {}, usable);
     }
     std::string detail;
     if (m_eqPending) {
@@ -1424,9 +1427,8 @@ std::string SoundTab::bandMarkup(float gain) const {
   const std::size_t cells = m_eqCells;
   const std::size_t centre = cells / 2;
   const float span = std::max({std::abs(m_eq.minGain), std::abs(m_eq.maxGain), 1.0F});
-  const auto steps = static_cast<std::size_t>(
-      std::lround(std::clamp(std::abs(gain) / span, 0.0F, 1.0F) * static_cast<float>(centre))
-  );
+  const auto steps =
+      static_cast<std::size_t>(std::lround(std::clamp(std::abs(gain) / span, 0.0F, 1.0F) * static_cast<float>(centre)));
 
   const Color primary = colorForRole(ColorRole::Primary);
   const Color outline = colorForRole(ColorRole::Outline);
@@ -1519,7 +1521,7 @@ void SoundTab::commitBand(std::size_t index) {
 
 void SoundTab::cyclePreset(int direction) {
   const std::size_t count = m_eq.presets.size();
-  if (count == 0 || !m_eqLoaded || !m_error.empty()) {
+  if (count == 0 || !eqUsable()) {
     return;
   }
   const auto it = std::find(m_eq.presets.begin(), m_eq.presets.end(), m_eq.preset);
@@ -1539,7 +1541,7 @@ void SoundTab::cyclePreset(int direction) {
 }
 
 void SoundTab::toggleEq() {
-  if (!m_eqLoaded || !m_error.empty()) {
+  if (!eqUsable()) {
     return;
   }
   flushBand();
@@ -1583,18 +1585,24 @@ void SoundTab::styleItem(Item& item, bool selected) {
     if (item.nameButton == nullptr) {
       return;
     }
-    const std::uint32_t def = m_pw != nullptr
-        ? defaultId(m_pw, item.ident.kind == Kind::InDevice)
-        : 0;
+    const std::uint32_t def = defaultId(item.ident.kind == Kind::InDevice);
     std::string text;
     if (selected) {
-      text = "<span foreground=\"" + term_frame::paletteHex(ColorRole::Primary) + "\">" + kMarkerOn +
-             escapeMarkup(item.base) + "</span>";
+      text = "<span foreground=\""
+          + term_frame::paletteHex(ColorRole::Primary)
+          + "\">"
+          + kMarkerOn
+          + escapeMarkup(item.base)
+          + "</span>";
     } else if (item.ident.id == def) {
       text = std::string(kMarkerOff) + escapeMarkup(item.base);
     } else {
-      text = "<span foreground=\"" + term_frame::paletteHex(ColorRole::OnSurfaceVariant) + "\">" + kMarkerOff +
-             escapeMarkup(item.base) + "</span>";
+      text = "<span foreground=\""
+          + term_frame::paletteHex(ColorRole::OnSurfaceVariant)
+          + "\">"
+          + kMarkerOff
+          + escapeMarkup(item.base)
+          + "</span>";
     }
     if (text != item.lastMarkup) {
       item.lastMarkup = text;
@@ -1659,7 +1667,7 @@ void SoundTab::adjustSelected(int direction) {
     return;
   case Kind::Band: {
     const std::size_t band = item.ident.index;
-    if (band >= kBandCount || !m_eqLoaded || !m_error.empty()) {
+    if (band >= kBandCount || !eqUsable()) {
       return;
     }
     m_work[band] = std::clamp(m_work[band] + static_cast<float>(direction) * kBandStep, m_eq.minGain, m_eq.maxGain);
@@ -1733,7 +1741,7 @@ void SoundTab::runAction(Item& item, char key) {
     closeMenu();
     break;
   case 'r':
-    if (kind == Kind::EqMain && m_eqLoaded && m_error.empty()) {
+    if (kind == Kind::EqMain && eqUsable()) {
       flushBand();
       m_eqPending = true;
       m_eqDirty = true;
@@ -1778,7 +1786,7 @@ void SoundTab::setDefaultDevice(const Item& item) {
   const bool input = item.ident.kind == Kind::InDevice;
   const std::uint32_t id = node->id;
   PipeWireService* pw = m_pw;
-  if (id == defaultId(pw, input)) {
+  if (id == defaultId(input)) {
     return;
   }
   const std::string key = statusKey(item);
@@ -1788,11 +1796,7 @@ void SoundTab::setDefaultDevice(const Item& item) {
     return;
   }
   setStatus(key, "setting default…", false, kPendingTimeout);
-  addPending(
-      key,
-      [pw, id, input]() { return id == defaultId(pw, input); },
-      kPendingTimeout
-  );
+  addPending(key, [this, id, input]() { return id == defaultId(input); }, kPendingTimeout);
 }
 
 void SoundTab::startMove(const Item& item) {
@@ -1806,7 +1810,8 @@ void SoundTab::startMove(const Item& item) {
     closeMenu();
     return;
   }
-  const std::uint32_t current = node->routePinned ? node->routeSinkId : (m_pw != nullptr ? m_pw->state().defaultSinkId : 0);
+  const std::uint32_t current =
+      node->routePinned ? node->routeSinkId : (m_pw != nullptr ? m_pw->state().defaultSinkId : 0);
   m_moveSel = 0;
   for (std::size_t i = 0; i < outs.size() && i < kMaxMoveTargets; ++i) {
     if (outs[i].id == current) {
@@ -1881,15 +1886,11 @@ void SoundTab::cycleProfile(const Item& item) {
     }
   }
   const auto [shortName, profile] = candidates[next];
-  setStatus(key, "profile → " + shortName + "…", false, std::chrono::milliseconds(15000));
+  setStatus(key, "profile → " + shortName + "…", false, kProfileSwitchTtl);
   asynccmd::run(
       {"pactl", "set-card-profile", cardName, profile}, kPactlTimeout, m_alive, [this, key](process::RunResult result) {
         if (!result) {
-          std::string message = asynccmd::firstLine(result.err);
-          if (message.empty()) {
-            message = result.timedOut ? "timeout" : std::format("exit code {}", result.exitCode);
-          }
-          setStatus(key, "failed: " + message, true, kFailureTtl);
+          setStatus(key, "failed: " + failureMessage(result, "timeout"), true, kFailureTtl);
           return;
         }
         clearStatus(key);
@@ -1913,12 +1914,13 @@ void SoundTab::loadCards() {
   });
 }
 
-void SoundTab::applyCards(const std::string& json) {
+// bluez cards of `pactl -f json list cards`; nullopt when the output is not a JSON array.
+std::optional<SoundTab::CardMap> SoundTab::parseCards(const std::string& json) {
   const auto doc = nlohmann::json::parse(json, nullptr, false);
   if (doc.is_discarded() || !doc.is_array()) {
-    return;
+    return std::nullopt;
   }
-  std::unordered_map<std::string, Card> cards;
+  CardMap cards;
   for (const auto& entry : doc) {
     if (!entry.is_object()) {
       continue;
@@ -1943,11 +1945,54 @@ void SoundTab::applyCards(const std::string& json) {
     }
     cards[name] = std::move(card);
   }
-  m_cards = std::move(cards);
+  return cards;
+}
+
+void SoundTab::applyCards(const std::string& json) {
+  std::optional<CardMap> cards = parseCards(json);
+  if (!cards) {
+    return;
+  }
+  m_cards = std::move(*cards);
   PanelManager::instance().requestUpdateOnly();
 }
 
 // ---- Keys -------------------------------------------------------------------------------------------
+
+// "move to device" sub-line: Up/Down pick an output, Enter or its number moves the stream.
+bool SoundTab::handleMoveKey(std::uint32_t sym, bool pressed) {
+  const bool up = isUpKey(sym);
+  const bool down = isDownKey(sym);
+  const bool enter = isEnterKey(sym);
+  const bool digit = sym >= XKB_KEY_1 && sym <= XKB_KEY_9;
+  if (!pressed) {
+    return up || down || enter || digit || sym == XKB_KEY_a;
+  }
+  if (up) {
+    m_moveSel = m_moveSel > 0 ? m_moveSel - 1 : 0;
+    markDirty();
+    return true;
+  }
+  if (down) {
+    const std::size_t count = std::min(deviceCount(false), kMaxMoveTargets);
+    m_moveSel = std::min(m_moveSel + 1, count > 0 ? count - 1 : 0);
+    markDirty();
+    return true;
+  }
+  if (enter) {
+    executeMove(m_moveSel);
+    return true;
+  }
+  if (digit) {
+    executeMove(sym - XKB_KEY_1);
+    return true;
+  }
+  if (sym == XKB_KEY_a) {
+    closeMenu();
+    return true;
+  }
+  return false;
+}
 
 bool SoundTab::handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) {
   if (preedit || (modifiers & (KeyMod::Ctrl | KeyMod::Alt | KeyMod::Super)) != 0U) {
@@ -1959,49 +2004,17 @@ bool SoundTab::handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, b
   if (sym >= XKB_KEY_A && sym <= XKB_KEY_Z) {
     sym = sym - XKB_KEY_A + XKB_KEY_a;
   }
-
-  const bool up = sym == XKB_KEY_Up || sym == XKB_KEY_k;
-  const bool down = sym == XKB_KEY_Down || sym == XKB_KEY_j;
-  const bool enter = sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter;
-
-  // "move to device" sub-line: Up/Down pick an output, Enter or its number moves the stream.
   if (m_menuOpen && m_moveMode) {
-    if (!pressed) {
-      return up || down || enter || sym == XKB_KEY_a || (sym >= XKB_KEY_1 && sym <= XKB_KEY_9);
-    }
-    const std::size_t count = std::min(devices(false).size(), kMaxMoveTargets);
-    if (up) {
-      m_moveSel = m_moveSel > 0 ? m_moveSel - 1 : 0;
-      markDirty();
-      return true;
-    }
-    if (down) {
-      m_moveSel = std::min(m_moveSel + 1, count > 0 ? count - 1 : 0);
-      markDirty();
-      return true;
-    }
-    if (enter) {
-      executeMove(m_moveSel);
-      return true;
-    }
-    if (sym >= XKB_KEY_1 && sym <= XKB_KEY_9) {
-      executeMove(sym - XKB_KEY_1);
-      return true;
-    }
-    if (sym == XKB_KEY_a) {
-      closeMenu();
-      return true;
-    }
-    return false;
+    return handleMoveKey(sym, pressed);
   }
 
-  if (up) {
+  if (isUpKey(sym)) {
     if (pressed) {
       select(m_selected > 0 ? m_selected - 1 : 0);
     }
     return true;
   }
-  if (down) {
+  if (isDownKey(sym)) {
     if (pressed) {
       select(m_selected + 1);
     }
@@ -2013,7 +2026,7 @@ bool SoundTab::handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, b
     }
     return true;
   }
-  if (enter) {
+  if (isEnterKey(sym)) {
     if (pressed) {
       activateSelected();
     }
@@ -2109,13 +2122,9 @@ void SoundTab::pump() {
 
 void SoundTab::onJobDone(const Job& job, const process::RunResult& result) {
   if (!result) {
-    std::string message = asynccmd::firstLine(result.err);
-    if (message.empty()) {
-      message = result.timedOut ? "command timed out" : std::format("exit code {}", result.exitCode);
-    }
     // A queued status read would clear the message; the next action or reopen re-reads.
     m_queue.clear();
-    setError(std::move(message));
+    setError(failureMessage(result, "command timed out"));
     return;
   }
   if (job.status) {
@@ -2123,32 +2132,32 @@ void SoundTab::onJobDone(const Job& job, const process::RunResult& result) {
   }
 }
 
-void SoundTab::applyStatus(const std::string& json) {
+// `terminus-audiofx eq status --json`; nullopt when the output is not a JSON object.
+std::optional<SoundTab::EqState> SoundTab::parseEqStatus(const std::string& json) {
   const auto doc = nlohmann::json::parse(json, nullptr, false);
   if (doc.is_discarded() || !doc.is_object()) {
-    setError("unreadable status output");
-    return;
+    return std::nullopt;
   }
 
-  EqState next;
-  next.enabled = doc.value("enabled", false);
-  next.minGain = doc.value("min", -12.0F);
-  next.maxGain = doc.value("max", 12.0F);
-  if (next.maxGain <= next.minGain) {
-    next.minGain = -12.0F;
-    next.maxGain = 12.0F;
+  EqState eq;
+  eq.enabled = doc.value("enabled", false);
+  eq.minGain = doc.value("min", -12.0F);
+  eq.maxGain = doc.value("max", 12.0F);
+  if (eq.maxGain <= eq.minGain) {
+    eq.minGain = -12.0F;
+    eq.maxGain = 12.0F;
   }
   if (doc.contains("preset") && doc["preset"].is_string()) {
-    next.preset = doc["preset"].get<std::string>();
+    eq.preset = doc["preset"].get<std::string>();
   }
   if (doc.contains("presets") && doc["presets"].is_array()) {
     for (const auto& item : doc["presets"]) {
       if (item.is_string()) {
-        next.presets.push_back(item.get<std::string>());
+        eq.presets.push_back(item.get<std::string>());
       }
     }
   }
-  next.gains.fill(0.0F);
+  eq.gains.fill(0.0F);
   if (doc.contains("bands") && doc["bands"].is_array()) {
     std::size_t i = 0;
     for (const auto& band : doc["bands"]) {
@@ -2156,13 +2165,21 @@ void SoundTab::applyStatus(const std::string& json) {
         break;
       }
       if (band.is_object()) {
-        next.gains[i] = band.value("gain", 0.0F);
+        eq.gains[i] = band.value("gain", 0.0F);
       }
       ++i;
     }
   }
+  return eq;
+}
 
-  m_eq = std::move(next);
+void SoundTab::applyStatus(const std::string& json) {
+  std::optional<EqState> next = parseEqStatus(json);
+  if (!next) {
+    setError("unreadable status output");
+    return;
+  }
+  m_eq = std::move(*next);
   m_applied = m_eq.gains;
   for (std::size_t i = 0; i < kBandCount; ++i) {
     if (i != m_dragBand && i != m_pendingBand) {

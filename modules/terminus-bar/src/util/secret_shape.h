@@ -15,7 +15,8 @@ namespace secret_shape {
     if (text.starts_with("-----BEGIN")) {
       return true;
     }
-    if (text.size() < 20 || text.find_first_of(" \t\r\n") != std::string_view::npos
+    if (text.size() < 20
+        || text.find_first_of(" \t\r\n") != std::string_view::npos
         || text.find("://") != std::string_view::npos) {
       return false;
     }

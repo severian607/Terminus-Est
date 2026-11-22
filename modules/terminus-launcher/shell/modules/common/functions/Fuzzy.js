@@ -27,10 +27,22 @@ function initialsOf(text) {
     return out;
 }
 
+// Cheap exact test for "q's letters appear in order in text": most entries fail it, and the alignment below costs
+// O(query x text) plus two arrays.
+function isSubsequence(q, text) {
+    var at = 0;
+    for (var i = 0; i < q.length; i++) {
+        at = text.indexOf(q.charAt(i), at) + 1;
+        if (at === 0)
+            return false;
+    }
+    return true;
+}
+
 // Best subsequence alignment (dynamic programming over query x text). Returns 0 when q is not a subsequence.
 function subsequence(q, text) {
     var m = q.length, n = text.length;
-    if (m === 0 || m > n || m > 32)
+    if (m === 0 || m > n || m > 32 || !isSubsequence(q, text))
         return 0;
     var NEG = -1e9;
     // prev[j]: best score with q[i-1] matched at text[j].
@@ -93,9 +105,10 @@ function scoreWord(q, text) {
     }
     if (q.length >= 2) {
         var ini = initialsOf(text);
-        if (ini.indexOf(q) === 0)
+        var at = ini.indexOf(q);
+        if (at === 0)
             return 750 - Math.min(50, ini.length - q.length);
-        if (ini.indexOf(q) > 0)
+        if (at > 0)
             return 700;
     }
     if (idx > 0)

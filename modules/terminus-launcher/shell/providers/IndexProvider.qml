@@ -292,41 +292,12 @@ Provider {
     // ===== memory, asked for the selected row only =====
 
     // One process per probe, so a cancelled probe's late output can never reach a newer one.
-    property var memProc: null
-
-    Component {
-        id: memComponent
-
-        Process {
-            id: proc
-            property var done: null
-            stdout: StdioCollector {
-                onStreamFinished: {
-                    const n = parseInt(text)
-                    if (proc.done)
-                        proc.done([{ label: "memory", text: isFinite(n) && n > 0 ? Schema.bytes(n) : "unknown" }])
-                    proc.done = null
-                }
-            }
-            onExited: {
-                if (root.memProc === proc)
-                    root.memProc = null
-                Qt.callLater(proc.destroy)
-            }
-        }
-    }
-
     function probeMemory(pids) {
         return done => {
-            if (root.memProc) {
-                root.memProc.done = null
-                root.memProc.running = false
-            }
-            root.memProc = memComponent.createObject(root, {
-                done: done,
-                command: ["sh", Directories.script("probe/memory.sh")].concat(pids.map(String))
+            root.launch("memory", ["sh", Directories.script("probe/memory.sh")].concat(pids.map(String)), text => {
+                const n = parseInt(text)
+                done([{ label: "memory", text: isFinite(n) && n > 0 ? Schema.bytes(n) : "unknown" }])
             })
-            root.memProc.running = true
         }
     }
 
@@ -406,15 +377,16 @@ Provider {
         })
     }
 
-    function scoreEntry(e, q) {
-        let s = Fuzzy.score(q, e.nameL)
+    // `nameScore` is Fuzzy.score(q, e.nameL), which the caller needs as well.
+    function scoreEntry(e, q, nameScore) {
+        let s = nameScore
         if (s >= 900)
             return s
         s = Math.max(s, Math.round(Fuzzy.score(q, e.genericL) * 0.75))
         // Keywords and descriptions are long: only substring hits count there, never initials or scattered letters.
         s = Math.max(s, Math.round(Fuzzy.substring(q, e.keywordsL) * 0.6))
         if (q.length >= 3)
-            s = Math.max(s, Math.round(Fuzzy.substring(q, e.comment.toLowerCase()) * 0.4))
+            s = Math.max(s, Math.round(Fuzzy.substring(q, e.commentL) * 0.4))
         return s
     }
 
@@ -466,16 +438,18 @@ Provider {
         }
 
         // base: the match quality alone (Fuzzy.js tiers); 500 and up is a substring, initials or better.
+        const pickBoost = LaunchState.pickBoosts(q)
         const scored = []
         for (const e of entries) {
-            const base = root.scoreEntry(e, q)
+            const nameScore = Fuzzy.score(q, e.nameL)
+            const base = root.scoreEntry(e, q, nameScore)
             if (base <= 0)
                 continue
             const f = fs[e.id]
-            const pick = LaunchState.pickBoost(q, "app:" + e.id)
+            const pick = pickBoost("app:" + e.id)
             // A subsequence starting at the name's first letter ("ff" -> firefox) ranks between a word-start hit and
             // an in-word hit, so it beats "libreoffice" for "ff".
-            const sub = e.nameL.charAt(0) === q.charAt(0) ? Fuzzy.score(q, e.nameL) : 0
+            const sub = e.nameL.charAt(0) === q.charAt(0) ? nameScore : 0
             const rank = sub > 0 && sub < 500 ? Math.max(base, 650 + Math.round((sub - 100) / 10)) : base
             // Close: a substring, initials or better; a first-letter subsequence; or an app with any launch history,
             // which is never hidden.
@@ -492,9 +466,9 @@ Provider {
             const ts = Math.max(Fuzzy.substring(q, w.title.toLowerCase()), own ? 0 : Fuzzy.score(q, w.cls.toLowerCase()))
             if (ts <= 0)
                 continue
-            if (own && root.scoreEntry(own, q) >= ts)
+            if (own && root.scoreEntry(own, q, Fuzzy.score(q, own.nameL)) >= ts)
                 continue
-            const pick = LaunchState.pickBoost(q, "win:" + w.address)
+            const pick = pickBoost("win:" + w.address)
             scored.push({
                 close: ts >= 500 || pick > 0,
                 s: ts * 0.9 + 450 * pick,

@@ -6,9 +6,12 @@ stylesheet only when swayosd-server starts, so it is restarted when it changes.
 
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
+from pathlib import Path
+
 import tokens
+
+RELOAD_TIMEOUT_SECONDS = 20
 
 
 def _paths(root: Path) -> tuple[Path, Path]:
@@ -29,7 +32,7 @@ def render(settings: dict, root: Path) -> dict[Path, str]:
 
 def _run(command: list[str]) -> None:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=RELOAD_TIMEOUT_SECONDS)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise RuntimeError(f"{' '.join(command)} failed: {error}") from error
     if result.returncode:
@@ -46,10 +49,9 @@ def apply(settings: dict, root: Path, changed: set[Path]) -> list[str]:
     if not tokens.is_live(root):
         return ["Notification skins staged in an offline root; no running applications were changed."]
     notices = []
-    if mako in affected:
-        if tokens.unit_active("mako.service"):
-            _run(["makoctl", "reload"])
-            notices.append("mako reloaded.")
+    if mako in affected and tokens.unit_active("mako.service"):
+        _run(["makoctl", "reload"])
+        notices.append("mako reloaded.")
     if swayosd in affected and tokens.unit_active("swayosd-server.service"):
         _run(["systemctl", "--user", "try-restart", "swayosd-server.service"])
         notices.append("SwayOSD restarted to read its new stylesheet.")

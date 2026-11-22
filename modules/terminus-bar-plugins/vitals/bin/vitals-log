@@ -1,29 +1,53 @@
 #!/usr/bin/env python3
-"""Vitals logger: one row per minute of cpu / gpu / memory, the top ten apps per kind, and events.
+"""Vitals logger (terminus-vitals-log.service): per minute cpu / gpu / memory min-avg-max, top apps, events.
 
-Runs as terminus-vitals-log.service. Every SUB seconds it samples; once a minute it writes the minute's
-min / avg / max. Data lives in ~/.local/state/terminus-est/vitals.sqlite for RETENTION_DAYS days.
+Samples every SAMPLE_SECONDS into ~/.local/state/terminus-est/vitals.sqlite, kept RETENTION_DAYS days.
 The vitals panel reads it through `vitals-query`.
 """
+
 import glob
 import os
 import sqlite3
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 
 DB = os.path.expanduser("~/.local/state/terminus-est/vitals.sqlite")
-SUB = 15                 # seconds between samples
-PER_ROW = 4              # samples per stored minute
+SAMPLE_SECONDS = 15
+SAMPLES_PER_ROW = 4  # one stored minute
+MINUTE, HOUR, DAY = 60, 3600, 86400  # seconds
 RETENTION_DAYS = 8
-TOP = 10
-HOT_CPU, HOT_GPU = 90.0, 95.0
+TOP_APPS_PER_KIND = 10
+HOT_CPU_CELSIUS, HOT_GPU_CELSIUS = 90.0, 95.0
+HOT_COOLDOWN_SECONDS = 600  # one "hot" event per resource per cooldown
+OOM_SCAN_SECONDS = 600
+JOURNAL_TIMEOUT_SECONDS = 20
+EVENT_DETAIL_CHARS = 120
+MILLI, MICRO = 1e3, 1e6  # hwmon: millidegrees, microwatts
 CLK = os.sysconf("SC_CLK_TCK")
+PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
+CPU_SENSORS = ("k10temp", "coretemp", "zenpower")
+CPU_TEMP_FILES = ("temp1_input", "temp2_input")
+FDINFO_UNITS = {"KiB": 1024, "MiB": 1024**2, "GiB": 1024**3}
 
 # Browser helper processes count as the browser they belong to.
-APP_OF = {n: "firefox" for n in (
+BROWSER_HELPERS = (
     "Isolated Web Co", "Web Content", "WebExtensions", "RDD Process", "Privileged Cont", "Socket Process",
-    "Utility Process", "GPU Process", "Isolated Servic", "firefox-bin", "Forked Web Proce")}
+    "Utility Process", "GPU Process", "Isolated Servic", "firefox-bin", "Forked Web Proce",
+)  # fmt: skip
+APP_OF = dict.fromkeys(BROWSER_HELPERS, "firefox")
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS samples(ts INTEGER PRIMARY KEY,
+  cpu_min REAL, cpu_avg REAL, cpu_max REAL, cpu_t REAL,
+  gpu_min REAL, gpu_avg REAL, gpu_max REAL, gpu_t REAL, gpu_w REAL,
+  mem_min REAL, mem_avg REAL, mem_max REAL, swap REAL);
+CREATE TABLE IF NOT EXISTS procs(ts INTEGER, kind TEXT, app TEXT, value REAL);
+CREATE INDEX IF NOT EXISTS procs_ts ON procs(ts, kind);
+CREATE TABLE IF NOT EXISTS events(ts INTEGER, kind TEXT, detail TEXT);
+CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+"""
 
 
 def read(path, default=""):
@@ -41,57 +65,57 @@ def num(text):
         return None
 
 
-def cpu_times():
-    f = read("/proc/stat").split("\n", 1)[0].split()[1:]
-    vals = [int(x) for x in f]
-    return sum(vals), vals[3] + (vals[4] if len(vals) > 4 else 0)
-
-
-def hwmon(name):
+def hwmon_dir(name):
     for d in glob.glob("/sys/class/hwmon/hwmon*"):
         if read(d + "/name").strip() == name:
             return d
     return None
 
 
-def cpu_temp():
-    for name in ("k10temp", "coretemp", "zenpower"):
-        d = hwmon(name)
-        if d:
-            for f in ("temp1_input", "temp2_input"):
-                v = num(read(f"{d}/{f}"))
-                if v:
-                    return v / 1000
-    return None
-
-
-def gpu_dir():
+def find_gpu_dir():
     for d in sorted(glob.glob("/sys/class/drm/card[0-9]/device")):
         if os.path.exists(d + "/gpu_busy_percent"):
             return d
     return None
 
 
-GPU = gpu_dir()
+# Sensor locations are fixed for the life of the service, so they are looked up once.
+CPU_HWMON_DIRS = [d for d in map(hwmon_dir, CPU_SENSORS) if d]
+GPU = find_gpu_dir()
+GPU_HWMON_DIRS = glob.glob(GPU + "/hwmon/hwmon*") if GPU else []
+
+
+def cpu_times():
+    """(total, idle) jiffies from the aggregate line of /proc/stat."""
+    vals = [int(x) for x in read("/proc/stat").split("\n", 1)[0].split()[1:]]
+    return sum(vals), vals[3] + (vals[4] if len(vals) > 4 else 0)
+
+
+def cpu_temp():
+    for d in CPU_HWMON_DIRS:
+        for name in CPU_TEMP_FILES:
+            v = num(read(f"{d}/{name}"))
+            if v:
+                return v / MILLI
+    return None
 
 
 def gpu_sample():
+    """(busy %, temperature, watts); the temperature and power are the last hwmon that reports them."""
     if not GPU:
-        return None, None, None, None
+        return None, None, None
     busy = num(read(GPU + "/gpu_busy_percent"))
     temp = watts = None
-    for h in glob.glob(GPU + "/hwmon/hwmon*"):
+    for h in GPU_HWMON_DIRS:
         t = num(read(h + "/temp1_input"))
-        temp = t / 1000 if t else temp
+        temp = t / MILLI if t else temp
         w = num(read(h + "/power1_average")) or num(read(h + "/power1_input"))
-        watts = w / 1e6 if w else watts
-    used = num(read(GPU + "/mem_info_vram_used"))
-    total = num(read(GPU + "/mem_info_vram_total"))
-    vram = used / total * 100 if used is not None and total else None
-    return busy, temp, watts, vram
+        watts = w / MICRO if w else watts
+    return busy, temp, watts
 
 
 def meminfo():
+    """(memory used %, swap used %)."""
     kb = {}
     for line in read("/proc/meminfo").splitlines():
         k, _, v = line.partition(":")
@@ -101,10 +125,6 @@ def meminfo():
     swap_total = kb.get("SwapTotal", 0)
     swap = (swap_total - kb.get("SwapFree", 0)) / swap_total * 100 if swap_total else 0.0
     return used, swap
-
-
-def app_name(comm):
-    return APP_OF.get(comm, comm)
 
 
 def pss_bytes(pid):
@@ -123,21 +143,35 @@ def pss_bytes(pid):
 def proc_scan(with_pss=False):
     """{pid: (app, cpu_ticks, memory_bytes)}; memory is PSS when asked and readable, else resident size."""
     out = {}
-    page = os.sysconf("SC_PAGE_SIZE")
     for p in glob.glob("/proc/[0-9]*"):
+        pid = p[6:]
         try:
             stat = read(p + "/stat")
             r = stat.rindex(")")
-            comm = stat[stat.index("(") + 1:r]
-            f = stat[r + 2:].split()
-            ticks = int(f[11]) + int(f[12])
-            rss = int(f[21]) * page
+            comm = stat[stat.index("(") + 1 : r]
+            f = stat[r + 2 :].split()
+            ticks = int(f[11]) + int(f[12])  # utime + stime
+            rss = int(f[21]) * PAGE_SIZE
             if with_pss:
-                rss = pss_bytes(p[6:]) or rss
-            out[int(p[6:])] = (app_name(comm), ticks, rss)
+                rss = pss_bytes(pid) or rss
+            out[int(pid)] = (APP_OF.get(comm, comm), ticks, rss)
         except (OSError, ValueError, IndexError):
-            continue
+            continue  # the process exited mid-scan
     return out
+
+
+def drm_fdinfo_bytes(text):
+    """(client id, resident VRAM + GTT bytes) from one /proc/<pid>/fdinfo file."""
+    client_id, total = None, 0
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        if key == "drm-client-id":
+            client_id = value.strip()
+        elif key in ("drm-resident-vram", "drm-resident-gtt"):
+            fields = value.split()
+            unit = fields[1] if len(fields) > 1 else ""
+            total += (num(value) or 0) * FDINFO_UNITS.get(unit, 1)
+    return client_id, total
 
 
 def gpu_procs():
@@ -148,19 +182,12 @@ def gpu_procs():
         if "drm-client-id" not in text:
             continue
         pid = p.split("/")[2]
-        cid, mem = None, 0
-        for line in text.splitlines():
-            k, _, v = line.partition(":")
-            if k == "drm-client-id":
-                cid = v.strip()
-            elif k in ("drm-resident-vram", "drm-resident-gtt"):
-                n = num(v) or 0
-                u = v.split()[1] if len(v.split()) > 1 else ""
-                mem += n * {"KiB": 1024, "MiB": 1048576, "GiB": 1073741824}.get(u, 1)
-        if (pid, cid) in seen or not mem:
+        client_id, mem = drm_fdinfo_bytes(text)
+        if (pid, client_id) in seen or not mem:
             continue
-        seen.add((pid, cid))
-        app = app_name(read(f"/proc/{pid}/comm").strip())
+        seen.add((pid, client_id))
+        comm = read(f"/proc/{pid}/comm").strip()
+        app = APP_OF.get(comm, comm)
         totals[app] = totals.get(app, 0) + mem
     return totals
 
@@ -168,112 +195,168 @@ def gpu_procs():
 def connect():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
     db = sqlite3.connect(DB)
-    db.executescript("""
-    CREATE TABLE IF NOT EXISTS samples(ts INTEGER PRIMARY KEY,
-      cpu_min REAL, cpu_avg REAL, cpu_max REAL, cpu_t REAL,
-      gpu_min REAL, gpu_avg REAL, gpu_max REAL, gpu_t REAL, gpu_w REAL,
-      mem_min REAL, mem_avg REAL, mem_max REAL, swap REAL);
-    CREATE TABLE IF NOT EXISTS procs(ts INTEGER, kind TEXT, app TEXT, value REAL);
-    CREATE INDEX IF NOT EXISTS procs_ts ON procs(ts, kind);
-    CREATE TABLE IF NOT EXISTS events(ts INTEGER, kind TEXT, detail TEXT);
-    CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
-    """)
+    db.executescript(SCHEMA)
     return db
 
 
-def meta(db, k, v=None):
-    if v is None:
-        row = db.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
-        return row[0] if row else None
-    db.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (k, v))
+def meta_get(db, key):
+    row = db.execute("SELECT v FROM meta WHERE k=?", (key,)).fetchone()
+    return row[0] if row else None
 
 
 def stats(vals):
+    """(min, avg, max) ignoring missing readings; Nones when there are none."""
     vals = [v for v in vals if v is not None]
     return (min(vals), sum(vals) / len(vals), max(vals)) if vals else (None, None, None)
+
+
+def peak(a, b):
+    """Larger of two readings, either of which may be missing."""
+    present = [x for x in (a, b) if x is not None]
+    return max(present) if present else None
+
+
+def log_reboot(db):
+    boot = read("/proc/sys/kernel/random/boot_id").strip()
+    previous = meta_get(db, "boot_id")
+    if previous == boot:
+        return
+    if previous is not None:
+        db.execute("INSERT INTO events VALUES(?,?,?)", (int(time.time()), "reboot", ""))
+    db.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", ("boot_id", boot))
+    db.commit()
 
 
 def oom_events(db, since):
     try:
         out = subprocess.run(
-            ["journalctl", "-k", "--no-pager", "-o", "short-unix", f"--since=@{int(since)}",
-             "-g", "Out of memory|oom-kill"], capture_output=True, text=True, timeout=20).stdout
+            [
+                "journalctl",
+                "-k",
+                "--no-pager",
+                "-o",
+                "short-unix",
+                f"--since=@{int(since)}",
+                "-g",
+                "Out of memory|oom-kill",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=JOURNAL_TIMEOUT_SECONDS,
+        ).stdout
     except (OSError, subprocess.SubprocessError):
-        return
+        return  # no journal this round; the next scan starts from the same time
     for line in out.splitlines():
         ts, _, rest = line.partition(" ")
         try:
-            db.execute("INSERT INTO events VALUES(?,?,?)", (int(float(ts)), "oom", rest[:120]))
+            when = int(float(ts))
         except ValueError:
-            pass
+            continue  # not a timestamped journal line (e.g. the "-- No entries --" marker)
+        db.execute("INSERT INTO events VALUES(?,?,?)", (when, "oom", rest[:EVENT_DETAIL_CHARS]))
+
+
+@dataclass
+class Minute:
+    """Readings collected since the last stored row. Temperatures are the minute's peak; watts the latest."""
+
+    cpu: list = field(default_factory=list)
+    gpu: list = field(default_factory=list)
+    mem: list = field(default_factory=list)
+    swap: list = field(default_factory=list)
+    cpu_temp: float | None = None
+    gpu_temp: float | None = None
+    gpu_watts: float | None = None
+
+    def reset(self):
+        self.cpu, self.gpu, self.mem, self.swap = [], [], [], []
+        self.cpu_temp = self.gpu_temp = None  # gpu_watts carries over: a missing reading keeps the last one
+
+
+class Logger:
+    def __init__(self, db):
+        self.db = db
+        self.minute = Minute()
+        self.last_oom_scan = time.time()
+        self.prev_total, self.prev_idle = cpu_times()
+        self.prev_procs, self.prev_procs_time = proc_scan(), time.time()
+        self.cores = os.cpu_count() or 1
+        self.hot_until = {}  # resource -> time before which no new "hot" event is written
+
+    def sample(self):
+        minute = self.minute
+        total, idle = cpu_times()
+        busy_jiffies = total - self.prev_total
+        idle_jiffies = idle - self.prev_idle
+        minute.cpu.append(100.0 * (busy_jiffies - idle_jiffies) / busy_jiffies if busy_jiffies else 0.0)
+        self.prev_total, self.prev_idle = total, idle
+        gpu_busy, gpu_temp, gpu_watts = gpu_sample()
+        minute.gpu.append(gpu_busy)
+        used, swap = meminfo()
+        minute.mem.append(used)
+        minute.swap.append(swap)
+        minute.cpu_temp = peak(minute.cpu_temp, cpu_temp())
+        minute.gpu_temp = peak(minute.gpu_temp, gpu_temp)
+        if gpu_watts is not None:
+            minute.gpu_watts = gpu_watts
+
+    def minute_complete(self):
+        return len(self.minute.cpu) >= SAMPLES_PER_ROW
+
+    def flush(self):
+        """Store the minute's row, top apps and events; prune old rows; start the next minute."""
+        now = time.time()
+        ts = int(now // MINUTE * MINUTE)
+        m = self.minute
+        self.db.execute(
+            "INSERT OR REPLACE INTO samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ts, *stats(m.cpu), m.cpu_temp, *stats(m.gpu), m.gpu_temp, m.gpu_watts, *stats(m.mem), max(m.swap)),
+        )
+        self.write_top_apps(ts, now)
+        self.write_hot_events(ts, now)
+        if int(now) // OOM_SCAN_SECONDS != int(self.last_oom_scan) // OOM_SCAN_SECONDS:
+            oom_events(self.db, self.last_oom_scan)
+            self.last_oom_scan = now
+        if ts % HOUR < MINUTE:  # once an hour
+            cutoff = ts - RETENTION_DAYS * DAY
+            for table in ("samples", "procs", "events"):
+                self.db.execute(f"DELETE FROM {table} WHERE ts < ?", (cutoff,))
+        self.db.commit()
+        m.reset()
+
+    def write_top_apps(self, ts, now):
+        """Cpu share over the minute, memory (PSS) now, VRAM now: the top apps of each."""
+        procs = proc_scan(with_pss=True)
+        elapsed = now - self.prev_procs_time
+        cpu_by, mem_by = {}, {}
+        for pid, (app, ticks, rss) in procs.items():
+            mem_by[app] = mem_by.get(app, 0) + rss
+            old = self.prev_procs.get(pid)
+            if old and elapsed > 0:
+                cpu_by[app] = cpu_by.get(app, 0) + (ticks - old[1]) / CLK / elapsed * 100 / self.cores
+        self.prev_procs, self.prev_procs_time = procs, now
+        for kind, table in (("cpu", cpu_by), ("mem", mem_by), ("gpu", gpu_procs() if GPU else {})):
+            for app, value in sorted(table.items(), key=lambda kv: -kv[1])[:TOP_APPS_PER_KIND]:
+                if value > 0:
+                    self.db.execute("INSERT INTO procs VALUES(?,?,?,?)", (ts, kind, app, value))
+
+    def write_hot_events(self, ts, now):
+        """One event per resource (detail = "cpu" or "gpu"), so each popup only marks its own."""
+        m = self.minute
+        for resource, temp, limit in (("cpu", m.cpu_temp, HOT_CPU_CELSIUS), ("gpu", m.gpu_temp, HOT_GPU_CELSIUS)):
+            if now > self.hot_until.get(resource, 0.0) and (temp or 0) >= limit:
+                self.db.execute("INSERT INTO events VALUES(?,?,?)", (ts, "hot", resource))
+                self.hot_until[resource] = now + HOT_COOLDOWN_SECONDS
 
 
 def main():
     db = connect()
-    boot = read("/proc/sys/kernel/random/boot_id").strip()
-    if meta(db, "boot_id") != boot:
-        if meta(db, "boot_id") is not None:
-            db.execute("INSERT INTO events VALUES(?,?,?)", (int(time.time()), "reboot", ""))
-        meta(db, "boot_id", boot)
-    db.commit()
-    last_oom = time.time()
-    prev_total, prev_idle = cpu_times()
-    prev_procs, prev_t = proc_scan(), time.time()
-    cores = os.cpu_count() or 1
-    cpu_v, gpu_v, mem_v, swap_v = [], [], [], []
-    cpu_t = gpu_t = gpu_w = None
-    hot_until = {}
+    log_reboot(db)
+    logger = Logger(db)
     while True:
-        time.sleep(SUB)
-        total, idle = cpu_times()
-        dt = total - prev_total
-        cpu_v.append(100.0 * (dt - (idle - prev_idle)) / dt if dt else 0.0)
-        prev_total, prev_idle = total, idle
-        busy, gt, gw, _ = gpu_sample()
-        gpu_v.append(busy)
-        m, s = meminfo()
-        mem_v.append(m)
-        swap_v.append(s)
-        ct = cpu_temp()
-        cpu_t = max(x for x in (cpu_t, ct) if x is not None) if (cpu_t or ct) else None
-        gpu_t = max(x for x in (gpu_t, gt) if x is not None) if (gpu_t or gt) else None
-        gpu_w = gw if gw is not None else gpu_w
-        if len(cpu_v) < PER_ROW:
-            continue
-        now = time.time()
-        ts = int(now // 60 * 60)
-        c, g, mm = stats(cpu_v), stats(gpu_v), stats(mem_v)
-        db.execute("INSERT OR REPLACE INTO samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                   (ts, *c, cpu_t, *g, gpu_t, gpu_w, *mm, max(swap_v)))
-        # Top apps: cpu share over the minute, memory (PSS) now, VRAM now.
-        procs = proc_scan(with_pss=True)
-        el = now - prev_t
-        cpu_by, mem_by = {}, {}
-        for pid, (app, ticks, rss) in procs.items():
-            mem_by[app] = mem_by.get(app, 0) + rss
-            old = prev_procs.get(pid)
-            if old and el > 0:
-                cpu_by[app] = cpu_by.get(app, 0) + (ticks - old[1]) / CLK / el * 100 / cores
-        prev_procs, prev_t = procs, now
-        for kind, table in (("cpu", cpu_by), ("mem", mem_by), ("gpu", gpu_procs() if GPU else {})):
-            for app, value in sorted(table.items(), key=lambda kv: -kv[1])[:TOP]:
-                if value > 0:
-                    db.execute("INSERT INTO procs VALUES(?,?,?,?)", (ts, kind, app, value))
-        # One event per resource (detail = "cpu" or "gpu"), so each popup only marks its own.
-        for res, temp, limit in (("cpu", cpu_t, HOT_CPU), ("gpu", gpu_t, HOT_GPU)):
-            if now > hot_until.get(res, 0.0) and (temp or 0) >= limit:
-                db.execute("INSERT INTO events VALUES(?,?,?)", (ts, "hot", res))
-                hot_until[res] = now + 600
-        if int(now) // 600 != int(last_oom) // 600:
-            oom_events(db, last_oom)
-            last_oom = now
-        cutoff = ts - RETENTION_DAYS * 86400
-        if ts % 3600 < 60:
-            for t in ("samples", "procs", "events"):
-                db.execute(f"DELETE FROM {t} WHERE ts < ?", (cutoff,))
-        db.commit()
-        cpu_v, gpu_v, mem_v, swap_v = [], [], [], []
-        cpu_t = gpu_t = None
+        time.sleep(SAMPLE_SECONDS)
+        logger.sample()
+        if logger.minute_complete():
+            logger.flush()
 
 
 if __name__ == "__main__":

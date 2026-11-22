@@ -25,10 +25,6 @@ local function applyState(state, tooltip)
   end
 end
 
-local function applyError(tooltip)
-  applyState(STATES.error, tooltip)
-end
-
 -- Resolve the tray script lazily and cache the hit. Terminus-Bar's process is
 -- spawned by the compositor, so HYPRWHSPR_ROOT is usually absent from its
 -- environment — the widget "root" setting is the override for non-standard
@@ -71,7 +67,7 @@ end
 local function render(stdout)
   local status = type(stdout) == "string" and terminusbar.json.decode(stdout) or nil
   if type(status) ~= "table" then
-    applyError("hyprwhspr: tray script returned no status")
+    applyState(STATES.error, "hyprwhspr: tray script returned no status")
     return
   end
   local tooltip = type(status.tooltip) == "string" and status.tooltip or ""
@@ -85,22 +81,23 @@ end
 local function refresh()
   local cmd = trayCommand("status")
   if cmd == nil then
-    applyError("hyprwhspr not found\nInstall hyprwhspr or set this widget's root setting")
+    applyState(STATES.error, "hyprwhspr not found\nInstall hyprwhspr or set this widget's root setting")
     return
   end
   terminusbar.runAsync(cmd, function(result)
     if type(result) ~= "table" then
-      applyError("hyprwhspr: status query failed")
+      applyState(STATES.error, "hyprwhspr: status query failed")
       return
     end
     render(result.stdout)
   end)
 end
 
+-- The tray script re-derives state via many subprocesses per call; 2s is
+-- responsive enough (the recording overlay gives immediate feedback).
+terminusbar.setUpdateInterval(2000)
+
 function update()
-  -- The tray script re-derives state via many subprocesses per call; 2s is
-  -- responsive enough (the recording overlay gives immediate feedback).
-  terminusbar.setUpdateInterval(2000)
   refresh()
 end
 

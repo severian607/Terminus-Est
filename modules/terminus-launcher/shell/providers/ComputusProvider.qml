@@ -47,35 +47,8 @@ Provider {
         return /[+\-*/^%!]/.test(s.replace(/^\s*-/, "")) || words.length > 0
     }
 
-    property var proc: null
-
-    Component {
-        id: qalcComponent
-
-        Process {
-            id: p
-            property int token: 0
-            property string expr: ""
-            stdout: StdioCollector {
-                onStreamFinished: {
-                    if (p.token !== 0)
-                        root.answer(p.token, p.expr, text.trim())
-                }
-            }
-            onExited: {
-                if (root.proc === p)
-                    root.proc = null
-                Qt.callLater(p.destroy)
-            }
-        }
-    }
-
     function cancel() {
-        if (root.proc) {
-            root.proc.token = 0
-            root.proc.running = false
-            root.proc = null
-        }
+        root.cancelLane("qalc")
     }
 
     function query(text, token, prefixed) {
@@ -89,12 +62,7 @@ Provider {
             root.results(token, [])
             return
         }
-        root.proc = qalcComponent.createObject(root, {
-            token: token,
-            expr: expr,
-            command: ["qalc", "-t", "-s", "autoconversion 0", expr]
-        })
-        root.proc.running = true
+        root.launch("qalc", ["qalc", "-t", "-s", "autoconversion 0", expr], out => root.answer(token, expr, out.trim()))
     }
 
     function answer(token, expr, out) {

@@ -9,28 +9,49 @@ import gi
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib
 
+SERVICE = "org.freedesktop.secrets"
+READY_TIMEOUT_S = 20
+CALL_TIMEOUT_MS = 1000
+POLL_INTERVAL_S = 0.05
+
+
+def call(bus: Gio.DBusConnection, path: str, interface: str, method: str, parameters: GLib.Variant):
+    """One blocking D-Bus call to the secret service, unpacked to its first return value."""
+    reply = bus.call_sync(
+        SERVICE, path, interface, method, parameters, None, Gio.DBusCallFlags.NO_AUTO_START, CALL_TIMEOUT_MS, None
+    )
+    return reply.unpack()[0]
+
+
+def default_collection_unlocked(bus: Gio.DBusConnection) -> bool:
+    # oo7 0.6 publishes its bus name before loading collections and aliases.
+    collection = call(
+        bus,
+        "/org/freedesktop/secrets",
+        "org.freedesktop.Secret.Service",
+        "ReadAlias",
+        GLib.Variant("(s)", ("default",)),
+    )
+    if collection == "/":
+        return False
+    locked = call(
+        bus,
+        collection,
+        "org.freedesktop.DBus.Properties",
+        "Get",
+        GLib.Variant("(ss)", ("org.freedesktop.Secret.Collection", "Locked")),
+    )
+    return locked is False
+
+
 bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-deadline = time.monotonic() + 20
+deadline = time.monotonic() + READY_TIMEOUT_S
 while time.monotonic() < deadline:
     try:
-        # oo7 0.6 publishes its bus name before loading collections and aliases.
-        collection = bus.call_sync(
-            "org.freedesktop.secrets", "/org/freedesktop/secrets",
-            "org.freedesktop.Secret.Service", "ReadAlias",
-            GLib.Variant("(s)", ("default",)), None,
-            Gio.DBusCallFlags.NO_AUTO_START, 1000, None,
-        ).unpack()[0]
-        if collection != "/":
-            locked = bus.call_sync(
-                "org.freedesktop.secrets", collection,
-                "org.freedesktop.DBus.Properties", "Get",
-                GLib.Variant("(ss)", ("org.freedesktop.Secret.Collection", "Locked")),
-                None, Gio.DBusCallFlags.NO_AUTO_START, 1000, None,
-            ).unpack()[0]
-            if locked is False:
-                sys.exit(0)
+        if default_collection_unlocked(bus):
+            sys.exit(0)
     except GLib.Error:
-        pass
-    time.sleep(0.05)
+        pass  # service not up yet, or the alias/collection is still loading; poll again
+    time.sleep(POLL_INTERVAL_S)
 
-sys.exit("oo7 default collection did not become unlocked within 20 seconds")
+sys.exit(f"oo7 default collection did not become unlocked within {READY_TIMEOUT_S} seconds")

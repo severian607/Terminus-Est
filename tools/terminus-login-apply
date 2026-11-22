@@ -2,23 +2,32 @@
 """Authenticated cosmetic-only Ly apply; never starts or changes a service."""
 
 import argparse
+import contextlib
 import fcntl
 import json
 import math
 import os
-from pathlib import Path
 import re
 import secrets
 import select
 import stat
 import sys
 import time
-
+from pathlib import Path
 
 # Untrusted request validation
 
-FIELDS = {"animation", "password_style", "animation_frame_delay", "animation_timeout_sec", "background",
-          "foreground", "accent", "show_borders", "show_clock"}
+FIELDS = {
+    "animation",
+    "password_style",
+    "animation_frame_delay",
+    "animation_timeout_sec",
+    "background",
+    "foreground",
+    "accent",
+    "show_borders",
+    "show_clock",
+}
 TARGET = "/etc/ly/config.ini"
 LIMIT = 16384
 MAX_REQUEST_SECONDS = 110
@@ -44,7 +53,14 @@ def validate(raw):
     if type(values) is not dict or set(values) != FIELDS:
         raise ValueError("Payload must contain exactly the approved login appearance fields")
     if type(values["animation"]) is not str or values["animation"] not in (
-            "none", "doom", "matrix", "colormix", "gameoflife", "dur_file", "terminus"):
+        "none",
+        "doom",
+        "matrix",
+        "colormix",
+        "gameoflife",
+        "dur_file",
+        "terminus",
+    ):
         raise ValueError("Invalid animation")
     if type(values["password_style"]) is not str or values["password_style"] not in ("asterisk", "constellation"):
         raise ValueError("Invalid password_style")
@@ -57,6 +73,7 @@ def validate(raw):
     for key in ("show_borders", "show_clock"):
         if type(values[key]) is not bool:
             raise ValueError(f"{key} must be boolean")
+
     def color(key, bold=False):
         rgb = values[key][1:].upper()
         # Ly reserves zero for terminal default; explicit black needs TB_HI_BLACK.
@@ -90,11 +107,17 @@ class Request:
         if type(values["version"]) is not int or values["version"] != 1:
             raise ValueError("Unsupported request lifetime version")
         issued, deadline = values["issued"], values["deadline"]
-        if any(type(value) not in (int, float) or (type(value) is float and not math.isfinite(value)) for value in (issued, deadline)):
+        if any(
+            type(value) not in (int, float) or (type(value) is float and not math.isfinite(value))
+            for value in (issued, deadline)
+        ):
             raise ValueError("Request timestamps must be finite monotonic numbers")
         now = time.monotonic()
-        if (not 0 <= issued <= now or not now < deadline <= now + MAX_REQUEST_SECONDS
-                or not 0 < deadline - issued <= MAX_REQUEST_SECONDS):
+        if (
+            not 0 <= issued <= now
+            or not now < deadline <= now + MAX_REQUEST_SECONDS
+            or not 0 < deadline - issued <= MAX_REQUEST_SECONDS
+        ):
             raise ValueError("Request has expired or has an invalid lifetime")
         owners = values["owners"]
         if type(owners) is not list or not 1 <= len(owners) <= 2:
@@ -106,9 +129,14 @@ class Request:
             for owner in owners:
                 if type(owner) is not dict or set(owner) != {"pid", "start", "uid"}:
                     raise ValueError("Unexpected request owner fields")
-                if (type(owner["pid"]) is not int or not 0 < owner["pid"] <= 2147483647
-                        or type(owner["uid"]) is not int or not 0 < owner["uid"] < 4294967295
-                        or type(owner["start"]) is not str or not re.fullmatch(r"[1-9][0-9]{0,19}", owner["start"])):
+                if (
+                    type(owner["pid"]) is not int
+                    or not 0 < owner["pid"] <= 2147483647
+                    or type(owner["uid"]) is not int
+                    or not 0 < owner["uid"] < 4294967295
+                    or type(owner["start"]) is not str
+                    or not re.fullmatch(r"[1-9][0-9]{0,19}", owner["start"])
+                ):
                     raise ValueError("Invalid request owner identity")
                 if self.owners and (owner["uid"] != self.owners[0]["uid"] or owner["pid"] == self.owners[0]["pid"]):
                     raise ValueError("Request owners must be distinct processes of the same desktop user")
@@ -133,8 +161,11 @@ class Request:
             try:
                 fields = (process / "stat").read_text().rsplit(")", 1)[1].split()
                 status = dict(line.split(":", 1) for line in (process / "status").read_text().splitlines())
-                valid = (fields[19] == owner["start"] and fields[0] not in ("Z", "X", "x")
-                         and all(int(uid) == owner["uid"] for uid in status["Uid"].split()))
+                valid = (
+                    fields[19] == owner["start"]
+                    and fields[0] not in ("Z", "X", "x")
+                    and all(int(uid) == owner["uid"] for uid in status["Uid"].split())
+                )
             except (IndexError, KeyError) as error:
                 raise ValueError("Cannot establish request owner identity") from error
             if not valid or select.select([descriptor], [], [], 0)[0]:
@@ -164,6 +195,7 @@ class Request:
 
 
 # Lossless allowlisted INI patching
+
 
 def patch(original, values):
     text = original.decode("utf-8")
@@ -231,6 +263,7 @@ def write_all(fd, content):
 
 # Root-only atomic commit with a trusted original backup
 
+
 def commit(values, request):
     global PUBLICATION_ATTEMPTED
     request.check()
@@ -240,7 +273,12 @@ def commit(values, request):
     try:
         lock = os.open(".terminus-appearance.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory)
         lock_info = os.fstat(lock)
-        if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != 0 or lock_info.st_nlink != 1 or lock_info.st_mode & 0o077:
+        if (
+            not stat.S_ISREG(lock_info.st_mode)
+            or lock_info.st_uid != 0
+            or lock_info.st_nlink != 1
+            or lock_info.st_mode & 0o077
+        ):
             raise ValueError("Untrusted login appearance lock")
         request.acquire(lock)
         source = os.open("config.ini", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
@@ -250,12 +288,13 @@ def commit(values, request):
         updated = patch(original, values)
         if updated == original:
             request.check()
-            return {"status": "unchanged", "message": "Login appearance already matches; configuration unchanged and Ly was not restarted."}
+            return {
+                "status": "unchanged",
+                "message": "Login appearance already matches; configuration unchanged and Ly was not restarted.",
+            }
         backup_name = ".terminus-appearance-backups"
-        try:
+        with contextlib.suppress(FileExistsError):
             os.mkdir(backup_name, mode=0o700, dir_fd=directory)
-        except FileExistsError:
-            pass
         backup_dir = os.open(backup_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
         backup_info = os.fstat(backup_dir)
         if backup_info.st_uid != 0 or backup_info.st_mode & 0o077:
@@ -279,15 +318,24 @@ def commit(values, request):
             os.close(target)
         current = os.stat("config.ini", dir_fd=directory, follow_symlinks=False)
         if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns) != (
-                info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns):
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        ):
             raise ValueError("Ly configuration changed concurrently; refusing to replace it")
         request.check()
         PUBLICATION_ATTEMPTED = True
         os.replace(temporary, "config.ini", src_dir_fd=directory, dst_dir_fd=directory)
         temporary = None
         os.fsync(directory)
-        return {"status": "applied", "backup": "/etc/ly/" + backup_name + "/" + name,
-                "message": "Login appearance saved; effective at the next Ly start. Ly and the current session were not restarted."}
+        return {
+            "status": "applied",
+            "backup": "/etc/ly/" + backup_name + "/" + name,
+            "message": "Login appearance saved; effective at the next Ly start. "
+            "Ly and the current session were not restarted.",
+        }
     finally:
         if temporary:
             os.unlink(temporary, dir_fd=directory)
@@ -297,6 +345,7 @@ def commit(values, request):
 
 
 # Noncommitting verification is deliberately unavailable to root
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -321,7 +370,10 @@ def main():
         if args.request is not None:
             raise ValueError("Verification accepts cosmetics only, not authenticated request metadata")
         if not verification or not args.config:
-            raise PermissionError("Apply requires explicit authenticated elevation; non-root use requires --check/--dry-run --config TEMP_INI")
+            raise PermissionError(
+                "Apply requires explicit authenticated elevation; "
+                "non-root use requires --check/--dry-run --config TEMP_INI"
+            )
         selected = Path(args.config).absolute()
         if selected.resolve() == Path(TARGET):
             raise ValueError("Verification requires a caller-selected temporary INI, not the live Ly configuration")
@@ -333,8 +385,12 @@ def main():
             updated = patch(original, values)
         finally:
             os.close(fd)
-        result = {"status": "would-change" if updated != original else "unchanged", "written": False,
-                  "allowed_ini_keys": list(values), "message": "Verification only; no files written."}
+        result = {
+            "status": "would-change" if updated != original else "unchanged",
+            "written": False,
+            "allowed_ini_keys": list(values),
+            "message": "Verification only; no files written.",
+        }
         if args.dry_run:
             result["preview"] = updated.decode("utf-8")
     print(json.dumps(result, sort_keys=True))
@@ -344,8 +400,15 @@ if __name__ == "__main__":
     try:
         main()
     except (ValueError, OSError, UnicodeError) as error:
-        print(json.dumps({"status": "unknown" if PUBLICATION_ATTEMPTED else "refused",
-                          "written": None if PUBLICATION_ATTEMPTED else False,
-                          "message": str(error)}, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "status": "unknown" if PUBLICATION_ATTEMPTED else "refused",
+                    "written": None if PUBLICATION_ATTEMPTED else False,
+                    "message": str(error),
+                },
+                sort_keys=True,
+            )
+        )
         print("Login appearance refused: " + str(error), file=sys.stderr)
         sys.exit(1)

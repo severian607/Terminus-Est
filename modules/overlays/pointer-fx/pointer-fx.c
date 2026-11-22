@@ -106,7 +106,7 @@ static struct {
   double last_move;  // time of the last observed pointer movement (trail)
   char ipc_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
   char fifo_path[256];
-  int timer_fd;
+  int timer_fd, fifo_fd, events_fd;  // -1 when unused
   double timer_period;
 } S;
 
@@ -177,7 +177,7 @@ static void register_binds(void) {
            "_G.terminus_overlay_click = { hl.bind('mouse:272', hl.dsp.exec_cmd(cmd), o), "
            "hl.bind('mouse:273', hl.dsp.exec_cmd(cmd), o) }",
            S.fifo_path, S.fifo_path);
-  char req[1200], reply[256];
+  char req[1200], reply[256] = "";
   snprintf(req, sizeof req, "/eval %s", lua);
   if (!ipc_request(req, reply, sizeof reply) || strncmp(reply, "ok", 2) != 0)
     fprintf(stderr, "pointer-fx: registering click binds failed: %s\n", reply);
@@ -248,6 +248,16 @@ static void output_free_buffers(Output *o) {
 #define MIRROR_STEP 15.0  // pixels between copies
 #define MIRROR_SCALE 1.5
 #define MIRROR_PAD 40
+
+#define MOVE_EPSILON_PX 0.5       // smaller pointer jumps are not movement
+#define TRAIL_PAUSE_S 0.15        // a gap this long between samples starts a new trail
+#define TRAIL_SEED_LEAD_S 1e-3    // the seed point of a new trail is this much older than its first sample
+#define POLL_FAST_S 0.011         // pointer poll period while moving or animating
+#define POLL_FAST_WINDOW_S 0.5    // stay fast this long after the last movement
+#define POLL_SLOW_S 0.04
+#define POLL_SLOW_WINDOW_S 5      // then slow, then idle
+#define POLL_IDLE_S 0.1
+#define RIPPLE_FRAME_S 0.007
 
 static Rect fx_bounds(double now) {
   Rect r = {0, 0, 0, 0};
@@ -709,7 +719,7 @@ static void reg_remove(void *d, struct wl_registry *r, uint32_t name) {
 }
 static const struct wl_registry_listener registry_listener = {.global = reg_global, .global_remove = reg_remove};
 
-// ---- main loop --------------------------------------------------------------------------------------------
+// ---- startup helpers --------------------------------------------------------------------------------------
 
 static void on_signal(int s) { (void)s; quit_flag = 1; }
 
@@ -725,47 +735,51 @@ static bool parse_color(const char *s, double rgb[3]) {
   return true;
 }
 
+static void points_push(Pt p) {
+  if (S.n_points == MAX_POINTS) {
+    memmove(S.points, S.points + 1, (MAX_POINTS - 1) * sizeof(Pt));
+    S.n_points--;
+  }
+  S.points[S.n_points++] = p;
+}
+
+// Adds a copy when the pointer has left the last one by MIRROR_STEP; true when the screen needs a redraw.
 static bool mirror_sample(double now) {
   refresh_cursor(now);
   double x, y;
   if (!cursor_pos(&x, &y)) return false;
   static double mx = -1e9, my = -1e9;
-  if (hypot(x - mx, y - my) >= 0.5) S.last_move = now;
+  if (hypot(x - mx, y - my) >= MOVE_EPSILON_PX) S.last_move = now;
   mx = x;
   my = y;
-  Pt *last = S.n_points ? &S.points[S.n_points - 1] : NULL;
+  const Pt *last = S.n_points ? &S.points[S.n_points - 1] : NULL;
   if (last && hypot(x - last->x, y - last->y) < MIRROR_STEP) return false;
-  if (S.n_points == MAX_POINTS) {
-    memmove(S.points, S.points + 1, (MAX_POINTS - 1) * sizeof(Pt));
-    S.n_points--;
-  }
-  S.points[S.n_points++] = (Pt){x, y, now, cur_set};
+  points_push((Pt){x, y, now, cur_set});
   return true;
 }
 
 static void trail_sample(double now) {
   double x, y;
   if (!cursor_pos(&x, &y)) return;
-  Pt *last = S.n_points ? &S.points[S.n_points - 1] : NULL;
-  if (last && hypot(x - last->x, y - last->y) < 0.5) return;
+  const Pt *last = S.n_points ? &S.points[S.n_points - 1] : NULL;
+  if (last && hypot(x - last->x, y - last->y) < MOVE_EPSILON_PX) return;
   S.last_move = now;
-  if (S.n_points == MAX_POINTS) {
-    memmove(S.points, S.points + 1, (MAX_POINTS - 1) * sizeof(Pt));
-    S.n_points--;
+  // A point after a pause starts a new trail instead of joining the old end to it; its seed point sits an instant
+  // earlier so the first segment has a direction.
+  if (!last || now - last->t > TRAIL_PAUSE_S) {
+    S.n_points = 0;
+    points_push((Pt){x, y, now - TRAIL_SEED_LEAD_S, 0});
   }
-  // A point after a pause starts a new trail instead of joining the old end to it.
-  if (last && now - last->t > 0.15) S.n_points = 0;
-  if (!last || S.n_points == 0) {
-    S.points[0] = (Pt){x, y, now - 1e-3, 0};
-    S.n_points = 1;
-  }
-  S.points[S.n_points++] = (Pt){x, y, now, 0};
+  points_push((Pt){x, y, now, 0});
 }
 
-int main(int argc, char **argv) {
-  if (argc < 2 || (strcmp(argv[1], "ripple") && strcmp(argv[1], "trail") && strcmp(argv[1], "mirror"))) {
+// ---- inputs -----------------------------------------------------------------------------------------------
+
+static bool parse_args(int argc, char **argv) {
+  bool known_mode = argc >= 2 && (!strcmp(argv[1], "ripple") || !strcmp(argv[1], "trail") || !strcmp(argv[1], "mirror"));
+  if (!known_mode) {
     fprintf(stderr, "usage: pointer-fx ripple|trail|mirror [--color #rrggbb]\n");
-    return 2;
+    return false;
   }
   S.mode = !strcmp(argv[1], "ripple") ? MODE_RIPPLE : !strcmp(argv[1], "mirror") ? MODE_MIRROR : MODE_TRAIL;
   parse_color("#ffcccd", S.rgb);
@@ -773,30 +787,148 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[i], "--color") && i + 1 < argc) {
       if (!parse_color(argv[++i], S.rgb)) {
         fprintf(stderr, "pointer-fx: bad colour %s\n", argv[i]);
-        return 2;
+        return false;
       }
     } else {
       fprintf(stderr, "pointer-fx: unknown argument %s\n", argv[i]);
-      return 2;
+      return false;
     }
   }
+  return true;
+}
 
+static bool connect_wayland(void) {
   S.display = wl_display_connect(NULL);
   if (!S.display) {
     fprintf(stderr, "pointer-fx: cannot connect to the Wayland compositor\n");
-    return 1;
+    return false;
   }
   S.registry = wl_display_get_registry(S.display);
   wl_registry_add_listener(S.registry, &registry_listener, NULL);
   wl_display_roundtrip(S.display);
   if (!S.compositor || !S.shm || !S.layer_shell) {
     fprintf(stderr, "pointer-fx: compositor lacks wl_compositor, wl_shm or wlr-layer-shell\n");
-    return 1;
+    return false;
   }
   for (Output *o = S.outputs; o; o = o->next) output_init(o);
   S.ready = true;
   wl_display_roundtrip(S.display);
   wl_display_roundtrip(S.display);
+  return true;
+}
+
+// Ripple mode: the FIFO the click binds write to and the compositor's event socket (for `configreloaded`).
+static bool open_click_inputs(void) {
+  const char *run = getenv("XDG_RUNTIME_DIR");
+  snprintf(S.fifo_path, sizeof S.fifo_path, "%s/terminus-pointer-fx-%d.fifo", run ? run : "/tmp", getpid());
+  unlink(S.fifo_path);
+  if (mkfifo(S.fifo_path, 0600) < 0 || (S.fifo_fd = open(S.fifo_path, O_RDWR | O_NONBLOCK | O_CLOEXEC)) < 0) {
+    perror("pointer-fx: fifo");
+    return false;
+  }
+  S.events_fd = ipc_connect(".socket2.sock");
+  if (S.events_fd < 0) {
+    fprintf(stderr, "pointer-fx: cannot reach the compositor event socket\n");
+    return false;
+  }
+  register_binds();
+  return true;
+}
+
+static void on_click(double now) {
+  char drained[64];
+  double x, y;
+  if (read(S.fifo_fd, drained, sizeof drained) <= 0 || !cursor_pos(&x, &y)) return;
+  if (S.n_clicks == MAX_CLICKS) memmove(S.clicks, S.clicks + 1, (MAX_CLICKS - 1) * sizeof(Pt));
+  else S.n_clicks++;
+  S.clicks[S.n_clicks - 1] = (Pt){x, y, now, 0};
+  render(now);
+}
+
+// False when the event socket closed (the compositor is gone).
+static bool on_compositor_event(void) {
+  char text[4096];
+  ssize_t n = read(S.events_fd, text, sizeof text - 1);
+  if (n <= 0) {
+    fprintf(stderr, "pointer-fx: compositor event socket closed\n");
+    return false;
+  }
+  text[n] = 0;
+  if (strstr(text, "configreloaded")) register_binds();
+  return true;
+}
+
+static void on_tick(double now) {
+  uint64_t ticks;
+  if (read(S.timer_fd, &ticks, sizeof ticks) < 0) ticks = 0;  // nothing pending: a spurious wake-up
+  if (S.mode == MODE_TRAIL) trail_sample(now);
+  bool added = S.mode == MODE_MIRROR && mirror_sample(now);
+  if (animating() || added || S.dirty_retry) render(now);
+}
+
+// Poll fast while the pointer moves, slower after it stops; click ripples only need frames while they animate.
+static double next_timer_period(double now) {
+  if (S.mode == MODE_RIPPLE) return animating() ? RIPPLE_FRAME_S : 0;
+  double still_s = now - S.last_move;
+  if (animating() || still_s < POLL_FAST_WINDOW_S) return POLL_FAST_S;
+  return still_s < POLL_SLOW_WINDOW_S ? POLL_SLOW_S : POLL_IDLE_S;
+}
+
+// ---- main loop --------------------------------------------------------------------------------------------
+
+// Returns the exit code.
+static int run(void) {
+  enum { FD_DISPLAY, FD_TIMER, FD_FIFO, FD_EVENTS, FD_COUNT };
+  while (!quit_flag) {
+    while (wl_display_prepare_read(S.display) != 0) wl_display_dispatch_pending(S.display);
+    wl_display_flush(S.display);
+    struct pollfd fds[FD_COUNT] = {{wl_display_get_fd(S.display), POLLIN, 0},
+                                   {S.timer_fd, POLLIN, 0},
+                                   {S.fifo_fd, POLLIN, 0},
+                                   {S.events_fd, POLLIN, 0}};
+    int ready = poll(fds, FD_COUNT, -1);
+    if (ready < 0 && errno != EINTR) {
+      wl_display_cancel_read(S.display);
+      return 1;
+    }
+    if (ready > 0 && (fds[FD_DISPLAY].revents & POLLIN)) {
+      if (wl_display_read_events(S.display) < 0) return 0;
+    } else {
+      wl_display_cancel_read(S.display);
+    }
+    if (wl_display_dispatch_pending(S.display) < 0) return 1;
+    if (ready <= 0) continue;
+    if (fds[FD_DISPLAY].revents & (POLLERR | POLLHUP)) return 1;
+
+    double now = now_s();
+    if (S.fifo_fd >= 0 && (fds[FD_FIFO].revents & POLLIN)) on_click(now);
+    if (S.events_fd >= 0 && (fds[FD_EVENTS].revents & (POLLIN | POLLHUP)) && !on_compositor_event()) return 1;
+    if (fds[FD_TIMER].revents & POLLIN) on_tick(now);
+    set_timer(next_timer_period(now));
+  }
+  return 0;
+}
+
+static void shutdown_overlay(void) {
+  if (S.mode == MODE_RIPPLE) {
+    if (S.events_fd >= 0) unregister_binds();  // binds exist only once the event socket was reached
+    unlink(S.fifo_path);
+  }
+  while (S.outputs) {
+    Output *o = S.outputs;
+    S.outputs = o->next;
+    output_destroy(o);
+  }
+  if (S.display) wl_display_disconnect(S.display);
+  const int fds[] = {S.timer_fd, S.fifo_fd, S.events_fd};
+  for (size_t i = 0; i < sizeof fds / sizeof *fds; i++)
+    if (fds[i] >= 0) close(fds[i]);
+}
+
+int main(int argc, char **argv) {
+  if (!parse_args(argc, argv)) return 2;
+  S.timer_fd = S.fifo_fd = S.events_fd = -1;
+  if (!connect_wayland()) return 1;
 
   struct sigaction sa = {.sa_handler = on_signal};
   sigaction(SIGTERM, &sa, NULL);
@@ -804,93 +936,16 @@ int main(int argc, char **argv) {
   sigaction(SIGHUP, &sa, NULL);
 
   S.timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
-  int fifo = -1, events = -1;
   if (S.mode == MODE_RIPPLE) {
-    const char *run = getenv("XDG_RUNTIME_DIR");
-    snprintf(S.fifo_path, sizeof S.fifo_path, "%s/terminus-pointer-fx-%d.fifo", run ? run : "/tmp", getpid());
-    unlink(S.fifo_path);
-    if (mkfifo(S.fifo_path, 0600) < 0 || (fifo = open(S.fifo_path, O_RDWR | O_NONBLOCK | O_CLOEXEC)) < 0) {
-      perror("pointer-fx: fifo");
+    if (!open_click_inputs()) {
+      shutdown_overlay();
       return 1;
     }
-    events = ipc_connect(".socket2.sock");
-    if (events < 0) {
-      fprintf(stderr, "pointer-fx: cannot reach the compositor event socket\n");
-      unlink(S.fifo_path);
-      return 1;
-    }
-    register_binds();
   } else {
-    set_timer(0.04);
+    set_timer(POLL_SLOW_S);
   }
 
-  int exit_code = 0;
-  while (!quit_flag) {
-    while (wl_display_prepare_read(S.display) != 0) wl_display_dispatch_pending(S.display);
-    wl_display_flush(S.display);
-    struct pollfd fds[4] = {
-        {wl_display_get_fd(S.display), POLLIN, 0}, {S.timer_fd, POLLIN, 0}, {fifo, POLLIN, 0}, {events, POLLIN, 0}};
-    int r = poll(fds, 4, -1);
-    if (r < 0 && errno != EINTR) {
-      wl_display_cancel_read(S.display);
-      exit_code = 1;
-      break;
-    }
-    if (r > 0 && (fds[0].revents & POLLIN)) {
-      if (wl_display_read_events(S.display) < 0) break;
-    } else {
-      wl_display_cancel_read(S.display);
-    }
-    if (wl_display_dispatch_pending(S.display) < 0) {
-      exit_code = 1;
-      break;
-    }
-    if (r <= 0) continue;
-    if (fds[0].revents & (POLLERR | POLLHUP)) {
-      exit_code = 1;
-      break;
-    }
-    double now = now_s();
-    if (fifo >= 0 && (fds[2].revents & POLLIN)) {
-      char b[64];
-      ssize_t n = read(fifo, b, sizeof b);
-      double x, y;
-      if (n > 0 && cursor_pos(&x, &y)) {
-        if (S.n_clicks == MAX_CLICKS) memmove(S.clicks, S.clicks + 1, (MAX_CLICKS - 1) * sizeof(Pt));
-        else S.n_clicks++;
-        S.clicks[S.n_clicks - 1] = (Pt){x, y, now, 0};
-        render(now);
-      }
-    }
-    if (events >= 0 && (fds[3].revents & (POLLIN | POLLHUP))) {
-      char b[4096];
-      ssize_t n = read(events, b, sizeof b - 1);
-      if (n <= 0) {
-        fprintf(stderr, "pointer-fx: compositor event socket closed\n");
-        exit_code = 1;
-        break;
-      }
-      b[n] = 0;
-      if (strstr(b, "configreloaded")) register_binds();
-    }
-    if (fds[1].revents & POLLIN) {
-      uint64_t ticks;
-      if (read(S.timer_fd, &ticks, sizeof ticks) < 0) ticks = 0;
-      if (S.mode == MODE_TRAIL) trail_sample(now);
-      bool added = S.mode == MODE_MIRROR && mirror_sample(now);
-      if (animating() || added || S.dirty_retry) render(now);
-    }
-    if (S.mode != MODE_RIPPLE) {
-      set_timer(animating() || now - S.last_move < 0.5 ? 0.011 : now - S.last_move < 5 ? 0.04 : 0.1);
-    } else {
-      set_timer(animating() ? 0.007 : 0);
-    }
-  }
-
-  if (S.mode == MODE_RIPPLE) {
-    unregister_binds();
-    unlink(S.fifo_path);
-  }
-  for (Output *o = S.outputs; o; o = o->next) output_free_buffers(o);
+  int exit_code = run();
+  shutdown_overlay();
   return exit_code;
 }

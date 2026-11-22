@@ -1,3 +1,6 @@
+// Media quick panel body: hero, playback and output boxes, other players and a spectrum strip for the active MPRIS
+// player. Hot path: doUpdate -> refresh() runs on every panel update (once a second while playing, on every change).
+
 #include "shell/control_center/tabs/media_quick_tab.h"
 
 #include "core/deferred_call.h"
@@ -19,7 +22,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-
 #include <xkbcommon/xkbcommon-keysyms.h>
 
 using namespace mpris;
@@ -27,21 +29,32 @@ using namespace mpris;
 namespace {
 
   constexpr float kArtSize = 96.0F;
+  constexpr float kArtPlaceholderSize = 32.0F;
   constexpr float kStripHeight = 40.0F;
-  constexpr float kSectionGap = Style::spaceSm;
+  using term_frame::kBoxChrome;
+  using term_frame::kSectionGap;
+  constexpr float kHeroTextGap = 2.0F;
   constexpr float kRow = term_frame::kRowHeight;
-  // Box chrome: border + padding on both sides, the title row and the gap under it.
-  constexpr float kBoxChrome = 2.0F * (Style::spaceSm + Style::borderWidth) + 20.0F + Style::spaceXs;
   constexpr float kSinkLineHeight = 19.0F;
   constexpr float kIdleHeight = 56.0F;
+  constexpr float kAlbumAlpha = 0.7F;
+  constexpr float kDisabledOpacity = 0.4F;
+  constexpr float kOtherPlayerPaletteAlpha = 0.8F;
+  constexpr float kOtherPlayerPaddingH = 3.0F;
+  constexpr float kSpectrumTailAlpha = 0.4F;
+  constexpr double kVolumeStep = 0.01;
+  constexpr std::size_t kTimeChars = 5;   // "0:00" column, "--:--" at worst
+  constexpr std::size_t kVolumeChars = 4; // "100%"
   constexpr int kBandCount = 32;
-  constexpr std::int64_t kSeekStepUs = 5'000'000;
+  constexpr std::int64_t kMicrosPerSecond = 1'000'000;
+  constexpr std::int64_t kSeekStepUs = 5 * kMicrosPerSecond;
   constexpr std::int64_t kSeekArrivedToleranceUs = 1'500'000;
   constexpr auto kNoActivePlayerGrace = std::chrono::milliseconds(2000);
   constexpr auto kPendingSeekTimeout = std::chrono::milliseconds(5000);
+  constexpr auto kProgressTick = std::chrono::milliseconds(1000);
 
   std::string formatTime(std::int64_t us) {
-    const std::int64_t total = std::max<std::int64_t>(0, us) / 1'000'000;
+    const std::int64_t total = std::max<std::int64_t>(0, us) / kMicrosPerSecond;
     const std::int64_t hours = total / 3600;
     const std::int64_t minutes = (total / 60) % 60;
     const std::int64_t seconds = total % 60;
@@ -49,6 +62,10 @@ namespace {
       return std::format("{}:{:02}:{:02}", hours, minutes, seconds);
     }
     return std::format("{}:{:02}", minutes, seconds);
+  }
+
+  std::string percentText(double fraction) {
+    return std::format("{}%", static_cast<int>(std::lround(fraction * 100.0)));
   }
 
   void setLabelText(Label* label, const std::string& text) {
@@ -72,7 +89,7 @@ namespace {
       term_frame::refreshKeyword(keyword);
     }
     keyword.button->setEnabled(enabled);
-    keyword.button->setOpacity(enabled ? 1.0F : 0.4F);
+    keyword.button->setOpacity(enabled ? 1.0F : kDisabledOpacity);
   }
 
 } // namespace
@@ -86,17 +103,23 @@ MediaQuickTab::~MediaQuickTab() { m_aliveGuard.reset(); }
 
 std::unique_ptr<Flex> MediaQuickTab::create() {
   const float scale = contentScale();
-  const float font = term_frame::kBtopFontSize * scale;
-  const float caption = Style::fontSizeCaption * scale;
-
   auto root = ui::column({
       .out = &m_root,
       .align = FlexAlign::Stretch,
       .gap = kSectionGap * scale,
       .fillWidth = true,
   });
+  root->addChild(buildHero(scale));
+  root->addChild(buildPlaybackBox(scale));
+  root->addChild(buildOutputBox(scale));
+  root->addChild(buildPlayersBox(scale));
+  root->addChild(buildSpectrum());
+  applyShape(currentShape(effectiveActive()));
+  return root;
+}
 
-  // ---- hero ----
+std::unique_ptr<Flex> MediaQuickTab::buildHero(float scale) {
+  const float font = term_frame::kBtopFontSize * scale;
   auto art = ui::column(
       {
           .out = &m_artBox,
@@ -118,7 +141,7 @@ std::unique_ptr<Flex> MediaQuickTab::create() {
       ui::label({
           .out = &m_artPlaceholder,
           .text = "♪",
-          .fontSize = 32.0F * scale,
+          .fontSize = kArtPlaceholderSize * scale,
           .fontFamily = std::string(term_frame::kFont),
           .color = term_frame::dimColor(),
           .maxLines = 1,
@@ -126,11 +149,11 @@ std::unique_ptr<Flex> MediaQuickTab::create() {
   );
   term_frame::pinSize(*art, kArtSize * scale, kArtSize * scale);
 
-  auto heroText = ui::column(
+  auto text = ui::column(
       {
           .align = FlexAlign::Start,
           .justify = FlexJustify::Center,
-          .gap = 2.0F * scale,
+          .gap = kHeroTextGap * scale,
           .flexGrow = 1.0F,
       },
       ui::label({
@@ -152,9 +175,9 @@ std::unique_ptr<Flex> MediaQuickTab::create() {
       }),
       ui::label({
           .out = &m_album,
-          .fontSize = caption,
+          .fontSize = Style::fontSizeCaption * scale,
           .fontFamily = std::string(term_frame::kFont),
-          .color = colorSpecFromRole(ColorRole::OnSurfaceVariant, 0.7F),
+          .color = colorSpecFromRole(ColorRole::OnSurfaceVariant, kAlbumAlpha),
           .maxLines = 1,
           .ellipsize = TextEllipsize::End,
       })
@@ -162,56 +185,56 @@ std::unique_ptr<Flex> MediaQuickTab::create() {
 
   auto hero = ui::row({.align = FlexAlign::Center, .gap = Style::spaceMd * scale, .fillWidth = true});
   hero->addChild(std::move(art));
-  hero->addChild(std::move(heroText));
-  root->addChild(std::move(hero));
+  hero->addChild(std::move(text));
+  return hero;
+}
 
-  // ---- ¹ playback ----
-  auto playBox = term_frame::box("¹", "playback", scale, &m_playBox);
+std::unique_ptr<Flex> MediaQuickTab::buildPlaybackBox(float scale) {
+  const float font = term_frame::kBtopFontSize * scale;
+  auto box = term_frame::box("¹", "playback", scale, &m_playBox);
 
-  auto progressRow = ui::row(
-      {.align = FlexAlign::Center,
-       .gap = Style::spaceSm * scale,
-       .minHeight = kRow * scale,
-       .fillWidth = true},
-      ui::label({
-          .out = &m_elapsed,
-          .text = "0:00",
-          .fontSize = font,
-          .fontFamily = std::string(term_frame::kFont),
-          .color = term_frame::dimColor(),
-          .minWidth = term_frame::monoWidth(5, font),
-          .maxLines = 1,
-      }),
-      ui::slider({
-          .out = &m_progress,
-          .minValue = 0.0F,
-          .maxValue = 100.0F,
-          .step = 1.0F,
-          .enabled = false,
-          .trackHeight = Style::sliderTrackHeight * scale,
-          .controlHeight = kRow * scale,
-          .width = 1.0F,
-          .flexGrow = 1.0F,
-          .onValueChanged = [this](double value) { beginSeek(value); },
-          .onDragEnd =
-              [this]() {
-                if (m_progress != nullptr) {
-                  commitSeek(m_progress->value());
-                }
-              },
-      }),
-      ui::label({
-          .out = &m_length,
-          .text = "0:00",
-          .fontSize = font,
-          .fontFamily = std::string(term_frame::kFont),
-          .color = term_frame::dimColor(),
-          .minWidth = term_frame::monoWidth(5, font),
-          .maxLines = 1,
-          .textAlign = TextAlign::End,
-      })
+  box->addChild(
+      ui::row(
+          {.align = FlexAlign::Center, .gap = Style::spaceSm * scale, .minHeight = kRow * scale, .fillWidth = true},
+          ui::label({
+              .out = &m_elapsed,
+              .text = "0:00",
+              .fontSize = font,
+              .fontFamily = std::string(term_frame::kFont),
+              .color = term_frame::dimColor(),
+              .minWidth = term_frame::monoWidth(kTimeChars, font),
+              .maxLines = 1,
+          }),
+          ui::slider({
+              .out = &m_progress,
+              .minValue = 0.0F,
+              .maxValue = 100.0F,
+              .step = 1.0F,
+              .enabled = false,
+              .trackHeight = Style::sliderTrackHeight * scale,
+              .controlHeight = kRow * scale,
+              .width = 1.0F,
+              .flexGrow = 1.0F,
+              .onValueChanged = [this](double value) { beginSeek(value); },
+              .onDragEnd =
+                  [this]() {
+                    if (m_progress != nullptr) {
+                      commitSeek(m_progress->value());
+                    }
+                  },
+          }),
+          ui::label({
+              .out = &m_length,
+              .text = "0:00",
+              .fontSize = font,
+              .fontFamily = std::string(term_frame::kFont),
+              .color = term_frame::dimColor(),
+              .minWidth = term_frame::monoWidth(kTimeChars, font),
+              .maxLines = 1,
+              .textAlign = TextAlign::End,
+          })
+      )
   );
-  playBox->addChild(std::move(progressRow));
 
   auto transport = ui::row({
       .align = FlexAlign::Center,
@@ -224,73 +247,64 @@ std::unique_ptr<Flex> MediaQuickTab::create() {
   transport->addChild(term_frame::makeKeyword(m_kwPlay, "space ▶", 0, scale, [this]() { togglePlay(); }));
   transport->addChild(term_frame::makeKeyword(m_kwNext, "n ››", 0, scale, [this]() { nextTrack(); }));
   transport->addChild(term_frame::makeKeyword(m_kwRepeat, "repeat", 0, scale, [this]() { cycleRepeat(); }));
-  playBox->addChild(std::move(transport));
-  root->addChild(std::move(playBox));
+  box->addChild(std::move(transport));
+  return box;
+}
 
-  // ---- ² output ----
-  auto outBox = term_frame::box("²", "output", scale, &m_outBox);
+std::unique_ptr<Flex> MediaQuickTab::buildOutputBox(float scale) {
+  const float font = term_frame::kBtopFontSize * scale;
+  auto box = term_frame::box("²", "output", scale, &m_outBox);
   term_frame::MeterRow volume;
-  outBox->addChild(term_frame::meterRow("player vol", scale, volume));
+  box->addChild(term_frame::meterRow("player vol", scale, volume));
   m_volume = volume.slider;
   m_volValue = volume.value;
   volume.tag->setColor(term_frame::dimColor());
   volume.tag->setFontSize(font);
-  volume.tag->setMinWidth(term_frame::monoWidth(4, font));
+  volume.tag->setMinWidth(term_frame::monoWidth(kVolumeChars, font));
   m_volValue->setFontSize(font);
-  m_volValue->setMinWidth(term_frame::monoWidth(4, font));
+  m_volValue->setMinWidth(term_frame::monoWidth(kVolumeChars, font));
   m_volume->setReadOnly(false);
-  m_volume->setStep(0.01);
+  m_volume->setStep(kVolumeStep);
   m_volume->setWheelAdjustEnabled(true);
   m_volume->setOnValueChanged([this](double value) {
     if (m_syncing || m_mpris == nullptr || m_lastBusName.empty()) {
       return;
     }
     (void)m_mpris->setVolume(m_lastBusName, std::clamp(value, 0.0, 1.0));
-    setLabelText(m_volValue, std::format("{}%", static_cast<int>(std::lround(value * 100.0))));
+    setLabelText(m_volValue, percentText(value));
   });
-  outBox->addChild(
+  box->addChild(
       ui::label({
           .out = &m_sinkLine,
-          .fontSize = caption,
+          .fontSize = Style::fontSizeCaption * scale,
           .fontFamily = std::string(term_frame::kFont),
           .color = term_frame::dimColor(),
           .maxLines = 1,
           .ellipsize = TextEllipsize::End,
       })
   );
-  root->addChild(std::move(outBox));
+  return box;
+}
 
-  // ---- ³ players ----
-  auto othersBox = term_frame::box("³", "players", scale, &m_othersBox);
+// One ghost button per other player (up to kMaxOthers); refreshOthers() fills and shows them.
+std::unique_ptr<Flex> MediaQuickTab::buildPlayersBox(float scale) {
+  const float font = term_frame::kBtopFontSize * scale;
+  auto box = term_frame::box("³", "players", scale, &m_othersBox);
   for (std::size_t i = 0; i < kMaxOthers; ++i) {
-    othersBox->addChild(
+    box->addChild(
         ui::button({
             .out = &m_otherButtons[i],
             .fontSize = font,
             .contentAlign = ButtonContentAlign::Start,
             .variant = ButtonVariant::Ghost,
-            .customPalette = term_frame::keywordPalette(0.8F),
+            .customPalette = term_frame::keywordPalette(kOtherPlayerPaletteAlpha),
             .surfaceOpacity = 1.0F,
             .minHeight = kRow * scale,
             .paddingV = 0.0F,
-            .paddingH = 3.0F * scale,
+            .paddingH = kOtherPlayerPaddingH * scale,
             .radius = 0.0F,
             .visible = false,
-            .onClick =
-                [this, i]() {
-                  if (m_mpris == nullptr || m_otherBus[i].empty()) {
-                    return;
-                  }
-                  const std::string bus = m_otherBus[i];
-                  const std::weak_ptr<void> aliveGuard = m_aliveGuard;
-                  DeferredCall::callLater([this, aliveGuard, bus]() {
-                    if (aliveGuard.expired() || m_mpris == nullptr) {
-                      return;
-                    }
-                    (void)m_mpris->setPinnedPlayerPreference(bus);
-                    PanelManager::instance().refresh();
-                  });
-                },
+            .onClick = [this, i]() { pinPlayer(m_otherBus[i]); },
             .configure =
                 [](Button& button) {
                   if (button.label() != nullptr) {
@@ -301,34 +315,67 @@ std::unique_ptr<Flex> MediaQuickTab::create() {
         })
     );
   }
-  root->addChild(std::move(othersBox));
+  return box;
+}
 
-  // ---- spectrum strip ----
+std::unique_ptr<AudioVisualizer> MediaQuickTab::buildSpectrum() {
   auto spectrum = std::make_unique<AudioVisualizer>();
-  spectrum->setGradient(colorSpecFromRole(ColorRole::Primary), colorSpecFromRole(ColorRole::Primary, 0.4F));
+  spectrum->setGradient(
+      colorSpecFromRole(ColorRole::Primary), colorSpecFromRole(ColorRole::Primary, kSpectrumTailAlpha)
+  );
   spectrum->setOrientation(AudioSpectrumOrientation::Horizontal);
   spectrum->setValues(std::vector<float>(kBandCount, 0.0F));
   spectrum->tick(0.0F);
   // Placed by hand right under the last box (no section gap above it); see doLayout.
   spectrum->setParticipatesInLayout(false);
   m_spectrumNode = spectrum.get();
-  root->addChild(std::move(spectrum));
+  return spectrum;
+}
 
-  applyShape(currentShape());
-  return root;
+// Makes `busName` the preferred player on the next main-loop tick; empty names (unused slots) are ignored.
+void MediaQuickTab::pinPlayer(const std::string& busName) {
+  if (m_mpris == nullptr || busName.empty()) {
+    return;
+  }
+  const std::weak_ptr<void> aliveGuard = m_aliveGuard;
+  DeferredCall::callLater([this, aliveGuard, busName]() {
+    if (aliveGuard.expired() || m_mpris == nullptr) {
+      return;
+    }
+    (void)m_mpris->setPinnedPlayerPreference(busName);
+    PanelManager::instance().refresh();
+  });
+}
+
+// Hides transient MPRIS discovery gaps so the panel does not flip size: the last active player stays for a grace
+// period.
+std::optional<MprisPlayerInfo> MediaQuickTab::withinGrace(std::optional<MprisPlayerInfo> live) const {
+  if (!live.has_value()
+      && m_lastActive.has_value()
+      && std::chrono::steady_clock::now() - m_lastActiveSeenAt <= kNoActivePlayerGrace) {
+    return m_lastActive;
+  }
+  return live;
 }
 
 std::optional<MprisPlayerInfo> MediaQuickTab::effectiveActive() const {
   if (m_mpris == nullptr) {
     return std::nullopt;
   }
-  auto active = m_mpris->activePlayer();
-  if (!active.has_value() && m_lastActive.has_value()
-      && std::chrono::steady_clock::now() - m_lastActiveSeenAt <= kNoActivePlayerGrace) {
-    // Hides transient MPRIS discovery gaps so the panel does not flip size.
-    active = m_lastActive;
+  return withinGrace(m_mpris->activePlayer());
+}
+
+// effectiveActive() that also remembers a live player for the grace period; once per update.
+std::optional<MprisPlayerInfo> MediaQuickTab::trackActive() {
+  if (m_mpris == nullptr) {
+    return std::nullopt;
   }
-  return active;
+  auto live = m_mpris->activePlayer();
+  if (live.has_value()) {
+    m_lastActive = live;
+    m_lastActiveSeenAt = std::chrono::steady_clock::now();
+  }
+  return withinGrace(std::move(live));
 }
 
 std::string MediaQuickTab::defaultSinkLabel() const {
@@ -339,9 +386,8 @@ std::string MediaQuickTab::defaultSinkLabel() const {
   return sink != nullptr ? audioDeviceLabel(*sink) : std::string{};
 }
 
-MediaQuickTab::Shape MediaQuickTab::currentShape() const {
+MediaQuickTab::Shape MediaQuickTab::currentShape(const std::optional<MprisPlayerInfo>& active) const {
   Shape shape;
-  const auto active = effectiveActive();
   shape.player = active.has_value();
   if (!shape.player) {
     return shape;
@@ -373,14 +419,12 @@ float MediaQuickTab::heightFor(const Shape& shape) {
   return total + kStripHeight;
 }
 
-float MediaQuickTab::quickPanelHeight(float width, float fallback) const {
-  (void)width;
-  (void)fallback;
-  return heightFor(currentShape());
+float MediaQuickTab::quickPanelHeight(float /*width*/, float /*fallback*/) const {
+  return heightFor(currentShape(effectiveActive()));
 }
 
 std::string MediaQuickTab::quickPanelHints() const {
-  if (!currentShape().player) {
+  if (!effectiveActive().has_value()) {
     return {};
   }
   // The keyword row already shows the transport letters; the footer names the rest.
@@ -400,29 +444,24 @@ std::string MediaQuickTab::quickPanelStatus() const {
 }
 
 void MediaQuickTab::applyShape(const Shape& shape) {
-  const bool changed = !m_shapeApplied || !(shape == m_shape);
+  const bool changed = !m_shapeApplied || shape != m_shape;
   m_shape = shape;
   m_shapeApplied = true;
   if (m_root == nullptr) {
     return;
   }
-  if (m_artBox != nullptr) {
-    m_artBox->setVisible(shape.player);
-  }
-  if (m_playBox != nullptr) {
-    m_playBox->setVisible(shape.player);
-  }
-  if (m_outBox != nullptr) {
-    m_outBox->setVisible(shape.player);
+  for (Node* node :
+       {static_cast<Node*>(m_artBox), static_cast<Node*>(m_playBox), static_cast<Node*>(m_outBox),
+        static_cast<Node*>(m_spectrumNode)}) {
+    if (node != nullptr) {
+      node->setVisible(shape.player);
+    }
   }
   if (m_sinkLine != nullptr) {
     m_sinkLine->setVisible(shape.sink);
   }
   if (m_othersBox != nullptr) {
     m_othersBox->setVisible(shape.others > 0);
-  }
-  if (m_spectrumNode != nullptr) {
-    m_spectrumNode->setVisible(shape.player);
   }
   if (changed) {
     requestQuickPanelResize();
@@ -437,9 +476,7 @@ void MediaQuickTab::doLayout(Renderer& renderer, float contentWidth, float bodyH
   const float scale = contentScale();
   const float width = std::max(1.0F, contentWidth);
 
-  const float textWidth = std::max(
-      1.0F, width - (m_shape.player ? kArtSize * scale + Style::spaceMd * scale : 0.0F)
-  );
+  const float textWidth = std::max(1.0F, width - (m_shape.player ? kArtSize * scale + Style::spaceMd * scale : 0.0F));
   for (auto* label : {m_title, m_artist, m_album}) {
     if (label != nullptr) {
       label->setMaxWidth(textWidth);
@@ -532,12 +569,12 @@ void MediaQuickTab::doUpdate(Renderer& renderer) {
     m_progressTimer.stop();
     return;
   }
-  const auto active = effectiveActive();
+  const auto active = trackActive();
   const bool playing = active.has_value() && active->playbackStatus == "Playing";
   const bool pendingSeek = m_pendingSeekUs >= 0 && std::chrono::steady_clock::now() < m_pendingSeekUntil;
   if (playing || pendingSeek) {
     if (!m_progressTimer.active()) {
-      m_progressTimer.startRepeating(std::chrono::milliseconds(1000), [this]() {
+      m_progressTimer.startRepeating(kProgressTick, [this]() {
         if (!m_active) {
           return;
         }
@@ -549,111 +586,122 @@ void MediaQuickTab::doUpdate(Renderer& renderer) {
     m_progressTimer.stop();
   }
   syncSpectrum(playing);
-  refresh(renderer);
+  refresh(renderer, active);
 }
 
-void MediaQuickTab::refresh(Renderer& renderer) {
+void MediaQuickTab::refresh(Renderer& renderer, const std::optional<MprisPlayerInfo>& active) {
   if (m_root == nullptr || m_title == nullptr || m_progress == nullptr) {
     return;
   }
-  const auto now = std::chrono::steady_clock::now();
-  if (m_mpris != nullptr) {
-    if (auto live = m_mpris->activePlayer(); live.has_value()) {
-      m_lastActive = live;
-      m_lastActiveSeenAt = now;
-    }
-  }
-  const auto active = effectiveActive();
-
-  const Shape shape = currentShape();
-  if (!m_shapeApplied || !(shape == m_shape)) {
+  const Shape shape = currentShape(active);
+  if (!m_shapeApplied || shape != m_shape) {
     applyShape(shape);
   }
-
   if (!active.has_value()) {
-    m_pendingSeekUs = -1;
-    m_pendingSeekBus.clear();
-    m_lastBusName.clear();
-    m_lastArtUrl.clear();
-    setLabelText(m_title, "nothing playing");
-    setLabelText(m_artist, "start playback in any MPRIS app");
-    setLabelText(m_album, "");
-    m_album->setVisible(false);
+    showIdle();
     return;
   }
 
-  const auto& player = *active;
+  const MprisPlayerInfo& player = *active;
   m_lastBusName = player.busName;
+  refreshHero(renderer, player);
+  refreshProgress(player);
+  refreshTransport(player);
+  refreshOutput(player, shape);
+  refreshOthers(player);
+}
 
-  // ---- hero ----
+void MediaQuickTab::showIdle() {
+  m_pendingSeekUs = -1;
+  m_pendingSeekBus.clear();
+  m_lastBusName.clear();
+  m_lastArtUrl.clear();
+  setLabelText(m_title, "nothing playing");
+  setLabelText(m_artist, "start playback in any MPRIS app");
+  setLabelText(m_album, "");
+  m_album->setVisible(false);
+}
+
+void MediaQuickTab::refreshHero(Renderer& renderer, const MprisPlayerInfo& player) {
   setLabelText(m_title, player.title.empty() ? player.identity : player.title);
   const std::string artists = joinArtists(player.artists);
   setLabelText(m_artist, artists.empty() ? player.identity : artists);
   setLabelText(m_album, player.album);
   m_album->setVisible(!player.album.empty());
-
-  const std::string artUrl = effectiveArtUrl(player);
   if (m_art != nullptr) {
-    if (artUrl.empty()) {
-      if (m_art->hasImage()) {
-        m_art->clear(renderer);
-      }
-      m_lastArtUrl.clear();
-    } else if (artUrl != m_lastArtUrl || !m_art->hasImage()) {
-      const std::string path = resolveArtworkSource(
-          m_httpClient, m_pendingArtDownloads, artUrl,
-          [this] {
-            m_lastArtUrl.clear();
-            PanelManager::instance().refresh();
-          },
-          m_aliveGuard
-      );
-      bool loaded = false;
-      if (!path.empty()) {
-        loaded = m_art->setSourceFile(renderer, path, static_cast<int>(std::round(kArtSize * contentScale())), true, true);
-      }
-      if (!loaded && m_art->hasImage()) {
-        m_art->clear(renderer);
-      }
-      m_lastArtUrl = loaded ? artUrl : std::string{};
-    }
-    const bool hasArt = m_art->hasImage();
-    m_art->setVisible(hasArt);
-    if (m_artPlaceholder != nullptr) {
-      m_artPlaceholder->setVisible(!hasArt);
-    }
+    refreshArt(renderer, effectiveArtUrl(player));
   }
+}
 
-  // ---- progress ----
+// Loads the cover when its URL changed (or the image was lost); a download in flight re-runs this on arrival.
+void MediaQuickTab::refreshArt(Renderer& renderer, const std::string& artUrl) {
+  if (artUrl.empty()) {
+    if (m_art->hasImage()) {
+      m_art->clear(renderer);
+    }
+    m_lastArtUrl.clear();
+  } else if (artUrl != m_lastArtUrl || !m_art->hasImage()) {
+    const std::string path = resolveArtworkSource(
+        m_httpClient, m_pendingArtDownloads, artUrl,
+        [this] {
+          m_lastArtUrl.clear();
+          PanelManager::instance().refresh();
+        },
+        m_aliveGuard
+    );
+    bool loaded = false;
+    if (!path.empty()) {
+      loaded =
+          m_art->setSourceFile(renderer, path, static_cast<int>(std::round(kArtSize * contentScale())), true, true);
+    }
+    if (!loaded && m_art->hasImage()) {
+      m_art->clear(renderer);
+    }
+    m_lastArtUrl = loaded ? artUrl : std::string{};
+  }
+  const bool hasArt = m_art->hasImage();
+  m_art->setVisible(hasArt);
+  if (m_artPlaceholder != nullptr) {
+    m_artPlaceholder->setVisible(!hasArt);
+  }
+}
+
+// A seek the user just made wins over the player's reported position until the player catches up or the timeout hits.
+void MediaQuickTab::refreshProgress(const MprisPlayerInfo& player) {
   std::int64_t position = player.lengthUs > 0 ? std::clamp<std::int64_t>(player.positionUs, 0, player.lengthUs)
                                               : std::max<std::int64_t>(0, player.positionUs);
-  const bool pendingForPlayer = m_pendingSeekUs >= 0 && (m_pendingSeekBus.empty() || m_pendingSeekBus == player.busName);
-  if (pendingForPlayer && std::llabs(position - m_pendingSeekUs) <= kSeekArrivedToleranceUs) {
-    m_pendingSeekUs = -1;
-    m_pendingSeekBus.clear();
-  } else if (pendingForPlayer && now < m_pendingSeekUntil) {
-    position = m_pendingSeekUs;
-  } else if (pendingForPlayer) {
-    m_pendingSeekUs = -1;
-    m_pendingSeekBus.clear();
+  const bool pendingForPlayer =
+      m_pendingSeekUs >= 0 && (m_pendingSeekBus.empty() || m_pendingSeekBus == player.busName);
+  if (pendingForPlayer) {
+    const bool arrived = std::llabs(position - m_pendingSeekUs) <= kSeekArrivedToleranceUs;
+    if (!arrived && std::chrono::steady_clock::now() < m_pendingSeekUntil) {
+      position = m_pendingSeekUs;
+    } else {
+      m_pendingSeekUs = -1;
+      m_pendingSeekBus.clear();
+    }
   }
 
   m_syncing = true;
   m_progress->setEnabled(player.canSeek && player.lengthUs > 0);
   if (player.lengthUs > 0) {
-    m_progress->setRange(0.0, static_cast<double>(player.lengthUs) / 1'000'000.0);
+    m_progress->setRange(0.0, static_cast<double>(player.lengthUs) / static_cast<double>(kMicrosPerSecond));
   }
   if (!m_progress->dragging()) {
     const double max = m_progress->maxValue();
-    m_progress->setValue(max > 0.0 ? std::clamp(static_cast<double>(position) / 1'000'000.0, 0.0, max) : 0.0);
+    m_progress->setValue(
+        max > 0.0 ? std::clamp(static_cast<double>(position) / static_cast<double>(kMicrosPerSecond), 0.0, max) : 0.0
+    );
   }
   m_syncing = false;
-  const std::int64_t shown =
-      m_progress->dragging() ? static_cast<std::int64_t>(m_progress->value() * 1'000'000.0) : position;
+  const std::int64_t shown = m_progress->dragging()
+      ? static_cast<std::int64_t>(m_progress->value() * static_cast<double>(kMicrosPerSecond))
+      : position;
   setLabelText(m_elapsed, formatTime(shown));
   setLabelText(m_length, player.lengthUs > 0 ? formatTime(player.lengthUs) : "--:--");
+}
 
-  // ---- transport ----
+void MediaQuickTab::refreshTransport(const MprisPlayerInfo& player) {
   const bool playing = player.playbackStatus == "Playing";
   const bool control = player.canControl;
   setKeyword(m_kwShuffle, "shuffle", 0, player.shuffle, "shuffle", control);
@@ -664,30 +712,33 @@ void MediaQuickTab::refresh(Renderer& renderer) {
   setKeyword(m_kwNext, "n ››", 0, false, {}, control && player.canGoNext);
   const bool repeating = player.loopStatus != "None";
   setKeyword(m_kwRepeat, "repeat", 0, repeating, player.loopStatus == "Track" ? "repeat 1" : "repeat", control);
+}
 
-  // ---- output ----
+void MediaQuickTab::refreshOutput(const MprisPlayerInfo& player, const Shape& shape) {
   if (m_volume != nullptr) {
+    const double volume = std::clamp(player.volume, 0.0, 1.0);
     m_syncing = true;
-    m_volume->setEnabled(control);
+    m_volume->setEnabled(player.canControl);
     if (!m_volume->dragging()) {
-      m_volume->setValue(std::clamp(player.volume, 0.0, 1.0));
+      m_volume->setValue(volume);
     }
     m_syncing = false;
-    setLabelText(m_volValue, std::format("{}%", static_cast<int>(std::lround(std::clamp(player.volume, 0.0, 1.0) * 100.0))));
+    setLabelText(m_volValue, percentText(volume));
   }
   if (m_sinkLine != nullptr && shape.sink) {
     setLabelText(m_sinkLine, "sink  " + defaultSinkLabel());
   }
+}
 
-  // ---- other players ----
+// The first kMaxOthers players besides the active one, one button each; unused buttons hide.
+void MediaQuickTab::refreshOthers(const MprisPlayerInfo& player) {
   std::size_t shownOthers = 0;
   if (m_mpris != nullptr) {
     for (const auto& other : m_mpris->listPlayers()) {
       if (other.busName == player.busName || shownOthers >= kMaxOthers) {
         continue;
       }
-      Button* button = m_otherButtons[shownOthers];
-      if (button != nullptr) {
+      if (Button* button = m_otherButtons[shownOthers]; button != nullptr) {
         const std::string name = other.identity.empty() ? other.busName : other.identity;
         button->setText(other.title.empty() ? name : name + " · " + other.title);
         button->setVisible(true);
@@ -704,23 +755,26 @@ void MediaQuickTab::refresh(Renderer& renderer) {
   }
 }
 
+// Remembers the user's target so refreshProgress() keeps showing it until the player arrives; returns it in µs.
+std::int64_t MediaQuickTab::setPendingSeek(double valueSeconds) {
+  m_pendingSeekUs = static_cast<std::int64_t>(std::llround(valueSeconds * static_cast<double>(kMicrosPerSecond)));
+  m_pendingSeekBus = m_lastBusName;
+  m_pendingSeekUntil = std::chrono::steady_clock::now() + kPendingSeekTimeout;
+  return m_pendingSeekUs;
+}
+
 void MediaQuickTab::beginSeek(double valueSeconds) {
   if (m_syncing || m_mpris == nullptr) {
     return;
   }
-  m_pendingSeekUs = static_cast<std::int64_t>(std::llround(valueSeconds * 1'000'000.0));
-  m_pendingSeekBus = m_lastBusName;
-  m_pendingSeekUntil = std::chrono::steady_clock::now() + kPendingSeekTimeout;
+  setPendingSeek(valueSeconds);
 }
 
 void MediaQuickTab::commitSeek(double valueSeconds) {
   if (m_syncing || m_mpris == nullptr || m_lastBusName.empty()) {
     return;
   }
-  const auto targetUs = static_cast<std::int64_t>(std::llround(valueSeconds * 1'000'000.0));
-  m_pendingSeekUs = targetUs;
-  m_pendingSeekBus = m_lastBusName;
-  m_pendingSeekUntil = std::chrono::steady_clock::now() + kPendingSeekTimeout;
+  const std::int64_t targetUs = setPendingSeek(valueSeconds);
   const std::string bus = m_lastBusName;
   const std::weak_ptr<void> aliveGuard = m_aliveGuard;
   DeferredCall::callLater([this, aliveGuard, bus, targetUs]() {
@@ -806,57 +860,51 @@ bool MediaQuickTab::handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifie
   if (preedit || (modifiers & (KeyMod::Ctrl | KeyMod::Alt | KeyMod::Super)) != 0U) {
     return false;
   }
-  if (!currentShape().player) {
+  if (!effectiveActive().has_value()) {
     return false;
   }
 
+  void (MediaQuickTab::*action)() = nullptr;
+  std::int64_t seekOffsetUs = 0;
   switch (sym) {
   case XKB_KEY_space:
-    if (pressed) {
-      togglePlay();
-    }
-    return true;
+    action = &MediaQuickTab::togglePlay;
+    break;
   case XKB_KEY_Left:
-    if (pressed) {
-      seekBy(-kSeekStepUs);
-    }
-    return true;
+    seekOffsetUs = -kSeekStepUs;
+    break;
   case XKB_KEY_Right:
-    if (pressed) {
-      seekBy(kSeekStepUs);
-    }
-    return true;
+    seekOffsetUs = kSeekStepUs;
+    break;
   case XKB_KEY_n:
   case XKB_KEY_N:
-    if (pressed) {
-      nextTrack();
-    }
-    return true;
+    action = &MediaQuickTab::nextTrack;
+    break;
   case XKB_KEY_p:
   case XKB_KEY_P:
-    if (pressed) {
-      previousTrack();
-    }
-    return true;
+    action = &MediaQuickTab::previousTrack;
+    break;
   case XKB_KEY_s:
   case XKB_KEY_S:
-    if (pressed) {
-      cycleShuffle();
-    }
-    return true;
+    action = &MediaQuickTab::cycleShuffle;
+    break;
   case XKB_KEY_r:
   case XKB_KEY_R:
-    if (pressed) {
-      cycleRepeat();
-    }
-    return true;
+    action = &MediaQuickTab::cycleRepeat;
+    break;
   case XKB_KEY_o:
   case XKB_KEY_O:
-    if (pressed) {
-      cyclePlayer();
-    }
-    return true;
+    action = &MediaQuickTab::cyclePlayer;
+    break;
   default:
     return false;
   }
+  if (pressed) {
+    if (action != nullptr) {
+      (this->*action)();
+    } else {
+      seekBy(seekOffsetUs);
+    }
+  }
+  return true;
 }

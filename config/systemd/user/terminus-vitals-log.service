@@ -1,3 +1,4 @@
+# Samples cpu, gpu and memory for the vitals bar plugin panels
 [Unit]
 Description=Terminus vitals logger (cpu, gpu, memory history for the bar panels)
 

@@ -2,12 +2,15 @@
 
 use std::{
     collections::HashMap,
-    ffi::{CStr, CString},
+    ffi::{CStr, CString, OsStr},
     fmt::Write as _,
     fs,
     io::{self, Read},
     net::Ipv4Addr,
-    os::unix::fs::MetadataExt,
+    os::{
+        fd::AsRawFd,
+        unix::{ffi::OsStrExt, fs::MetadataExt},
+    },
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
@@ -101,10 +104,7 @@ pub fn cpu_freq_files() -> Vec<PathBuf> {
     let Ok(dir) = fs::read_dir("/sys/devices/system/cpu") else {
         return Vec::new();
     };
-    dir.flatten()
-        .map(|e| e.path().join("cpufreq/scaling_cur_freq"))
-        .filter(|p| p.exists())
-        .collect()
+    dir.flatten().map(|e| e.path().join("cpufreq/scaling_cur_freq")).filter(|p| p.exists()).collect()
 }
 
 /// The CPU package's energy counter (microjoules) and the value it wraps
@@ -415,10 +415,50 @@ pub const SIGNALS: [(i32, &str); 31] = [
     (libc::SIGSYS, "SIGSYS"),
 ];
 
+/// What a process is doing, from the letter /proc/<pid>/stat gives it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum State {
+    Running,
+    Sleeping,
+    DiskWait,
+    Zombie,
+    Stopped,
+    Traced,
+    Idle,
+    Unknown,
+}
+
+impl State {
+    fn from_letter(letter: char) -> State {
+        match letter {
+            'R' => State::Running,
+            'S' => State::Sleeping,
+            'D' => State::DiskWait,
+            'Z' => State::Zombie,
+            'T' => State::Stopped,
+            't' => State::Traced,
+            'I' => State::Idle,
+            _ => State::Unknown,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            State::Running => "Running",
+            State::Sleeping => "Sleeping",
+            State::DiskWait => "Disk wait",
+            State::Zombie => "Zombie",
+            State::Stopped => "Stopped",
+            State::Traced => "Traced",
+            State::Idle => "Idle",
+            State::Unknown => "Unknown",
+        }
+    }
+}
+
 pub struct Stat<'a> {
     pub comm: &'a str,
-    /// R running, S sleeping, D disk wait, Z zombie, T stopped, I idle.
-    pub state: char,
+    pub state: State,
     pub ppid: u32,
     pub nice: i32,
     /// utime + stime, in the jiffies /proc/stat counts.
@@ -428,12 +468,73 @@ pub struct Stat<'a> {
     pub rss_pages: u64,
 }
 
+/// Whether the descriptor `name` in `fds` (a /proc/<pid>/fd directory) is
+/// a device under /dev/dri. This runs for every descriptor of every process
+/// on a full scan, so it reads the link into a buffer on the stack, relative
+/// to the open directory, instead of allocating a path and a target.
+fn is_drm_device(fds: &fs::File, name: &OsStr) -> bool {
+    const PREFIX: &[u8] = b"/dev/dri";
+    // The prefix and the byte after it, which must end the path or be a slash.
+    let mut target = [0u8; PREFIX.len() + 1];
+    // Descriptor numbers are short; the zeros past the name end it for C.
+    let mut c_name = [0u8; 16];
+    let digits = name.as_bytes();
+    if digits.len() >= c_name.len() {
+        return false;
+    }
+    c_name[..digits.len()].copy_from_slice(digits);
+    // SAFETY: `c_name` is NUL-terminated and `target` is writable for the
+    // length passed; readlinkat writes at most that many bytes.
+    let len =
+        unsafe { libc::readlinkat(fds.as_raw_fd(), c_name.as_ptr().cast(), target.as_mut_ptr().cast(), target.len()) };
+    let Ok(len) = usize::try_from(len) else {
+        return false;
+    };
+    len >= PREFIX.len() && target.starts_with(PREFIX) && (len == PREFIX.len() || target[PREFIX.len()] == b'/')
+}
+
 /// Reads per-process files through buffers reused across the whole scan.
 #[derive(Default)]
 pub struct ProcReader {
     path: String,
     raw: Vec<u8>,
     text: String,
+}
+
+/// What one DRM descriptor's fdinfo says about its client.
+#[derive(Default, Debug, PartialEq)]
+struct DrmUsage {
+    client: Option<u64>,
+    /// Busy time summed over all engines, in nanoseconds.
+    engine_ns: u64,
+    vram_bytes: u64,
+}
+
+fn parse_fdinfo(text: &str) -> DrmUsage {
+    let mut usage = DrmUsage::default();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let mut value = value.split_ascii_whitespace();
+        let Some(n) = value.next().and_then(|n| n.parse::<u64>().ok()) else {
+            continue;
+        };
+        match key {
+            "drm-client-id" => usage.client = Some(n),
+            "drm-memory-vram" => {
+                usage.vram_bytes = n * match value.next() {
+                    Some("KiB") => 1 << 10,
+                    Some("MiB") => 1 << 20,
+                    _ => 1,
+                }
+            }
+            // drm-engine-gfx, -compute, -dec, ...: busy time in ns.
+            _ if key.starts_with("drm-engine-") && value.next() == Some("ns") => usage.engine_ns += n,
+            _ => {}
+        }
+    }
+    usage
 }
 
 impl ProcReader {
@@ -453,14 +554,20 @@ impl ProcReader {
         if !self.load(pid, "stat") {
             return None;
         }
-        self.text.clear();
-        self.text.push_str(&String::from_utf8_lossy(&self.raw));
-        let s = self.text.as_str();
+        let s = match std::str::from_utf8(&self.raw) {
+            Ok(s) => s,
+            // A comm that is not UTF-8: the bad bytes become U+FFFD.
+            Err(_) => {
+                self.text.clear();
+                self.text.push_str(&String::from_utf8_lossy(&self.raw));
+                &self.text
+            }
+        };
         // comm may hold spaces and parentheses; the last ')' ends it.
         let (open, close) = (s.find('(')?, s.rfind(')')?);
         // Fields after comm start at field 3 (state), so field N is index N-3.
         let mut f = s[close + 1..].split_ascii_whitespace();
-        let state = f.next()?.chars().next()?; // 3
+        let state = State::from_letter(f.next()?.chars().next()?); // 3
         let ppid = f.next()?.parse().ok()?; // 4
         let utime: u64 = f.nth(9)?.parse().ok()?; // 14
         let stime: u64 = f.next()?.parse().ok()?; // 15
@@ -559,14 +666,15 @@ impl ProcReader {
     pub fn gpu(&mut self, pid: u32, clients: &mut Vec<u64>) -> Option<(u64, u64)> {
         self.path.clear();
         let _ = write!(self.path, "/proc/{pid}/fd");
-        let dir = fs::read_dir(&self.path).ok()?;
+        let names = fs::read_dir(&self.path).ok()?;
+        let fds = fs::File::open(&self.path).ok()?;
         clients.clear();
         let (mut time, mut vram) = (0, 0);
-        for entry in dir.flatten() {
-            if !fs::read_link(entry.path()).is_ok_and(|target| target.starts_with("/dev/dri")) {
+        for entry in names.flatten() {
+            let name = entry.file_name();
+            if !is_drm_device(&fds, &name) {
                 continue;
             }
-            let name = entry.file_name();
             let Some(fd) = name.to_str() else {
                 continue;
             };
@@ -575,33 +683,11 @@ impl ProcReader {
             if !self.read() {
                 continue;
             }
-            let (mut client, mut engines, mut memory) = (None, 0u64, 0u64);
-            for line in String::from_utf8_lossy(&self.raw).lines() {
-                let Some((key, value)) = line.split_once(':') else {
-                    continue;
-                };
-                let mut value = value.split_ascii_whitespace();
-                let Some(n) = value.next().and_then(|n| n.parse::<u64>().ok()) else {
-                    continue;
-                };
-                match key {
-                    "drm-client-id" => client = Some(n),
-                    "drm-memory-vram" => {
-                        memory = n * match value.next() {
-                            Some("KiB") => 1 << 10,
-                            Some("MiB") => 1 << 20,
-                            _ => 1,
-                        }
-                    }
-                    // drm-engine-gfx, -compute, -dec, ...: busy time in ns.
-                    _ if key.starts_with("drm-engine-") && value.next() == Some("ns") => engines += n,
-                    _ => {}
-                }
-            }
-            if let Some(client) = client.filter(|c| !clients.contains(c)) {
+            let usage = parse_fdinfo(&String::from_utf8_lossy(&self.raw));
+            if let Some(client) = usage.client.filter(|c| !clients.contains(c)) {
                 clients.push(client);
-                time += engines;
-                vram += memory;
+                time += usage.engine_ns;
+                vram += usage.vram_bytes;
             }
         }
         (!clients.is_empty()).then_some((time, vram))
@@ -659,12 +745,7 @@ pub fn battery(dir: &Path) -> Option<Battery> {
         Charge::Charging => Some((full? - now?).max(0.0) / rate?),
         Charge::Idle => None,
     };
-    Some(Battery {
-        percent: value("capacity")? as f32,
-        charge,
-        watts,
-        seconds: hours.map(|h| (h * 3600.0) as u64),
-    })
+    Some(Battery { percent: value("capacity")? as f32, charge, watts, seconds: hours.map(|h| (h * 3600.0) as u64) })
 }
 
 #[cfg(test)]
@@ -723,5 +804,14 @@ mod tests {
         let root = supply("mouse", &[("type", "Battery"), ("scope", "Device"), ("capacity", "40")]);
         assert!(battery_dir(&root).is_none());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fdinfo_sums_engines_and_scales_vram() {
+        let text = "pos:\t0\ndrm-driver:\tamdgpu\ndrm-client-id:\t42\ndrm-memory-vram:\t1024 KiB\n\
+                    drm-engine-gfx:\t500 ns\ndrm-engine-compute:\t250 ns\ndrm-engine-capacity-gfx:\t1\n";
+        let usage = parse_fdinfo(text);
+        assert_eq!(usage, DrmUsage { client: Some(42), engine_ns: 750, vram_bytes: 1 << 20 });
+        assert_eq!(parse_fdinfo("pos:\t0\nflags:\t02\n"), DrmUsage::default());
     }
 }

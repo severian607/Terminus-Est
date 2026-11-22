@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Reads the vitals log for the panel: vitals-query <cpu|gpu|mem> <1|6|24|168>  (hours)  ->  JSON on stdout.
 
-{ "span": seconds, "bucket": seconds,
-  "buckets": [{"t": unix, "min": 0-100, "avg": 0-100, "max": 0-100}   # gpu: min is 0 and max is the p95 of the minute maxima ...]   # oldest first, gaps omitted
+{ "span": seconds, "bucket": seconds (the width actually used: a young log gets finer buckets),
+  "buckets": [{"t": unix, "min": 0-100, "avg": 0-100, "max": 0-100}, ...],   # oldest first, gaps omitted
+                                         # gpu: min is 0 and max is the p95 of the minute maxima
   "latest":  average of the newest logged minute (what the headline uses for bursty readings like the GPU),
   "calm":    consecutive newest minutes with cpu average under 10% (cpu only),
   "first":   unix time of the oldest logged minute, or null,
@@ -11,6 +12,7 @@
   "temp":    {"max": degrees} | null,
   "minutes": number of logged minutes in the window }
 """
+
 import json
 import os
 import sqlite3
@@ -19,63 +21,120 @@ import time
 
 DB = os.path.expanduser("~/.local/state/terminus-est/vitals.sqlite")
 WINDOWS = {"1": (3600, 60), "6": (6 * 3600, 300), "24": (86400, 900), "168": (7 * 86400, 3600)}  # hours: span, bucket
+MINUTE = 60
+GRAPH_COLUMNS = 96  # a young log gets buckets fine enough to fill about this many columns
+CALM_CPU_PERCENT = 10  # "calm" minute: cpu average under this
+CALM_LOOKBACK_MINUTES = 30
+GPU_BAND_PERCENTILE = 0.95
+TOP_APPS = 5
+# kind: (min, avg, max column, temperature column or NULL)
+COLUMNS = {
+    "cpu": ("cpu_min", "cpu_avg", "cpu_max", "cpu_t"),
+    "gpu": ("gpu_min", "gpu_avg", "gpu_max", "gpu_t"),
+    "mem": ("mem_min", "mem_avg", "mem_max", "NULL"),
+}
+
+
+def fit_bucket(db, since, bucket):
+    """A log younger than the window: bucket the data there is, so a fresh log still draws a graph."""
+    first = db.execute("SELECT MIN(ts) FROM samples WHERE ts >= ?", (since,)).fetchone()[0]
+    if first is None:
+        return bucket
+    age_minutes = (int(time.time()) - first) // GRAPH_COLUMNS // MINUTE
+    return max(MINUTE, min(bucket, (age_minutes + 1) * MINUTE))
+
+
+def gpu_buckets(db, since, bucket):
+    """The GPU's per-minute maxima nearly always touch 100, so the band carries no information: report the
+    average and the 95th percentile of the minute maxima (in "max"); the panel draws a solid bar and a mark."""
+    groups = {}
+    rows = db.execute(
+        "SELECT ts, gpu_avg, gpu_max FROM samples WHERE ts >= ? AND gpu_avg IS NOT NULL ORDER BY ts", (since,)
+    )
+    for ts, avg, high in rows:
+        groups.setdefault(ts // bucket * bucket, []).append((avg, high))
+    buckets = []
+    for ts in sorted(groups):
+        avgs = [avg for avg, _ in groups[ts]]
+        highs = sorted(high for _, high in groups[ts])
+        p95 = highs[min(len(highs) - 1, int(len(highs) * GPU_BAND_PERCENTILE))]
+        buckets.append({"t": ts, "min": 0, "avg": sum(avgs) / len(avgs), "max": p95})
+    return buckets
+
+
+def band_buckets(db, since, bucket, columns):
+    low_column, avg_column, high_column, _ = columns
+    rows = db.execute(
+        f"SELECT ts/{bucket}*{bucket}, MIN({low_column}), AVG({avg_column}), MAX({high_column}) FROM samples "
+        f"WHERE ts >= ? AND {avg_column} IS NOT NULL GROUP BY ts/{bucket} ORDER BY 1",
+        (since,),
+    )
+    return [{"t": ts, "min": low, "avg": avg, "max": high} for ts, low, avg, high in rows]
+
+
+def calm_minutes(db):
+    """Consecutive newest minutes under CALM_CPU_PERCENT average load (the "warm at idle" rule needs three)."""
+    calm = 0
+    for (avg,) in db.execute("SELECT cpu_avg FROM samples ORDER BY ts DESC LIMIT ?", (CALM_LOOKBACK_MINUTES,)):
+        if avg is None or avg >= CALM_CPU_PERCENT:
+            break
+        calm += 1
+    return calm
+
+
+def top_apps(db, kind, since, minutes):
+    if kind == "cpu":  # average use: sum of per-minute shares over the minutes the machine was logged
+        sql = (
+            "SELECT app, SUM(value) / ? FROM procs WHERE ts >= ? AND kind = 'cpu' GROUP BY app ORDER BY 2 DESC LIMIT ?"
+        )
+        args = (minutes, since, TOP_APPS)
+    else:  # peak resident memory / VRAM over the window
+        sql = "SELECT app, MAX(value) FROM procs WHERE ts >= ? AND kind = ? GROUP BY app ORDER BY 2 DESC LIMIT ?"
+        args = (since, kind, TOP_APPS)
+    return [{"name": name, "value": value} for name, value in db.execute(sql, args)]
+
+
+def query(db, kind, span, bucket):
+    since = int(time.time()) - span
+    columns = COLUMNS[kind]
+    _, avg_column, _, temp_column = columns
+    bucket = fit_bucket(db, since, bucket)
+    out = empty_result(span, bucket)
+    out["buckets"] = gpu_buckets(db, since, bucket) if kind == "gpu" else band_buckets(db, since, bucket, columns)
+    minutes, max_temp = db.execute(
+        f"SELECT COUNT(*), MAX({temp_column}) FROM samples WHERE ts >= ?", (since,)
+    ).fetchone()
+    out["minutes"] = minutes
+    latest = db.execute(
+        f"SELECT {avg_column} FROM samples WHERE {avg_column} IS NOT NULL ORDER BY ts DESC LIMIT 1"
+    ).fetchone()
+    out["latest"] = latest[0] if latest else None
+    if kind == "cpu":
+        out["calm"] = calm_minutes(db)
+    out["first"] = db.execute("SELECT MIN(ts) FROM samples").fetchone()[0]
+    out["temp"] = {"max": max_temp} if max_temp is not None else None
+    events = db.execute("SELECT ts, kind, detail FROM events WHERE ts >= ? ORDER BY ts", (since,))
+    out["events"] = [{"t": ts, "kind": event_kind, "detail": detail} for ts, event_kind, detail in events]
+    if minutes:
+        out["top"] = top_apps(db, kind, since, minutes)
+    return out
+
+
+def empty_result(span, bucket):
+    return {
+        "span": span, "bucket": bucket, "buckets": [], "events": [], "top": [], "temp": None,
+        "minutes": 0, "first": None, "latest": None, "calm": 0,
+    }  # fmt: skip
 
 
 def main():
     kind = sys.argv[1] if len(sys.argv) > 1 else "cpu"
-    win = sys.argv[2] if len(sys.argv) > 2 else "6"
-    span, bucket = WINDOWS.get(win, WINDOWS["6"])
-    out = {"span": span, "bucket": bucket, "buckets": [], "events": [], "top": [], "temp": None, "minutes": 0, "first": None, "latest": None, "calm": 0}
-    if kind not in ("cpu", "gpu", "mem") or not os.path.exists(DB):
-        print(json.dumps(out))
-        return
-    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
-    since = int(time.time()) - span
-    # A log younger than the window: bucket the data there is, so a fresh log still draws a graph.
-    first = db.execute("SELECT MIN(ts) FROM samples WHERE ts >= ?", (since,)).fetchone()[0]
-    if first is not None:
-        bucket = max(60, min(bucket, ((int(time.time()) - first) // 96 // 60 + 1) * 60))
-    cols = {"cpu": ("cpu_min", "cpu_avg", "cpu_max", "cpu_t"), "gpu": ("gpu_min", "gpu_avg", "gpu_max", "gpu_t"),
-            "mem": ("mem_min", "mem_avg", "mem_max", "NULL")}[kind]
-    if kind == "gpu":
-        # The GPU's per-minute maxima nearly always touch 100, so the band carries no information: report the
-        # average and the 95th percentile of the minute maxima (in "max"); the panel draws a solid bar and a mark.
-        groups = {}
-        for t, av, hi in db.execute("SELECT ts, gpu_avg, gpu_max FROM samples WHERE ts >= ? AND gpu_avg IS NOT NULL ORDER BY ts", (since,)):
-            groups.setdefault(t // bucket * bucket, []).append((av, hi))
-        for t in sorted(groups):
-            avs = [g[0] for g in groups[t]]
-            his = sorted(g[1] for g in groups[t])
-            p95 = his[min(len(his) - 1, int(len(his) * 0.95))]
-            out["buckets"].append({"t": t, "min": 0, "avg": sum(avs) / len(avs), "max": p95})
+    span, bucket = WINDOWS.get(sys.argv[2] if len(sys.argv) > 2 else "6", WINDOWS["6"])
+    if kind in COLUMNS and os.path.exists(DB):
+        db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+        out = query(db, kind, span, bucket)
     else:
-        for t, lo, av, hi in db.execute(
-                f"SELECT ts/{bucket}*{bucket}, MIN({cols[0]}), AVG({cols[1]}), MAX({cols[2]}) FROM samples "
-                f"WHERE ts >= ? AND {cols[1]} IS NOT NULL GROUP BY ts/{bucket} ORDER BY 1", (since,)):
-            out["buckets"].append({"t": t, "min": lo, "avg": av, "max": hi})
-    row = db.execute(f"SELECT COUNT(*), MAX({cols[3]}) FROM samples WHERE ts >= ?", (since,)).fetchone()
-    out["minutes"] = row[0]
-    last = db.execute(f"SELECT {cols[1]} FROM samples WHERE {cols[1]} IS NOT NULL ORDER BY ts DESC LIMIT 1").fetchone()
-    out["latest"] = last[0] if last else None
-    if kind == "cpu":  # consecutive newest minutes under 10% average load (the "warm at idle" rule needs three)
-        for (avg,) in db.execute("SELECT cpu_avg FROM samples ORDER BY ts DESC LIMIT 30"):
-            if avg is None or avg >= 10:
-                break
-            out["calm"] += 1
-    out["first"] = db.execute("SELECT MIN(ts) FROM samples").fetchone()[0]
-    out["temp"] = {"max": row[1]} if row[1] is not None else None
-    for t, k, d in db.execute("SELECT ts, kind, detail FROM events WHERE ts >= ? ORDER BY ts", (since,)):
-        out["events"].append({"t": t, "kind": k, "detail": d})
-    if out["minutes"]:
-        if kind == "cpu":  # average use: sum of per-minute shares over the minutes the machine was logged
-            sql = ("SELECT app, SUM(value) / ? FROM procs WHERE ts >= ? AND kind = 'cpu' "
-                   "GROUP BY app ORDER BY 2 DESC LIMIT 5")
-            args = (out["minutes"], since)
-        else:  # peak resident memory / VRAM over the window
-            sql = "SELECT app, MAX(value) FROM procs WHERE ts >= ? AND kind = ? GROUP BY app ORDER BY 2 DESC LIMIT 5"
-            args = (since, kind)
-        for name, value in db.execute(sql, args):
-            out["top"].append({"name": name, "value": value})
+        out = empty_result(span, bucket)
     print(json.dumps(out))
 
 

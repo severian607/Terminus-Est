@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -12,6 +13,9 @@ namespace security {
   class SecretStore;
   class StorageKeyProvider;
 } // namespace security
+
+// The local history keeps this many newest entries.
+inline constexpr std::size_t TaskHistoryLimit = 500;
 
 struct TaskItem {
   std::string id, title, description, dueDate;

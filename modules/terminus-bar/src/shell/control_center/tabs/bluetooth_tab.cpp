@@ -1,9 +1,7 @@
 #include "shell/control_center/tabs/bluetooth_tab.h"
 
-#include "system/health.h"
-
-#include "core/ui_phase.h"
 #include "core/process/process.h"
+#include "core/ui_phase.h"
 #include "dbus/bluetooth/bluetooth_uuid_names.h"
 #include "i18n/i18n.h"
 #include "render/core/renderer.h"
@@ -11,6 +9,7 @@
 #include "render/scene/input_dispatcher.h"
 #include "shell/control_center/tabs/async_command.h"
 #include "shell/panel/panel_manager.h"
+#include "system/health.h"
 #include "ui/builders.h"
 #include "ui/controls/collapsible.h"
 #include "ui/palette.h"
@@ -18,20 +17,22 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
-#include <cstdio>
+#include <format>
 #include <functional>
+#include <limits>
 #include <memory>
+#include <nlohmann/json.hpp>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
-#include <unordered_set>
-#include <cctype>
-#include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <xkbcommon/xkbcommon-keysyms.h>
-#include <nlohmann/json.hpp>
 
 using namespace control_center;
 
@@ -151,29 +152,48 @@ namespace {
     );
   }
 
-
   // ---- Quick (QuickPanel) mode ----
   constexpr float kQuickRow = term_frame::kRowHeight;
   constexpr float kQuickGap = Style::spaceSm;
   // Border + padding of a term_frame box, both sides.
   constexpr float kQuickBoxInset = 2.0F * (Style::spaceSm + Style::borderWidth);
+  // ¹adapter box: title row and the two toggle rows.
+  constexpr float kQuickAdapterHeight = kQuickBoxInset + 3.0F * kQuickRow + 2.0F * Style::spaceXs;
   constexpr float kQuickInputRow = Style::controlHeightSm;
   constexpr int kQuickMaxDevLines = 7;
   constexpr int kQuickMaxAvailLines = 6;
+  // Selectable rows ahead of the devices: power and discoverable.
+  constexpr std::size_t kQuickAdapterRows = 2;
+  // The selection marker and its padding, in monospace cells; every selectable row reserves it.
+  constexpr std::size_t kQuickGutterChars = 2;
+  // Cells of a battery or signal meter.
+  constexpr std::size_t kQuickMeterCells = 5;
+  constexpr std::size_t kFailureReasonChars = 40;
   // A panel that closes (or reopens at a new height) keeps a running scan this long before it is stopped.
   constexpr auto kQuickDiscoveryGrace = std::chrono::milliseconds(1500);
   constexpr auto kQuickArmTimeout = std::chrono::seconds(4);
+  constexpr auto kQuickFailureTimeout = std::chrono::seconds(10);
+  // Failures expire by the clock, so a panel showing one updates at this interval.
+  constexpr auto kQuickFailurePoll = std::chrono::seconds(1);
+  constexpr auto kPactlListTimeout = std::chrono::milliseconds(3000);
+  constexpr auto kPactlSwitchTimeout = std::chrono::milliseconds(5000);
+  // Ids of the selectable rows that are not devices.
+  const std::string kQuickPower = "power";
+  const std::string kQuickDiscoverable = "discoverable";
+  const std::string kQuickPair = "pair";
 
   // A box of `lines` kQuickRow lines under its title rule.
   constexpr float quickListBoxHeight(int lines) {
     return kQuickBoxInset + kQuickRow + Style::spaceXs + static_cast<float>(lines) * kQuickRow;
   }
 
-  template <typename NodeT> void setShown(NodeT* node, bool show) {
-    if (node != nullptr && (node->visible() != show || node->participatesInLayout() != show)) {
-      node->setVisible(show);
-      node->setParticipatesInLayout(show);
-    }
+  using term_frame::escapeMarkup;
+  using term_frame::setShown;
+
+  // For changes that arrive outside the normal refresh (key presses, timers).
+  void requestQuickRefresh() {
+    PanelManager::instance().requestUpdateOnly();
+    PanelManager::instance().requestRedraw();
   }
 
   // A term_frame box whose title row is pinned to one grid row, so the heights above hold.
@@ -188,7 +208,8 @@ namespace {
   }
 
   // One fixed-height line holding a single ellipsised label.
-  std::unique_ptr<Flex> quickLabelRow(Label** out, ColorSpec color, float scale, FontWeight weight = FontWeight::Normal) {
+  std::unique_ptr<Flex>
+  quickLabelRow(Label** out, ColorSpec color, float scale, FontWeight weight = FontWeight::Normal) {
     return ui::row(
         {.align = FlexAlign::Center, .minHeight = kQuickRow * scale, .maxHeight = kQuickRow * scale, .fillWidth = true},
         ui::label({
@@ -204,91 +225,91 @@ namespace {
     );
   }
 
-  ColorRole toneRole(health::Level level) { return level == health::Level::Error ? ColorRole::Error : ColorRole::Warning; }
-
-  // Five cells, filled in proportion to `percent`; an abnormal battery fills in the warning or error tone.
-  std::string quickMeterMarkup(int percent, health::Level level) {
-    constexpr std::size_t kCells = 5;
-    const double fraction = std::clamp(static_cast<double>(percent) / 100.0, 0.0, 1.0);
-    if (level == health::Level::Ok) {
-      return term_frame::dottedMeterMarkup(kCells, fraction, true);
-    }
-    const std::size_t filled =
-        std::min(kCells, static_cast<std::size_t>(std::lround(fraction * static_cast<double>(kCells))));
-    std::string out;
-    if (filled > 0) {
-      out += "<span foreground=\"" + term_frame::paletteHex(toneRole(level)) + "\">";
-      for (std::size_t i = 0; i < filled; ++i) {
-        out += "■";
-      }
-      out += "</span>";
-    }
-    if (filled < kCells) {
-      out += "<span foreground=\"" + term_frame::paletteHex(ColorRole::Outline) + "\">";
-      for (std::size_t i = filled; i < kCells; ++i) {
-        out += "·";
-      }
-      out += "</span>";
-    }
-    return out;
+  // A dim line in a list (empty-state text).
+  void addQuickNote(Flex& list, const std::string& text, float scale) {
+    Label* label = nullptr;
+    auto line = quickLabelRow(&label, term_frame::dimColor(), scale);
+    label->setText(text);
+    list.addChild(std::move(line));
   }
 
-  // Warning at 20% or below, error at 10% or below, with hysteresis per device (system/health.h).
-  health::Level batteryLevel(const std::string& deviceKey, int percent) {
-    return health::battery(deviceKey, static_cast<double>(percent), false);
-  }
-
-  std::string quickBatteryMarkup(const std::string& deviceKey, int percent) {
-    const health::Level level = batteryLevel(deviceKey, percent);
-    char text[16];
-    std::snprintf(text, sizeof(text), level != health::Level::Ok ? " low %d%%" : " %3d%%", percent);
-    std::string out = quickMeterMarkup(percent, level);
-    if (level != health::Level::Ok) {
-      out += "<span foreground=\"" + term_frame::paletteHex(toneRole(level)) + "\">" + text + "</span>";
-    } else {
-      out += text;
+  // Pins a ²/³ box and its scroll list to `lines` rows plus `extra` px, so the panel height follows
+  // quickPanelHeight().
+  void pinQuickList(Flex* box, ScrollView* scroll, int lines, float extra, float scale) {
+    if (box == nullptr || scroll == nullptr) {
+      return;
     }
-    return out;
+    const float boxHeight = (quickListBoxHeight(lines) + extra) * scale;
+    box->setMinHeight(boxHeight);
+    box->setMaxHeight(boxHeight);
+    const float listHeight = (static_cast<float>(lines) * kQuickRow + extra) * scale;
+    scroll->setMinHeight(listHeight);
+    scroll->setMaxHeight(listHeight);
   }
 
-  std::string quickSignalMarkup(int percent) {
-    char text[8];
-    std::snprintf(text, sizeof(text), " %3d%%", percent);
-    return term_frame::dottedMeterMarkup(5, static_cast<double>(percent) / 100.0, true) + text;
-  }
-
-  // Ids of the selectable rows that are not devices.
-  const std::string kQuickPower = "power";
-  const std::string kQuickDiscoverable = "discoverable";
-  const std::string kQuickPair = "pair";
-  constexpr auto kQuickFailureTimeout = std::chrono::seconds(10);
-  // The selection marker and its padding, in monospace cells; every selectable row reserves it.
-  constexpr std::size_t kQuickGutterChars = 2;
-
-  std::string escapeMarkup(std::string_view text) {
-    std::string out;
-    out.reserve(text.size());
-    for (const char c : text) {
-      switch (c) {
-      case '&':
-        out += "&amp;";
-        break;
-      case '<':
-        out += "&lt;";
-        break;
-      case '>':
-        out += "&gt;";
-        break;
-      default:
-        out += c;
-        break;
-      }
+  // Shows a power / discoverable toggle row; true when its text or layout-affecting state changed.
+  bool applyToggleRow(
+      term_frame::ToggleRow& row, bool enabled, bool lit, std::string_view text,
+      const std::optional<std::string>& failure
+  ) {
+    const bool wasKnown = row.known;
+    const bool wasLit = row.lit;
+    const bool textChanged = row.state != nullptr && row.state->text() != text;
+    const std::string detail = failure.has_value() ? "failed: " + *failure : std::string{};
+    const bool detailChanged = row.detail != nullptr && row.detail->text() != detail;
+    term_frame::setToggleRow(row, enabled, lit, text, detail);
+    if (row.detail != nullptr) {
+      row.detail->setColor(failure.has_value() ? colorSpecFromRole(ColorRole::Error) : term_frame::dimColor());
     }
-    return out;
+    return textChanged || detailChanged || !wasKnown || wasLit != lit;
+  }
+
+  ColorRole toneRole(health::Level level) {
+    return level == health::Level::Error ? ColorRole::Error : ColorRole::Warning;
   }
 
   std::string spanMarkup(ColorRole role, std::string_view text) {
     return "<span foreground=\"" + term_frame::paletteHex(role) + "\">" + std::string(text) + "</span>";
+  }
+
+  std::string repeated(std::string_view glyph, std::size_t count) {
+    std::string out;
+    for (std::size_t i = 0; i < count; ++i) {
+      out += glyph;
+    }
+    return out;
+  }
+
+  // Cells filled in proportion to `percent`; an abnormal battery fills in the warning or error tone.
+  std::string quickMeterMarkup(int percent, health::Level level) {
+    const double fraction = std::clamp(static_cast<double>(percent) / 100.0, 0.0, 1.0);
+    if (level == health::Level::Ok) {
+      return term_frame::dottedMeterMarkup(kQuickMeterCells, fraction, true);
+    }
+    const std::size_t filled = std::min(
+        kQuickMeterCells, static_cast<std::size_t>(std::lround(fraction * static_cast<double>(kQuickMeterCells)))
+    );
+    std::string out;
+    if (filled > 0) {
+      out += spanMarkup(toneRole(level), repeated("■", filled));
+    }
+    if (filled < kQuickMeterCells) {
+      out += spanMarkup(ColorRole::Outline, repeated("·", kQuickMeterCells - filled));
+    }
+    return out;
+  }
+
+  std::string quickBatteryMarkup(const std::string& deviceKey, int percent) {
+    // Warning at 20% or below, error at 10% or below, with hysteresis per device (system/health.h).
+    const health::Level level = health::battery(deviceKey, static_cast<double>(percent), false);
+    const bool abnormal = level != health::Level::Ok;
+    const std::string text = abnormal ? std::format(" low {}%", percent) : std::format(" {:3}%", percent);
+    return quickMeterMarkup(percent, level) + (abnormal ? spanMarkup(toneRole(level), text) : text);
+  }
+
+  std::string quickSignalMarkup(int percent) {
+    return term_frame::dottedMeterMarkup(kQuickMeterCells, static_cast<double>(percent) / 100.0, true)
+        + std::format(" {:3}%", percent);
   }
 
   std::string upperAscii(std::string value) {
@@ -307,16 +328,28 @@ namespace {
       return fallback;
     }
     line = term_frame::lowerAscii(std::move(line));
-    if (line.size() > 40) {
-      line.resize(40);
+    if (line.size() > kFailureReasonChars) {
+      line.resize(kFailureReasonChars);
     }
     return line;
   }
 
   // Devices whose card exposes switchable profiles (a2dp / headset).
   bool isHeadphones(BluetoothDeviceKind kind) {
-    return kind == BluetoothDeviceKind::Headphones || kind == BluetoothDeviceKind::Headset
+    return kind == BluetoothDeviceKind::Headphones
+        || kind == BluetoothDeviceKind::Headset
         || kind == BluetoothDeviceKind::Earbuds;
+  }
+
+  // Paths of the connected headphones; a change means their pactl cards have to be read again.
+  std::string connectedHeadphonesKey(const std::vector<BluetoothDeviceInfo>& devices) {
+    std::string key;
+    for (const auto& device : devices) {
+      if (device.connected && isHeadphones(device.kind)) {
+        key += device.path + ';';
+      }
+    }
+    return key;
   }
 
   // "a2dp-sink" -> "a2dp", "headset-head-unit" -> "headset".
@@ -342,8 +375,65 @@ namespace {
   }
 
   bool pairingShowsCode(BluetoothPairingKind kind) {
-    return kind == BluetoothPairingKind::Confirm || kind == BluetoothPairingKind::DisplayPasskey
+    return kind == BluetoothPairingKind::Confirm
+        || kind == BluetoothPairingKind::DisplayPasskey
         || kind == BluetoothPairingKind::DisplayPinCode;
+  }
+
+  // The code a prompt shows: the PIN, or the six-digit passkey.
+  std::string pairingCodeText(const BluetoothPairingRequest& req) {
+    return req.kind == BluetoothPairingKind::DisplayPinCode ? req.pin : std::format("{:06}", req.passkey);
+  }
+
+  // A passkey is a decimal number that fits 32 bits; anything else cancels the pairing instead of sending a wrong code.
+  void submitPasskeyText(BluetoothAgent& agent, const std::string& text) {
+    std::optional<std::uint32_t> passkey;
+    try {
+      if (const unsigned long value = std::stoul(text); value <= std::numeric_limits<std::uint32_t>::max()) {
+        passkey = static_cast<std::uint32_t>(value);
+      }
+    } catch (const std::logic_error&) {
+      // std::invalid_argument / std::out_of_range: not a number.
+    }
+    if (!passkey.has_value()) {
+      agent.cancelPending();
+      return;
+    }
+    try {
+      agent.submitPasskey(*passkey);
+    } catch (const std::exception&) {
+      // A failed D-Bus reply (sdbus::Error) must not escape the key handler; the pairing is cancelled instead.
+      agent.cancelPending();
+    }
+  }
+
+  std::unique_ptr<Label> quickText(std::string value, ColorSpec color, FontWeight weight, bool grow, float font) {
+    return ui::label({
+        .text = std::move(value),
+        .fontSize = font,
+        .fontWeight = weight,
+        .fontFamily = std::string(term_frame::kFont),
+        .color = std::move(color),
+        .maxLines = 1,
+        .ellipsize = TextEllipsize::End,
+        .flexGrow = grow ? 1.0F : 0.0F,
+    });
+  }
+
+  // The text after the title of a pairing row: the code to compare, what to type, or what is being asked.
+  std::unique_ptr<Label> pairingDetailLabel(const BluetoothPairingRequest& req, float font) {
+    if (pairingShowsCode(req.kind)) {
+      return quickText(
+          "  code " + pairingCodeText(req), colorSpecFromRole(ColorRole::Primary), FontWeight::Bold, false, font
+      );
+    }
+    std::string hint = "  incoming";
+    if (pairingNeedsInput(req.kind)) {
+      hint = req.kind == BluetoothPairingKind::PinCode ? "  enter pin" : "  enter passkey";
+    } else if (req.kind == BluetoothPairingKind::AuthorizeService) {
+      hint = "  " + bluetoothServiceLabel(req.uuid);
+    }
+    return quickText(std::move(hint), term_frame::dimColor(), FontWeight::Normal, false, font);
   }
 } // namespace
 
@@ -841,10 +931,8 @@ void BluetoothTab::syncPairingCard() {
   if (m_pairingTitle != nullptr) {
     m_pairingTitle->setText(i18n::tr("control-center.bluetooth.pair-title", "device", alias));
   }
-  const bool needsInput = req.kind == BluetoothPairingKind::PinCode || req.kind == BluetoothPairingKind::Passkey;
-  const bool showsCode = req.kind == BluetoothPairingKind::Confirm
-      || req.kind == BluetoothPairingKind::DisplayPasskey
-      || req.kind == BluetoothPairingKind::DisplayPinCode;
+  const bool needsInput = pairingNeedsInput(req.kind);
+  const bool showsCode = pairingShowsCode(req.kind);
 
   if (m_pairingDetail != nullptr) {
     switch (req.kind) {
@@ -880,13 +968,7 @@ void BluetoothTab::syncPairingCard() {
   if (m_pairingCode != nullptr) {
     show(m_pairingCode, showsCode);
     if (showsCode) {
-      if (req.kind == BluetoothPairingKind::DisplayPinCode) {
-        m_pairingCode->setText(req.pin);
-      } else {
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "%06u", req.passkey);
-        m_pairingCode->setText(buf);
-      }
+      m_pairingCode->setText(pairingCodeText(req));
     }
   }
   if (m_pairingInputRow != nullptr) {
@@ -1193,11 +1275,7 @@ void BluetoothTab::submitPairingInput(const std::string& value) {
   if (req.kind == BluetoothPairingKind::PinCode) {
     m_agent->submitPin(value);
   } else if (req.kind == BluetoothPairingKind::Passkey) {
-    try {
-      m_agent->submitPasskey(static_cast<std::uint32_t>(std::stoul(value)));
-    } catch (...) {
-      m_agent->cancelPending();
-    }
+    submitPasskeyText(*m_agent, value);
   }
   PanelManager::instance().refresh();
 }
@@ -1221,11 +1299,7 @@ void BluetoothTab::acceptPairing() {
     break;
   case BluetoothPairingKind::Passkey:
     if (m_pairingInput != nullptr) {
-      try {
-        m_agent->submitPasskey(static_cast<std::uint32_t>(std::stoul(m_pairingInput->value())));
-      } catch (...) {
-        m_agent->cancelPending();
-      }
+      submitPasskeyText(*m_agent, m_pairingInput->value());
     }
     break;
   case BluetoothPairingKind::DisplayPasskey:
@@ -1318,8 +1392,7 @@ std::optional<std::string> BluetoothTab::quickFailure(const std::string& key) co
 
 void BluetoothTab::setLocalFailure(const std::string& key, std::string reason) {
   m_qLocalFailures[key] = BluetoothFailure{.reason = std::move(reason), .at = std::chrono::steady_clock::now()};
-  PanelManager::instance().requestUpdateOnly();
-  PanelManager::instance().requestRedraw();
+  requestQuickRefresh();
 }
 
 void BluetoothTab::clearQuickFailure(const std::string& key) {
@@ -1363,8 +1436,13 @@ BluetoothTab::QuickPlan BluetoothTab::quickPlan() const {
   plan.devLines = std::clamp(listed + (menuListed ? 1 : 0), 1, kQuickMaxDevLines);
   plan.availBox = powered && (discovering || avail > 0 || plan.pairing);
   plan.availLines = std::clamp(avail + (menuAvail ? 1 : 0) + (plan.pairing ? 1 : 0), 1, kQuickMaxAvailLines);
-  plan.key = std::to_string(plan.devLines) + ':' + (plan.availBox ? '1' : '0') + ':' + std::to_string(plan.availLines)
-      + ':' + (plan.pairingInput ? '1' : '0');
+  plan.key = std::to_string(plan.devLines)
+      + ':'
+      + (plan.availBox ? '1' : '0')
+      + ':'
+      + std::to_string(plan.availLines)
+      + ':'
+      + (plan.pairingInput ? '1' : '0');
   return plan;
 }
 
@@ -1374,14 +1452,13 @@ float BluetoothTab::quickPanelHeight(float width, float fallback) const {
     return fallback;
   }
   const QuickPlan plan = quickPlan();
-  float total = kQuickBoxInset + 3.0F * kQuickRow + 2.0F * Style::spaceXs; // adapter: title + two rows
-  int items = 2;                                                           // adapter + devices
-  total += quickListBoxHeight(plan.devLines);
+  float total = kQuickAdapterHeight + quickListBoxHeight(plan.devLines);
+  int boxes = 2; // adapter + devices
   if (plan.availBox) {
     total += quickListBoxHeight(plan.availLines) + (plan.pairingInput ? kQuickInputRow : 0.0F);
-    ++items;
+    ++boxes;
   }
-  return total + kQuickGap * static_cast<float>(items - 1);
+  return total + kQuickGap * static_cast<float>(boxes - 1);
 }
 
 std::string BluetoothTab::quickPanelHints() const {
@@ -1398,7 +1475,9 @@ std::string BluetoothTab::quickPanelHints() const {
   const char* enter = "connect";
   if (m_qSelected == kQuickPower || m_qSelected == kQuickDiscoverable) {
     enter = "toggle";
-  } else if (const auto device = findDevice(m_qSelected); device.has_value() && bucketFor(*device) == DeviceBucket::Available) {
+  } else if (
+      const auto device = findDevice(m_qSelected); device.has_value() && bucketFor(*device) == DeviceBucket::Available
+  ) {
     enter = "pair";
   }
   return std::string("↑↓ select  ⏎ ") + enter + "  a actions  r scan";
@@ -1426,8 +1505,8 @@ void BluetoothTab::resetQuick() {
   m_qArmed = nullptr;
   m_qPower = term_frame::ToggleRow{};
   m_qDiscoverable = term_frame::ToggleRow{};
-  m_qPairKeys = std::array<term_frame::Keyword, 3>{};
-  m_qMenuKeys = std::array<term_frame::Keyword, 4>{};
+  m_qPairKeys = {};
+  m_qMenuKeys = {};
   m_qPowerGutter = nullptr;
   m_qDiscoverableGutter = nullptr;
   m_qPairGutter = nullptr;
@@ -1488,10 +1567,11 @@ std::unique_ptr<Flex> BluetoothTab::createQuick() {
     const auto addToggle = [&](Label** gutterOut, std::string id, std::string name, term_frame::ToggleRow& row,
                                std::function<void()> action) {
       auto line = makeQuickLine(scale, gutterOut);
-      auto button = term_frame::toggleRow(std::move(name), scale, row, [this, id = std::move(id), action = std::move(action)]() {
-        quickSelectId(id);
-        action();
-      });
+      auto button =
+          term_frame::toggleRow(std::move(name), scale, row, [this, id = std::move(id), action = std::move(action)]() {
+            quickSelectId(id);
+            action();
+          });
       button->setFlexGrow(1.0F);
       line->addChild(std::move(button));
       box->addChild(std::move(line));
@@ -1659,8 +1739,7 @@ void BluetoothTab::quickSelectId(const std::string& id) {
     m_qMenuFor.clear();
   }
   m_qScrollToSelected = true;
-  PanelManager::instance().requestUpdateOnly();
-  PanelManager::instance().requestRedraw();
+  requestQuickRefresh();
 }
 
 void BluetoothTab::quickSelect(int delta) {
@@ -1688,11 +1767,9 @@ void BluetoothTab::quickPressConfirmed(term_frame::Keyword& keyword, const std::
     term_frame::refreshKeyword(keyword);
     m_qArmTimer.start(kQuickArmTimeout, [this]() {
       quickClearArmed();
-      PanelManager::instance().requestUpdateOnly();
-      PanelManager::instance().requestRedraw();
+      requestQuickRefresh();
     });
-    PanelManager::instance().requestUpdateOnly();
-    PanelManager::instance().requestRedraw();
+    requestQuickRefresh();
     return;
   }
   m_qArmTimer.stop();
@@ -1726,6 +1803,46 @@ bool BluetoothTab::quickPressMenuKey(std::uint32_t sym) {
   return false;
 }
 
+// `r`: scan for devices, or say why that is not possible.
+void BluetoothTab::quickRescan() {
+  const bool ready = m_service != nullptr && m_service->state().adapterPresent && m_service->state().powered;
+  if (!ready) {
+    setLocalFailure("adapter", "bluetooth is off");
+    return;
+  }
+  clearQuickFailure("adapter");
+  requestScan();
+  PanelManager::instance().refresh();
+}
+
+// Keys while a pairing prompt is up: it owns the keyboard, except that a code field takes every key itself.
+bool BluetoothTab::handlePairingKey(const BluetoothPairingRequest& req, std::uint32_t sym) {
+  if (pairingNeedsInput(req.kind)) {
+    return false;
+  }
+  switch (sym) {
+  case XKB_KEY_a:
+  case XKB_KEY_Return:
+  case XKB_KEY_KP_Enter:
+    if (req.kind == BluetoothPairingKind::DisplayPasskey) {
+      return false;
+    }
+    acceptPairing();
+    return true;
+  case XKB_KEY_t:
+    if (req.kind != BluetoothPairingKind::AuthorizeService) {
+      return false;
+    }
+    trustAndAllowPairing();
+    return true;
+  case XKB_KEY_r:
+    rejectPairing();
+    return true;
+  default:
+    return false;
+  }
+}
+
 bool BluetoothTab::handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) {
   if (!m_quick || !pressed || preedit || modifiers != 0) {
     return false;
@@ -1735,32 +1852,7 @@ bool BluetoothTab::handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifier
     return false;
   }
   if (m_agent != nullptr && m_agent->hasPendingRequest()) {
-    // A pairing prompt owns the keyboard.
-    const auto req = m_agent->pendingRequest();
-    if (pairingNeedsInput(req.kind)) {
-      return false;
-    }
-    switch (sym) {
-    case XKB_KEY_a:
-    case XKB_KEY_Return:
-    case XKB_KEY_KP_Enter:
-      if (req.kind == BluetoothPairingKind::DisplayPasskey) {
-        return false;
-      }
-      acceptPairing();
-      return true;
-    case XKB_KEY_t:
-      if (req.kind != BluetoothPairingKind::AuthorizeService) {
-        return false;
-      }
-      trustAndAllowPairing();
-      return true;
-    case XKB_KEY_r:
-      rejectPairing();
-      return true;
-    default:
-      return false;
-    }
+    return handlePairingKey(m_agent->pendingRequest(), sym);
   }
 
   switch (sym) {
@@ -1782,17 +1874,9 @@ bool BluetoothTab::handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifier
   case XKB_KEY_a:
     quickToggleMenu();
     return true;
-  case XKB_KEY_r: {
-    const bool ready = m_service != nullptr && m_service->state().adapterPresent && m_service->state().powered;
-    if (ready) {
-      clearQuickFailure("adapter");
-      requestScan();
-      PanelManager::instance().refresh();
-    } else {
-      setLocalFailure("adapter", "bluetooth is off");
-    }
+  case XKB_KEY_r:
+    quickRescan();
     return true;
-  }
   default:
     return quickPressMenuKey(sym);
   }
@@ -1815,20 +1899,22 @@ std::unique_ptr<Flex> BluetoothTab::buildQuickMenu(const BluetoothDeviceInfo& de
       .fillWidth = true,
   });
 
-  m_qMenuKeys = std::array<term_frame::Keyword, 4>{};
+  m_qMenuKeys = {};
   const std::string primary = connected ? "disconnect" : (bucket == DeviceBucket::Paired ? "connect" : "pair");
   row->addChild(term_frame::makeKeyword(m_qMenuKeys[0], primary, 0, scale, [this, path]() { quickActivate(path); }));
 
   if (device.paired) {
     // State-aware mnemonic: the action reads `untrust` once trusted; the `t` stays the hot letter for both.
     const bool untrust = device.trusted;
-    row->addChild(term_frame::makeKeyword(m_qMenuKeys[1], untrust ? "untrust" : "trust", untrust ? 2 : 0, scale, [this, path]() {
-      quickToggleTrust(path);
-    }));
+    row->addChild(
+        term_frame::makeKeyword(m_qMenuKeys[1], untrust ? "untrust" : "trust", untrust ? 2 : 0, scale, [this, path]() {
+          quickToggleTrust(path);
+        })
+    );
     if (profiles != nullptr && profiles->profiles.size() > 1) {
-      row->addChild(
-          term_frame::makeKeyword(m_qMenuKeys[2], "profile", 0, scale, [this, path]() { quickCycleProfile(path); })
-      );
+      row->addChild(term_frame::makeKeyword(m_qMenuKeys[2], "profile", 0, scale, [this, path]() {
+        quickCycleProfile(path);
+      }));
     }
     // Destructive: only here, and only after a second press.
     row->addChild(term_frame::makeKeyword(m_qMenuKeys[3], "forget", 3, scale, [this, path]() {
@@ -1871,51 +1957,23 @@ void BluetoothTab::buildQuickPairRow(Flex& list, float scale) {
   }
   const float font = term_frame::kBtopFontSize * scale;
 
-  const auto text = [font](std::string value, ColorSpec color, FontWeight weight, bool grow) {
-    return ui::label({
-        .text = std::move(value),
-        .fontSize = font,
-        .fontWeight = weight,
-        .fontFamily = std::string(term_frame::kFont),
-        .color = std::move(color),
-        .maxLines = 1,
-        .ellipsize = TextEllipsize::End,
-        .flexGrow = grow ? 1.0F : 0.0F,
-    });
-  };
-
   Flex* node = nullptr;
   auto row = makeQuickLine(scale, &m_qPairGutter, &node);
   m_qPairNode = node;
-  row->addChild(text("pair " + alias, colorSpecFromRole(ColorRole::OnSurface), FontWeight::Bold, true));
+  row->addChild(quickText("pair " + alias, colorSpecFromRole(ColorRole::OnSurface), FontWeight::Bold, true, font));
+  row->addChild(pairingDetailLabel(req, font));
 
+  m_qPairKeys = {};
   const bool needsInput = pairingNeedsInput(req.kind);
-  if (pairingShowsCode(req.kind)) {
-    char code[16];
-    std::snprintf(code, sizeof(code), "%06u", req.passkey);
-    const std::string shown = req.kind == BluetoothPairingKind::DisplayPinCode ? req.pin : std::string(code);
-    row->addChild(text("  code " + shown, colorSpecFromRole(ColorRole::Primary), FontWeight::Bold, false));
-  } else if (needsInput) {
-    row->addChild(text(
-        req.kind == BluetoothPairingKind::PinCode ? "  enter pin" : "  enter passkey", term_frame::dimColor(),
-        FontWeight::Normal, false
-    ));
-  } else if (req.kind == BluetoothPairingKind::AuthorizeService) {
-    row->addChild(text("  " + bluetoothServiceLabel(req.uuid), term_frame::dimColor(), FontWeight::Normal, false));
-  } else {
-    row->addChild(text("  incoming", term_frame::dimColor(), FontWeight::Normal, false));
-  }
-
-  m_qPairKeys = std::array<term_frame::Keyword, 3>{};
   const bool canAccept = !needsInput && req.kind != BluetoothPairingKind::DisplayPasskey;
   if (canAccept) {
     row->addChild(term_frame::makeKeyword(m_qPairKeys[0], "accept", 0, scale, [this]() { acceptPairing(); }));
     if (req.kind == BluetoothPairingKind::AuthorizeService) {
-      row->addChild(
-          term_frame::makeKeyword(m_qPairKeys[1], "trust+allow", 0, scale, [this]() { trustAndAllowPairing(); })
-      );
+      row->addChild(term_frame::makeKeyword(m_qPairKeys[1], "trust+allow", 0, scale, [this]() {
+        trustAndAllowPairing();
+      }));
     }
-    row->addChild(text("/", term_frame::dimColor(), FontWeight::Normal, false));
+    row->addChild(quickText("/", term_frame::dimColor(), FontWeight::Normal, false, font));
   }
   row->addChild(term_frame::makeKeyword(m_qPairKeys[2], "reject", 0, scale, [this]() { rejectPairing(); }));
   list.addChild(std::move(row));
@@ -1975,6 +2033,68 @@ void BluetoothTab::buildQuickRows(Flex& list, const std::vector<BluetoothDeviceI
   }
 }
 
+// Identity of the built lists; they are rebuilt exactly when it changes.
+std::string BluetoothTab::quickListKey(const std::vector<BluetoothDeviceInfo>& devices, float listWidth) const {
+  std::string key = structureKey(devices);
+  key += '|';
+  key += m_qMenuFor;
+  key += '|';
+  key += std::to_string(m_qProfilesRev);
+  key += '|';
+  if (m_agent != nullptr && m_agent->hasPendingRequest()) {
+    const auto req = m_agent->pendingRequest();
+    key += std::to_string(static_cast<int>(req.kind))
+        + '/'
+        + req.devicePath
+        + '/'
+        + std::to_string(req.passkey)
+        + '/'
+        + req.pin
+        + '/'
+        + req.uuid;
+  }
+  key += '|';
+  key += std::to_string(listWidth);
+  return key;
+}
+
+// Fills the emptied ²/³ lists from the service state; true when a pairing prompt took a row of ³available.
+bool BluetoothTab::fillQuickLists(const std::vector<BluetoothDeviceInfo>& devices, float scale) {
+  if (m_service == nullptr) {
+    addQuickNote(*m_qDevList, "bluetooth service unavailable", scale);
+    return false;
+  }
+  const BluetoothState& s = m_service->state();
+  if (!s.adapterPresent) {
+    addQuickNote(*m_qDevList, "no bluetooth adapter", scale);
+    return false;
+  }
+  if (!s.powered) {
+    addQuickNote(*m_qDevList, s.rfkillSoftBlocked ? "blocked by rfkill" : "off   enable bluetooth above", scale);
+    return false;
+  }
+  std::vector<BluetoothDeviceInfo> listed;
+  std::vector<BluetoothDeviceInfo> available;
+  for (const auto& device : devices) {
+    (bucketFor(device) == DeviceBucket::Available ? available : listed).push_back(device);
+  }
+  if (listed.empty()) {
+    addQuickNote(*m_qDevList, "no paired devices   r to scan", scale);
+  } else {
+    buildQuickRows(*m_qDevList, listed, scale);
+  }
+  const bool pairing = m_agent != nullptr && m_agent->hasPendingRequest();
+  if (pairing) {
+    buildQuickPairRow(*m_qAvailList, scale);
+  }
+  if (!available.empty()) {
+    buildQuickRows(*m_qAvailList, available, scale);
+  } else if (!pairing) {
+    addQuickNote(*m_qAvailList, "scanning...", scale);
+  }
+  return pairing;
+}
+
 void BluetoothTab::rebuildQuickLists(Renderer& renderer) {
   uiAssertNotRendering("BluetoothTab::rebuildQuickLists");
   if (m_qDevList == nullptr || m_qAvailList == nullptr || m_qDevScroll == nullptr || m_qAvailScroll == nullptr) {
@@ -1988,21 +2108,7 @@ void BluetoothTab::rebuildQuickLists(Renderer& renderer) {
   if (m_service != nullptr) {
     devices = sortedDevices(m_service->devices());
   }
-  std::string pairSignature;
-  if (m_agent != nullptr && m_agent->hasPendingRequest()) {
-    const auto req = m_agent->pendingRequest();
-    pairSignature = std::to_string(static_cast<int>(req.kind)) + '/' + req.devicePath + '/'
-        + std::to_string(req.passkey) + '/' + req.pin + '/' + req.uuid;
-  }
-  std::string key = structureKey(devices);
-  key += '|';
-  key += m_qMenuFor;
-  key += '|';
-  key += std::to_string(m_qProfilesRev);
-  key += '|';
-  key += pairSignature;
-  key += '|';
-  key += std::to_string(listWidth);
+  std::string key = quickListKey(devices, listWidth);
   if (key == m_qListKey) {
     return;
   }
@@ -2020,8 +2126,8 @@ void BluetoothTab::rebuildQuickLists(Renderer& renderer) {
   m_pairingInput = nullptr;
   m_qPairGutter = nullptr;
   m_qPairNode = nullptr;
-  m_qPairKeys = std::array<term_frame::Keyword, 3>{};
-  m_qMenuKeys = std::array<term_frame::Keyword, 4>{};
+  m_qPairKeys = {};
+  m_qMenuKeys = {};
   m_qRows.clear();
   m_qOrder = {kQuickPower, kQuickDiscoverable};
   for (Flex* list : {m_qDevList, m_qAvailList}) {
@@ -2030,45 +2136,7 @@ void BluetoothTab::rebuildQuickLists(Renderer& renderer) {
     }
   }
 
-  const auto note = [scale](Flex& list, const std::string& text) {
-    Label* label = nullptr;
-    auto line = quickLabelRow(&label, term_frame::dimColor(), scale);
-    label->setText(text);
-    list.addChild(std::move(line));
-  };
-
-  const BluetoothState none;
-  const BluetoothState& s = m_service != nullptr ? m_service->state() : none;
-  bool pairing = false;
-  if (m_service == nullptr) {
-    note(*m_qDevList, "bluetooth service unavailable");
-  } else if (!s.adapterPresent) {
-    note(*m_qDevList, "no bluetooth adapter");
-  } else if (!s.powered) {
-    note(*m_qDevList, s.rfkillSoftBlocked ? "blocked by rfkill" : "off   enable bluetooth above");
-  } else {
-    std::vector<BluetoothDeviceInfo> listed;
-    std::vector<BluetoothDeviceInfo> available;
-    for (const auto& device : devices) {
-      (bucketFor(device) == DeviceBucket::Available ? available : listed).push_back(device);
-    }
-    if (listed.empty()) {
-      note(*m_qDevList, "no paired devices   r to scan");
-    } else {
-      buildQuickRows(*m_qDevList, listed, scale);
-    }
-    pairing = m_agent != nullptr && m_agent->hasPendingRequest();
-    if (pairing) {
-      buildQuickPairRow(*m_qAvailList, scale);
-    }
-    if (available.empty()) {
-      if (!pairing) {
-        note(*m_qAvailList, "scanning...");
-      }
-    } else {
-      buildQuickRows(*m_qAvailList, available, scale);
-    }
-  }
+  const bool pairing = fillQuickLists(devices, scale);
 
   if (!m_qMenuFor.empty() && !m_qRows.contains(m_qMenuFor)) {
     m_qMenuFor.clear();
@@ -2077,7 +2145,7 @@ void BluetoothTab::rebuildQuickLists(Renderer& renderer) {
   if (pairing && m_qPairNode != nullptr) {
     m_qSelected = kQuickPair;
   } else if (std::ranges::find(m_qOrder, m_qSelected) == m_qOrder.end()) {
-    m_qSelected = m_qOrder.size() > 2 ? m_qOrder[2] : m_qOrder.front();
+    m_qSelected = m_qOrder.size() > kQuickAdapterRows ? m_qOrder[kQuickAdapterRows] : m_qOrder.front();
   }
 
   if (m_pairingInput != nullptr) {
@@ -2109,6 +2177,33 @@ void BluetoothTab::syncQuickGutters() {
   }
 }
 
+// Dim detail at the end of a row; progress and failures show here, so the name keeps the width.
+std::string BluetoothTab::quickDetail(const BluetoothDeviceInfo& device) const {
+  const auto bucket = bucketFor(device);
+  if (device.connecting) {
+    return bucket == DeviceBucket::Available ? "pairing…" : "connecting…";
+  }
+  if (const auto failure = quickFailure(device.path); failure.has_value()) {
+    return spanMarkup(ColorRole::Error, "failed: " + escapeMarkup(*failure));
+  }
+  if (bucket == DeviceBucket::Available) {
+    return device.hasRssi ? quickSignalMarkup(signalPercentFromRssi(device.rssi)) : std::string{};
+  }
+  std::string detail;
+  if (isHeadphones(device.kind) && bucket == DeviceBucket::Connected) {
+    if (const QuickProfiles* profiles = quickProfilesFor(device); profiles != nullptr && !profiles->active.empty()) {
+      detail = escapeMarkup(profileShort(profiles->active));
+    }
+  }
+  if (device.hasBattery) {
+    if (!detail.empty()) {
+      detail += "  ";
+    }
+    detail += quickBatteryMarkup(device.address, static_cast<int>(device.batteryPercent));
+  }
+  return detail;
+}
+
 bool BluetoothTab::syncQuickRows() {
   if (m_service == nullptr || m_qRows.empty()) {
     return false;
@@ -2123,7 +2218,6 @@ bool BluetoothTab::syncQuickRows() {
     if (quickRow.row.button == nullptr || quickRow.row.state == nullptr) {
       continue;
     }
-    const auto bucket = bucketFor(device);
 
     std::string name = deviceNameMarkup(device);
     if (quickRow.name != name) {
@@ -2132,29 +2226,7 @@ bool BluetoothTab::syncQuickRows() {
       changed = true;
     }
 
-    // Dim detail at the end of the row; progress and failures show here, so the name keeps the width.
-    std::string detail;
-    if (device.connecting) {
-      detail = bucket == DeviceBucket::Available ? "pairing…" : "connecting…";
-    } else if (const auto failure = quickFailure(device.path); failure.has_value()) {
-      detail = spanMarkup(ColorRole::Error, "failed: " + escapeMarkup(*failure));
-    } else if (bucket == DeviceBucket::Available) {
-      if (device.hasRssi) {
-        detail = quickSignalMarkup(signalPercentFromRssi(device.rssi));
-      }
-    } else {
-      if (isHeadphones(device.kind) && bucket == DeviceBucket::Connected) {
-        if (const QuickProfiles* profiles = quickProfilesFor(device); profiles != nullptr && !profiles->active.empty()) {
-          detail = escapeMarkup(profileShort(profiles->active));
-        }
-      }
-      if (device.hasBattery) {
-        if (!detail.empty()) {
-          detail += "  ";
-        }
-        detail += quickBatteryMarkup(device.address, static_cast<int>(device.batteryPercent));
-      }
-    }
+    const std::string detail = quickDetail(device);
     if (quickRow.detail != detail) {
       changed = true;
       quickRow.detail = detail;
@@ -2163,6 +2235,30 @@ bool BluetoothTab::syncQuickRows() {
     setShown(quickRow.row.stateBox, false);
   }
   return changed;
+}
+
+void BluetoothTab::scrollSelectedIntoView() {
+  Flex* node = nullptr;
+  ScrollView* scroll = nullptr;
+  if (m_qSelected == kQuickPair) {
+    node = m_qPairNode;
+    scroll = m_qAvailScroll;
+  } else if (const auto it = m_qRows.find(m_qSelected); it != m_qRows.end()) {
+    node = it->second.node;
+    scroll = it->second.avail ? m_qAvailScroll : m_qDevScroll;
+  }
+  if (node != nullptr && scroll != nullptr) {
+    scroll->requestScrollIntoView(node);
+  }
+}
+
+// Failures clear themselves after kQuickFailureTimeout: update on a timer while one is on screen.
+void BluetoothTab::pollQuickFailures(bool adapterFailing) {
+  const bool anyFailure = adapterFailing
+      || std::ranges::any_of(m_qRows, [this](const auto& entry) { return quickFailure(entry.first).has_value(); });
+  if (anyFailure && !m_qFailTimer.active()) {
+    m_qFailTimer.start(kQuickFailurePoll, []() { requestQuickRefresh(); });
+  }
 }
 
 void BluetoothTab::syncQuick(Renderer& renderer, bool force) {
@@ -2174,54 +2270,28 @@ void BluetoothTab::syncQuick(Renderer& renderer, bool force) {
     m_qListKey.clear();
   }
 
-  const float scale = contentScale();
   const QuickPlan plan = quickPlan();
   const BluetoothState none;
   const BluetoothState& s = m_service != nullptr ? m_service->state() : none;
-  bool relayout = false;
 
-  // Plan details (cards of the connected headphones) follow the connected set.
-  {
-    std::string connected;
-    if (m_service != nullptr) {
-      for (const auto& d : m_service->devices()) {
-        if (d.connected && isHeadphones(d.kind)) {
-          connected += d.path + ';';
-        }
-      }
-    }
-    if (connected != m_qConnectedKey) {
-      m_qConnectedKey = std::move(connected);
-      if (!m_qConnectedKey.empty()) {
-        refreshProfiles();
-      }
+  // The cards of the connected headphones follow the connected set.
+  std::string connected = m_service != nullptr ? connectedHeadphonesKey(m_service->devices()) : std::string{};
+  if (connected != m_qConnectedKey) {
+    m_qConnectedKey = std::move(connected);
+    if (!m_qConnectedKey.empty()) {
+      refreshProfiles();
     }
   }
 
-  const auto applyToggle = [&relayout](
-                               term_frame::ToggleRow& row, bool enabled, bool lit, std::string_view text,
-                               const std::optional<std::string>& failure
-                           ) {
-    const bool wasKnown = row.known;
-    const bool wasLit = row.lit;
-    const bool textChanged = row.state != nullptr && row.state->text() != text;
-    const std::string detail = failure.has_value() ? "failed: " + *failure : std::string{};
-    const bool detailChanged = row.detail != nullptr && row.detail->text() != detail;
-    term_frame::setToggleRow(row, enabled, lit, text, detail);
-    if (row.detail != nullptr) {
-      row.detail->setColor(failure.has_value() ? colorSpecFromRole(ColorRole::Error) : term_frame::dimColor());
-    }
-    if (textChanged || detailChanged || !wasKnown || wasLit != lit) {
-      relayout = true;
-    }
-  };
   const auto powerFailure = quickFailure("adapter");
   const auto discoverableFailure = quickFailure("adapter.discoverable");
-  applyToggle(m_qPower, s.adapterPresent, s.powered, s.powered ? "on" : "off", powerFailure);
-  applyToggle(
+  const bool powerChanged =
+      applyToggleRow(m_qPower, s.adapterPresent, s.powered, s.powered ? "on" : "off", powerFailure);
+  const bool discoverableChanged = applyToggleRow(
       m_qDiscoverable, s.adapterPresent && s.powered, s.discoverable && s.powered, s.discoverable ? "on" : "off",
       discoverableFailure
   );
+  bool relayout = powerChanged || discoverableChanged;
   if (m_qAvailChip != nullptr) {
     term_frame::setChip(*m_qAvailChip, s.adapterPresent && s.powered && s.discovering ? "scanning" : "");
   }
@@ -2229,27 +2299,16 @@ void BluetoothTab::syncQuick(Renderer& renderer, bool force) {
   // Shape: which boxes exist and how tall their lists are. Pinned so the panel height follows quickPanelHeight().
   if (plan.key != m_qPlanKey) {
     m_qPlanKey = plan.key;
-    const auto pin = [scale](Flex* box, ScrollView* scroll, int lines, float extra) {
-      if (box == nullptr || scroll == nullptr) {
-        return;
-      }
-      const float boxHeight = (quickListBoxHeight(lines) + extra) * scale;
-      box->setMinHeight(boxHeight);
-      box->setMaxHeight(boxHeight);
-      const float listHeight = (static_cast<float>(lines) * kQuickRow + extra) * scale;
-      scroll->setMinHeight(listHeight);
-      scroll->setMaxHeight(listHeight);
-    };
-    pin(m_qDevBox, m_qDevScroll, plan.devLines, 0.0F);
+    const float scale = contentScale();
+    pinQuickList(m_qDevBox, m_qDevScroll, plan.devLines, 0.0F, scale);
     setShown(m_qAvailBox, plan.availBox);
     if (plan.availBox) {
-      pin(m_qAvailBox, m_qAvailScroll, plan.availLines, plan.pairingInput ? kQuickInputRow : 0.0F);
+      pinQuickList(m_qAvailBox, m_qAvailScroll, plan.availLines, plan.pairingInput ? kQuickInputRow : 0.0F, scale);
     }
     relayout = true;
   }
   if (relayout) {
     m_rootLayout->layout(renderer);
-    relayout = false;
   }
 
   rebuildQuickLists(renderer);
@@ -2265,31 +2324,9 @@ void BluetoothTab::syncQuick(Renderer& renderer, bool force) {
 
   if (m_qScrollToSelected) {
     m_qScrollToSelected = false;
-    Flex* node = nullptr;
-    ScrollView* scroll = nullptr;
-    if (m_qSelected == kQuickPair) {
-      node = m_qPairNode;
-      scroll = m_qAvailScroll;
-    } else if (const auto it = m_qRows.find(m_qSelected); it != m_qRows.end()) {
-      node = it->second.node;
-      scroll = it->second.avail ? m_qAvailScroll : m_qDevScroll;
-    }
-    if (node != nullptr && scroll != nullptr) {
-      scroll->requestScrollIntoView(node);
-    }
+    scrollSelectedIntoView();
   }
-
-  // Failures clear themselves after kQuickFailureTimeout: poll once a second while one is on screen.
-  bool anyFailure = powerFailure.has_value() || discoverableFailure.has_value();
-  for (const auto& [path, quickRow] : m_qRows) {
-    anyFailure = anyFailure || quickFailure(path).has_value();
-  }
-  if (anyFailure && !m_qFailTimer.active()) {
-    m_qFailTimer.start(std::chrono::seconds(1), []() {
-      PanelManager::instance().requestUpdateOnly();
-      PanelManager::instance().requestRedraw();
-    });
-  }
+  pollQuickFailures(powerFailure.has_value() || discoverableFailure.has_value());
 
   // A code prompt takes the keyboard as soon as it appears.
   if (plan.pairingInput && !m_qHadInput) {
@@ -2317,8 +2354,7 @@ void BluetoothTab::refreshProfiles() {
   }
   m_qProfilesBusy = true;
   asynccmd::run(
-      {"pactl", "-f", "json", "list", "cards"}, std::chrono::milliseconds(3000), m_alive,
-      [this](process::RunResult result) {
+      {"pactl", "-f", "json", "list", "cards"}, kPactlListTimeout, m_alive, [this](process::RunResult result) {
         m_qProfilesBusy = false;
         if (result) {
           applyProfiles(result.out);
@@ -2327,13 +2363,16 @@ void BluetoothTab::refreshProfiles() {
   );
 }
 
-void BluetoothTab::applyProfiles(const std::string& json) {
+// Selectable profiles per upper-case address of every bluez card in `pactl -f json list cards`; nullopt when the
+// output is not a JSON array.
+std::optional<std::unordered_map<std::string, BluetoothTab::QuickProfiles>>
+BluetoothTab::parseProfiles(const std::string& json) {
   const auto doc = nlohmann::json::parse(json, nullptr, false);
   if (!doc.is_array()) {
-    return;
+    return std::nullopt;
   }
   constexpr std::string_view kCardPrefix = "bluez_card.";
-  std::unordered_map<std::string, QuickProfiles> next;
+  std::unordered_map<std::string, QuickProfiles> byAddress;
   for (const auto& card : doc) {
     if (!card.is_object()) {
       continue;
@@ -2366,13 +2405,17 @@ void BluetoothTab::applyProfiles(const std::string& json) {
         profiles.profiles.push_back(item.key());
       }
     }
-    next[upperAscii(address)] = std::move(profiles);
+    byAddress[upperAscii(address)] = std::move(profiles);
   }
-  if (next != m_qProfiles) {
-    m_qProfiles = std::move(next);
+  return byAddress;
+}
+
+void BluetoothTab::applyProfiles(const std::string& json) {
+  auto next = parseProfiles(json);
+  if (next && *next != m_qProfiles) {
+    m_qProfiles = std::move(*next);
     ++m_qProfilesRev;
-    PanelManager::instance().requestUpdateOnly();
-    PanelManager::instance().requestRedraw();
+    requestQuickRefresh();
   }
 }
 
@@ -2389,13 +2432,14 @@ void BluetoothTab::quickCycleProfile(const std::string& path) {
     return;
   }
   const auto current = std::ranges::find(profiles->profiles, profiles->active);
-  const std::size_t next =
-      current == profiles->profiles.end() ? 0 : static_cast<std::size_t>(current - profiles->profiles.begin() + 1) % profiles->profiles.size();
+  const std::size_t next = current == profiles->profiles.end()
+      ? 0
+      : static_cast<std::size_t>(current - profiles->profiles.begin() + 1) % profiles->profiles.size();
   const std::string card = profiles->card;
   const std::string profile = profiles->profiles[next];
 
   asynccmd::run(
-      {"pactl", "set-card-profile", card, profile}, std::chrono::milliseconds(5000), m_alive,
+      {"pactl", "set-card-profile", card, profile}, kPactlSwitchTimeout, m_alive,
       [this, path](process::RunResult result) {
         if (result) {
           refreshProfiles();

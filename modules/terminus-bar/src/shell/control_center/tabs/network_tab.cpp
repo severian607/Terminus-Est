@@ -1,6 +1,7 @@
 #include "shell/control_center/tabs/network_tab.h"
 
 #include "core/process/process.h"
+#include "core/text_clipboard.h"
 #include "core/ui_phase.h"
 #include "dbus/modem/modem_manager_service.h"
 #include "dbus/network/external_ip_service.h"
@@ -13,37 +14,34 @@
 #include "shell/control_center/tabs/async_command.h"
 #include "shell/control_center/term_frame.h"
 #include "shell/panel/panel_manager.h"
-#include "ui/builders.h"
-#include "ui/palette.h"
-#include "ui/style.h"
-#include "core/text_clipboard.h"
 #include "system/system_monitor_service.h"
+#include "ui/builders.h"
 #include "ui/controls/box.h"
 #include "ui/controls/graph.h"
+#include "ui/palette.h"
+#include "ui/style.h"
 
 #include <algorithm>
+#include <arpa/inet.h>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <chrono>
 #include <cstddef>
-#include <memory>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
-#include <xkbcommon/xkbcommon-keysyms.h>
-
-#include <arpa/inet.h>
-#include <ifaddrs.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-
-#include <bit>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <ifaddrs.h>
+#include <memory>
+#include <netinet/in.h>
 #include <sstream>
+#include <string>
+#include <string_view>
+#include <sys/socket.h>
+#include <utility>
+#include <vector>
+#include <xkbcommon/xkbcommon-keysyms.h>
 
 using namespace control_center;
 
@@ -708,7 +706,6 @@ std::unique_ptr<Flex> NetworkTab::create() {
 
   tab->addChild(std::move(currentCard));
 
-
   auto listScroll = ui::scrollView({
       .out = &m_listScroll,
       .contentScale = contentScale(),
@@ -739,21 +736,23 @@ std::unique_ptr<Flex> NetworkTab::create() {
   tab->addChild(std::move(listScroll));
 
   // NetworkManager's own editor covers what this tab does not: static addresses, DNS, proxies, profiles.
-  tab->addChild(term_frame::tile(
-      {
-          .glyph = "settings",
-          .glyphSize = Style::baseGlyphSize * scale,
-          .label = "edit connections",
-          .tooltip = "nmtui",
-          .onClick =
-              []() {
-                if (process::runAsync({"uwsm-app", "--", "ghostty", "-e", "nmtui"})) {
-                  PanelManager::instance().close();
-                }
-              },
-      },
-      scale
-  ));
+  tab->addChild(
+      term_frame::tile(
+          {
+              .glyph = "settings",
+              .glyphSize = Style::baseGlyphSize * scale,
+              .label = "edit connections",
+              .tooltip = "nmtui",
+              .onClick =
+                  []() {
+                    if (process::runAsync({"uwsm-app", "--", "ghostty", "-e", "nmtui"})) {
+                      PanelManager::instance().close();
+                    }
+                  },
+          },
+          scale
+      )
+  );
   return tab;
 }
 
@@ -1552,40 +1551,47 @@ void NetworkTab::onPanelCardOpacityChanged(float opacity) {
   }
 }
 
-std::unique_ptr<Flex> NetworkTab::buildPasswordCard(float scale) {
-  auto passwordCard = ui::column({
-      .out = &m_passwordCard,
-      .visible = false,
-      .configure = [scale, opacity = panelCardOpacity()](Flex& card) {
-        applySectionCardStyle(card, scale, opacity);
-        card.setGap(Style::spaceMd * scale);
-      },
-  });
-
-  passwordCard->addChild(
-      ui::label({
-          .out = &m_passwordTitle,
-          .fontSize = Style::fontSizeBody * scale,
-          .fontWeight = FontWeight::Bold,
-          .color = colorSpecFromRole(ColorRole::OnSurface),
+std::unique_ptr<Flex> NetworkTab::buildEapRow(float scale) {
+  return ui::row(
+      {.align = FlexAlign::Center, .gap = Style::spaceSm * scale},
+      ui::select({
+          .out = &m_eapSelect,
+          .options = optionLabels(kEapOptions),
+          .selectedIndex = std::size_t{0},
+          .placeholder = i18n::tr("control-center.network.eap-method"),
+          .surfaceOpacity = panelCardOpacity(),
+          .flexGrow = 1.0F,
+          .onSelectionChanged =
+              [this](std::size_t index, std::string_view /*text*/) {
+                // PEAP tunnels MSCHAPv2 only. Pinning and locking the inner method
+                // beats letting the user assemble a pair that cannot authenticate
+                // and only fails later, at association time.
+                if (m_phase2Select == nullptr) {
+                  return;
+                }
+                const bool pinsInnerMethod = optionAt(kEapOptions, index).method == network_enterprise::EapMethod::Peap;
+                if (pinsInnerMethod) {
+                  m_phase2Select->setSelectedIndexSilently(kPeapPhase2Index);
+                }
+                m_phase2Select->setEnabled(!pinsInnerMethod);
+              },
+      }),
+      ui::select({
+          .out = &m_phase2Select,
+          .options = optionLabels(kPhase2Options),
+          .selectedIndex = kPeapPhase2Index,
+          .placeholder = i18n::tr("control-center.network.phase2-auth"),
+          .enabled = false,
+          .surfaceOpacity = panelCardOpacity(),
+          .flexGrow = 1.0F,
       })
   );
+}
 
-  passwordCard->addChild(
-      ui::label({
-          .out = &m_credentialError,
-          .fontSize = Style::fontSizeCaption * scale,
-          .color = colorSpecFromRole(ColorRole::Error),
-          .maxLines = 4,
-          .visible = false,
-      })
-  );
-
-  const auto submitFromForm = [this](const std::string& /*value*/) {
-    submitPasswordPrompt(m_passwordInput != nullptr ? m_passwordInput->value() : std::string{});
-  };
-
-  auto enterpriseFields = ui::column({
+// 802.1x fields, shown only for an enterprise network: EAP method, then identity, anonymous identity, domain suffix
+// and CA certificate.
+std::unique_ptr<Flex> NetworkTab::buildEnterpriseFields(float scale) {
+  auto fields = ui::column({
       .out = &m_enterpriseFields,
       // Flex defaults to Center on the cross axis, which collapses each field to
       // its natural width. The card itself stretches via applySectionCardStyle();
@@ -1594,88 +1600,38 @@ std::unique_ptr<Flex> NetworkTab::buildPasswordCard(float scale) {
       .visible = false,
       .configure = [scale](Flex& column) { column.setGap(Style::spaceSm * scale); },
   });
+  fields->addChild(buildEapRow(scale));
 
-  enterpriseFields->addChild(
-      ui::row(
-          {.align = FlexAlign::Center, .gap = Style::spaceSm * scale},
-          ui::select({
-              .out = &m_eapSelect,
-              .options = optionLabels(kEapOptions),
-              .selectedIndex = std::size_t{0},
-              .placeholder = i18n::tr("control-center.network.eap-method"),
-              .surfaceOpacity = panelCardOpacity(),
-              .flexGrow = 1.0F,
-              .onSelectionChanged =
-                  [this](std::size_t index, std::string_view /*text*/) {
-                    // PEAP tunnels MSCHAPv2 only. Pinning and locking the inner method
-                    // beats letting the user assemble a pair that cannot authenticate
-                    // and only fails later, at association time.
-                    if (m_phase2Select == nullptr) {
-                      return;
-                    }
-                    const bool pinsInnerMethod =
-                        optionAt(kEapOptions, index).method == network_enterprise::EapMethod::Peap;
-                    if (pinsInnerMethod) {
-                      m_phase2Select->setSelectedIndexSilently(kPeapPhase2Index);
-                    }
-                    m_phase2Select->setEnabled(!pinsInnerMethod);
-                  },
-          }),
-          ui::select({
-              .out = &m_phase2Select,
-              .options = optionLabels(kPhase2Options),
-              .selectedIndex = kPeapPhase2Index,
-              .placeholder = i18n::tr("control-center.network.phase2-auth"),
-              .enabled = false,
-              .surfaceOpacity = panelCardOpacity(),
-              .flexGrow = 1.0F,
-          })
-      )
-  );
+  const auto submitFromForm = [this](const std::string& /*value*/) {
+    submitPasswordPrompt(m_passwordInput != nullptr ? m_passwordInput->value() : std::string{});
+  };
+  struct TextField {
+    Input** out;
+    const char* placeholderKey;
+  };
+  const std::array<TextField, 4> textFields{{
+      {&m_identityInput, "control-center.network.identity"},
+      {&m_anonymousIdentityInput, "control-center.network.anonymous-identity"},
+      {&m_domainMatchInput, "control-center.network.domain-suffix-match"},
+      {&m_caCertInput, "control-center.network.ca-certificate"},
+  }};
+  for (const TextField& field : textFields) {
+    fields->addChild(
+        ui::input({
+            .out = field.out,
+            .placeholder = i18n::tr(field.placeholderKey),
+            .surfaceOpacity = panelCardOpacity(),
+            .surfaceRole = ColorRole::Surface,
+            .onSubmit = submitFromForm,
+        })
+    );
+  }
+  return fields;
+}
 
-  enterpriseFields->addChild(
-      ui::input({
-          .out = &m_identityInput,
-          .placeholder = i18n::tr("control-center.network.identity"),
-          .surfaceOpacity = panelCardOpacity(),
-          .surfaceRole = ColorRole::Surface,
-          .onSubmit = submitFromForm,
-      })
-  );
-
-  enterpriseFields->addChild(
-      ui::input({
-          .out = &m_anonymousIdentityInput,
-          .placeholder = i18n::tr("control-center.network.anonymous-identity"),
-          .surfaceOpacity = panelCardOpacity(),
-          .surfaceRole = ColorRole::Surface,
-          .onSubmit = submitFromForm,
-      })
-  );
-
-  enterpriseFields->addChild(
-      ui::input({
-          .out = &m_domainMatchInput,
-          .placeholder = i18n::tr("control-center.network.domain-suffix-match"),
-          .surfaceOpacity = panelCardOpacity(),
-          .surfaceRole = ColorRole::Surface,
-          .onSubmit = submitFromForm,
-      })
-  );
-
-  enterpriseFields->addChild(
-      ui::input({
-          .out = &m_caCertInput,
-          .placeholder = i18n::tr("control-center.network.ca-certificate"),
-          .surfaceOpacity = panelCardOpacity(),
-          .surfaceRole = ColorRole::Surface,
-          .onSubmit = submitFromForm,
-      })
-  );
-
-  passwordCard->addChild(std::move(enterpriseFields));
-
-  auto inputRow = ui::row(
+// Password field with its reveal toggle, then Connect and Cancel.
+std::unique_ptr<Flex> NetworkTab::buildPasswordRow(float scale) {
+  return ui::row(
       {.align = FlexAlign::Center, .gap = Style::spaceSm * scale},
       ui::input({
           .out = &m_passwordInput,
@@ -1719,8 +1675,36 @@ std::unique_ptr<Flex> NetworkTab::buildPasswordCard(float scale) {
           .onClick = [this]() { cancelPasswordPrompt(); },
       })
   );
+}
 
-  passwordCard->addChild(std::move(inputRow));
+std::unique_ptr<Flex> NetworkTab::buildPasswordCard(float scale) {
+  auto passwordCard = ui::column({
+      .out = &m_passwordCard,
+      .visible = false,
+      .configure = [scale, opacity = panelCardOpacity()](Flex& card) {
+        applySectionCardStyle(card, scale, opacity);
+        card.setGap(Style::spaceMd * scale);
+      },
+  });
+  passwordCard->addChild(
+      ui::label({
+          .out = &m_passwordTitle,
+          .fontSize = Style::fontSizeBody * scale,
+          .fontWeight = FontWeight::Bold,
+          .color = colorSpecFromRole(ColorRole::OnSurface),
+      })
+  );
+  passwordCard->addChild(
+      ui::label({
+          .out = &m_credentialError,
+          .fontSize = Style::fontSizeCaption * scale,
+          .color = colorSpecFromRole(ColorRole::Error),
+          .maxLines = 4,
+          .visible = false,
+      })
+  );
+  passwordCard->addChild(buildEnterpriseFields(scale));
+  passwordCard->addChild(buildPasswordRow(scale));
   return passwordCard;
 }
 
@@ -1740,9 +1724,16 @@ namespace {
   // Border + padding of a term_frame box, both sides.
   constexpr float kQuickBoxInset = 2.0F * (Style::spaceSm + Style::borderWidth);
   constexpr float kMono = term_frame::kBtopFontSize;
+  // Advance of one monospace cell as a fraction of the font size.
+  constexpr float kGlyphWidthEm = 0.6F;
   // The two-cell marker column every selectable row reserves.
-  constexpr float kGutterPx = 2.0F * kMono * 0.6F;
-  constexpr float kAxisWidth = 4.0F * Style::fontSizeMini * 0.6F + 2.0F;
+  constexpr float kGutterPx = 2.0F * kMono * kGlyphWidthEm;
+  constexpr float kAxisWidth = 4.0F * Style::fontSizeMini * kGlyphWidthEm + 2.0F;
+  constexpr float kMinMenuWidthPx = 80.0F;
+  constexpr float kMenuTrailPx = 4.0F;   // right-hand slack when wrapping menu items
+  constexpr float kMenuItemPadPx = 6.0F; // per menu item, before the inter-item gap
+  constexpr int kSignalStepPercent = 5;
+  constexpr std::size_t kExitNameChars = 12; // exit-node label width in the menu
   constexpr int kTrafficSamples = 60;
   constexpr std::size_t kConnCap = 6;
   constexpr std::size_t kWifiCap = 7;
@@ -1756,30 +1747,20 @@ namespace {
   constexpr std::chrono::seconds kTailscaleEvery{5};
   constexpr std::chrono::seconds kPingEvery{5};
   constexpr std::chrono::seconds kAttemptTimeout{25};
+  constexpr std::chrono::seconds kExternalIpTtl{8};
+  constexpr std::chrono::seconds kProfileUpTimeout{45}; // activation may wait for DHCP or a VPN handshake
+  constexpr std::chrono::seconds kProfileDownTimeout{20};
+  constexpr std::chrono::seconds kProfileEditTimeout{8};
+  constexpr std::chrono::seconds kProfileDeleteTimeout{10};
+  constexpr std::chrono::seconds kTailscaleExitTimeout{10};
+  constexpr std::chrono::seconds kPingTimeout{3};
+  constexpr const char* kInternetProbeHost = "1.1.1.1";
   constexpr std::chrono::seconds kAttemptGrace{8};
   constexpr double kSlowInternetMs = 150.0;
   constexpr std::array<std::string_view, 5> kNumerals{"¹", "²", "³", "⁴", "⁵"};
 
-  std::string escapeMarkup(std::string_view in) {
-    std::string out;
-    out.reserve(in.size());
-    for (const char c : in) {
-      switch (c) {
-      case '&':
-        out += "&amp;";
-        break;
-      case '<':
-        out += "&lt;";
-        break;
-      case '>':
-        out += "&gt;";
-        break;
-      default:
-        out.push_back(c);
-      }
-    }
-    return out;
-  }
+  using term_frame::escapeMarkup;
+  using term_frame::setShown;
 
   std::string colorSpan(ColorRole role, std::string_view text) {
     return "<span foreground=\"" + term_frame::paletteHex(role) + "\">" + escapeMarkup(text) + "</span>";
@@ -1904,13 +1885,6 @@ namespace {
     return {stats.netRxBytesPerSec, stats.netTxBytesPerSec};
   }
 
-  void showNode(Node* node, bool show) {
-    if (node != nullptr && (node->visible() != show || node->participatesInLayout() != show)) {
-      node->setVisible(show);
-      node->setParticipatesInLayout(show);
-    }
-  }
-
   // A term_frame box whose title row is pinned to one grid row, so the height arithmetic holds.
   std::unique_ptr<Flex>
   quickBox(std::string_view numeral, std::string_view title, float scale, Label** titleOut, Label** chipOut = nullptr) {
@@ -1947,7 +1921,12 @@ namespace {
     return escapeMarkup(text);
   }
 
-  // ---- model ----
+} // namespace
+
+// ---- model ----
+// Named (not anonymous) so network_tab.h can forward-declare the row types its builders return.
+
+namespace netpanel {
 
   struct MenuItem {
     std::string id;
@@ -1956,16 +1935,6 @@ namespace {
     std::uint32_t key = 0;
     bool destructive = false;
   };
-
-  MenuItem makeItem(std::string id, std::string word, std::size_t hot, bool destructive = false) {
-    MenuItem item;
-    item.hot = std::min(hot, word.empty() ? std::size_t{0} : word.size() - 1);
-    item.key = word.empty() ? 0U : static_cast<std::uint32_t>(std::tolower(static_cast<unsigned char>(word[item.hot])));
-    item.id = std::move(id);
-    item.word = std::move(word);
-    item.destructive = destructive;
-    return item;
-  }
 
   struct QRow {
     std::string id;
@@ -1993,6 +1962,22 @@ namespace {
     std::vector<QElem> elems;
   };
 
+} // namespace netpanel
+
+using namespace netpanel;
+
+namespace {
+
+  MenuItem makeItem(std::string id, std::string word, std::size_t hot, bool destructive = false) {
+    MenuItem item;
+    item.hot = std::min(hot, word.empty() ? std::size_t{0} : word.size() - 1);
+    item.key = word.empty() ? 0U : static_cast<std::uint32_t>(std::tolower(static_cast<unsigned char>(word[item.hot])));
+    item.id = std::move(id);
+    item.word = std::move(word);
+    item.destructive = destructive;
+    return item;
+  }
+
   float elemHeight(const QElem& elem) {
     switch (elem.kind) {
     case ElemKind::Menu:
@@ -2019,16 +2004,19 @@ namespace {
     if (section.elems.empty()) {
       return 0.0F;
     }
-    return kQuickBoxInset + kQuickRow + elemsHeight(section)
-           + static_cast<float>(section.elems.size()) * Style::spaceXs;
+    return kQuickBoxInset
+        + kQuickRow
+        + elemsHeight(section)
+        + static_cast<float>(section.elems.size()) * Style::spaceXs;
   }
 
   std::vector<std::vector<MenuItem>> wrapMenu(const std::vector<MenuItem>& items, float usablePx, bool armedAny) {
     std::vector<std::vector<MenuItem>> lines;
     float used = 0.0F;
     for (const auto& item : items) {
-      const std::size_t chars = item.destructive && armedAny ? std::max<std::size_t>(item.word.size(), 8) : item.word.size();
-      const float px = static_cast<float>(chars) * kMono * 0.6F + 6.0F + Style::spaceSm;
+      const std::size_t chars =
+          item.destructive && armedAny ? std::max<std::size_t>(item.word.size(), 8) : item.word.size();
+      const float px = static_cast<float>(chars) * kMono * kGlyphWidthEm + kMenuItemPadPx + Style::spaceSm;
       if (lines.empty() || (used + px > usablePx && !lines.back().empty())) {
         lines.emplace_back();
         used = 0.0F;
@@ -2050,6 +2038,83 @@ namespace {
     return std::string(text.substr(0, cut)) + "…";
   }
 
+  // First visible row of a section that shows `cap` of `rows`: the previous window moved just far enough to keep the
+  // credential row (else the selection) in view.
+  std::size_t visibleWindowStart(
+      const std::vector<QRow>& rows, std::size_t cap, std::size_t previousStart, std::string_view selectedId,
+      std::string_view passwordRowId
+  ) {
+    std::size_t focus = rows.size();
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+      if (!passwordRowId.empty() && rows[i].id == passwordRowId) {
+        focus = i;
+        break;
+      }
+      if (rows[i].id == selectedId) {
+        focus = i;
+      }
+    }
+    std::size_t start = previousStart;
+    if (focus < rows.size()) {
+      if (focus < start) {
+        start = focus;
+      } else if (focus >= start + cap) {
+        start = focus + 1 - cap;
+      }
+    }
+    return std::min(start, rows.size() - cap);
+  }
+
+  // Total panel height: hero, then every non-empty section and the traffic box, one gap between each pair.
+  float stackHeight(const std::array<const QSection*, 4>& sections, bool traffic) {
+    const QSection& ip = *sections[0];
+    std::size_t blocks = 1;
+    float total = kQuickHeroHeight + kQuickRow;
+    if (!ip.elems.empty()) {
+      total += elemsHeight(ip);
+      ++blocks;
+    }
+    for (std::size_t i = 1; i < sections.size(); ++i) {
+      if (!sections[i]->elems.empty()) {
+        total += boxHeight(*sections[i]);
+        ++blocks;
+      }
+    }
+    if (traffic) {
+      total += kQuickBoxInset + 2.0F * kQuickRow + kQuickGraphHeight + 2.0F * Style::spaceXs;
+      ++blocks;
+    }
+    return total + kQuickGap * static_cast<float>(blocks - 1);
+  }
+
+  // Identity of everything the body draws; the rows are rebuilt only when it changes.
+  std::string bodyKey(
+      const std::array<const QSection*, 4>& sections, float width, const std::string& selectedId,
+      const std::string& armed
+  ) {
+    std::string key = std::format("{}|{}|", static_cast<int>(width), selectedId);
+    for (const QSection* section : sections) {
+      key += section->title + "/" + section->chip + "{";
+      for (const auto& elem : section->elems) {
+        key += std::format(
+            "{}:{}:{}:{}:{}:{}:", static_cast<int>(elem.kind), elem.row.id, elem.row.name, elem.row.badge,
+            elem.row.lit ? 1 : 0, elem.row.detail
+        );
+        key += elem.text;
+        for (const auto& line : elem.lines) {
+          for (const auto& item : line) {
+            key += item.word;
+            key += (item.destructive && armed == elem.row.id + "|" + item.id) ? '!' : '.';
+          }
+          key += '\n';
+        }
+        key += ';';
+      }
+      key += "}";
+    }
+    return key;
+  }
+
 } // namespace
 
 struct NetworkTab::QuickModel {
@@ -2060,6 +2125,8 @@ struct NetworkTab::QuickModel {
   std::vector<std::string> selectables;
   std::vector<MenuKey> menuKeys;
   std::string sel;
+  std::string passwordRow; // row id that shows the credential field; empty when none
+  bool passwordPlaced = false;
   bool selHasMenu = false;
   bool traffic = false;
   float height = 0.0F;
@@ -2109,57 +2176,61 @@ NetworkTab::QuickSnapshot NetworkTab::readQuickSnapshot() const {
   return snap;
 }
 
-NetworkTab::QuickModel NetworkTab::buildQuickModel(float width, const QuickSnapshot& snap) const {
-  QuickModel model;
-  const auto now = std::chrono::steady_clock::now();
-  const float usable = std::max(80.0F, width - kQuickBoxInset - kGutterPx - Style::spaceSm - 4.0F);
-  const bool available = networkAvailable();
+std::string NetworkTab::quickPasswordRowId() const {
+  return (m_hasPendingSecret && !m_pendingSsid.empty()) ? "w:" + m_pendingSsid : std::string{};
+}
 
-  const auto noteOf = [&](const std::string& id) -> const Note* {
-    const auto it = m_qNotes.find(id);
-    return (it != m_qNotes.end() && it->second.until > now) ? &it->second : nullptr;
-  };
-  const auto detailOr = [&](const std::string& id, std::string fallback) {
-    if (const Note* note = noteOf(id); note != nullptr) {
-      switch (note->tone) {
-      case NoteTone::Accent:
-        return colorSpan(ColorRole::Primary, note->text);
-      case NoteTone::Warning:
-        return colorSpan(ColorRole::Warning, note->text);
-      case NoteTone::Error:
-        return colorSpan(ColorRole::Error, note->text);
-      case NoteTone::Dim:
-        break;
-      }
-      return dimSpan(note->text);
-    }
+// A live note replaces a row's detail; otherwise `fallback`.
+std::string NetworkTab::quickDetailOr(
+    const std::string& id, std::string fallback, std::chrono::steady_clock::time_point now
+) const {
+  const auto it = m_qNotes.find(id);
+  if (it == m_qNotes.end() || it->second.until <= now) {
     return fallback;
-  };
-
-  // ---- rows per section ----
-  std::vector<QRow> ipRows;
-  if (snap.connected && !snap.ipPlain.empty()) {
-    QRow row;
-    row.id = "ip";
-    row.name = snap.ip;
-    if (!snap.gateway.empty()) {
-      row.name += " · gw " + snap.gateway;
-    }
-    row.dimName = true;
-    row.detail = detailOr(row.id, {});
-    row.menu = {makeItem("copy", "copy ip", 0), makeItem("ext", "ext ip", 0)};
-    ipRows.push_back(std::move(row));
   }
+  const Note& note = it->second;
+  switch (note.tone) {
+  case NoteTone::Accent:
+    return colorSpan(ColorRole::Primary, note.text);
+  case NoteTone::Warning:
+    return colorSpan(ColorRole::Warning, note.text);
+  case NoteTone::Error:
+    return colorSpan(ColorRole::Error, note.text);
+  case NoteTone::Dim:
+    break;
+  }
+  return dimSpan(note.text);
+}
 
-  std::vector<QRow> connRows;
+std::vector<QRow> NetworkTab::quickIpRows(const QuickSnapshot& snap, std::chrono::steady_clock::time_point now) const {
+  std::vector<QRow> rows;
+  if (!snap.connected || snap.ipPlain.empty()) {
+    return rows;
+  }
+  QRow row;
+  row.id = "ip";
+  row.name = snap.ip;
+  if (!snap.gateway.empty()) {
+    row.name += " · gw " + snap.gateway;
+  }
+  row.dimName = true;
+  row.detail = quickDetailOr(row.id, {}, now);
+  row.menu = {makeItem("copy", "copy ip", 0), makeItem("ext", "ext ip", 0)};
+  rows.push_back(std::move(row));
+  return rows;
+}
+
+std::vector<QRow> NetworkTab::quickConnectionRows(std::chrono::steady_clock::time_point now) const {
+  std::vector<QRow> rows;
+  rows.reserve(m_qProfiles.size());
   for (const auto& profile : m_qProfiles) {
     QRow row;
     row.id = "c:" + profile.uuid;
     row.name = profile.name;
     row.lit = profile.active;
     row.badge = profile.active ? "active" : "";
-    row.detail = detailOr(
-        row.id, profile.activating ? dimSpan("connecting…") : dimSpan(netq::kindLabel(profile.kind))
+    row.detail = quickDetailOr(
+        row.id, profile.activating ? dimSpan("connecting…") : dimSpan(netq::kindLabel(profile.kind)), now
     );
     if (profile.active || profile.activating) {
       row.menu.push_back(makeItem("disconnect", "disconnect", 0));
@@ -2172,206 +2243,209 @@ NetworkTab::QuickModel NetworkTab::buildQuickModel(float width, const QuickSnaps
     row.menu.push_back(makeItem("auto", profile.autoconnect ? "autoconnect [on]" : "autoconnect off", 2));
     row.menu.push_back(makeItem("forget", "forget", 0, true));
     row.menu.push_back(makeItem("edit", "edit", 0));
-    connRows.push_back(std::move(row));
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
+// The radio row, then one row per distinct SSID. `emptyText` is set when there is nothing to list.
+std::vector<QRow> NetworkTab::quickWifiRows(std::chrono::steady_clock::time_point now, std::string& emptyText) const {
+  std::vector<QRow> rows;
+  if (!networkAvailable()) {
+    emptyText = "network service unavailable";
+    return rows;
+  }
+  const NetworkState& state = m_network->state();
+  const bool radioShown = m_wifiTogglePending ? m_wifiToggleTarget : state.wirelessEnabled;
+  QRow radio;
+  radio.id = "w:radio";
+  radio.name = "wifi radio";
+  radio.lit = radioShown;
+  radio.badge = radioShown ? "on" : "off";
+  radio.detail = quickDetailOr(
+      radio.id, m_wifiTogglePending ? dimSpan("switching…") : (state.scanning ? dimSpan("scanning") : std::string{}),
+      now
+  );
+  if (state.wirelessEnabled && !m_wifiTogglePending) {
+    radio.menu.push_back(makeItem("off", "turn off", 5, true));
+  }
+  rows.push_back(std::move(radio));
+  if (!state.wirelessEnabled) {
+    return rows;
   }
 
+  std::vector<std::string> seen;
+  for (const auto& ap : sortedAccessPoints(m_network->accessPoints())) {
+    if (ap.ssid.empty() || std::ranges::find(seen, ap.ssid) != seen.end()) {
+      continue;
+    }
+    seen.push_back(ap.ssid);
+    const bool saved = m_network->hasSavedConnection(ap.ssid);
+    QRow row;
+    row.id = "w:" + ap.ssid;
+    row.name = ap.ssid;
+    row.lit = ap.active;
+    row.badge = ap.active ? "active" : "";
+    // Signal in coarse steps, so a scan jitter does not rebuild the rows.
+    const int percent =
+        ((static_cast<int>(ap.strength) + kSignalStepPercent / 2) / kSignalStepPercent) * kSignalStepPercent;
+    std::string signal;
+    if (saved && !ap.active) {
+      signal += dimSpan("saved") + " ";
+    }
+    if (ap.secured) {
+      signal += "\uf023 ";
+    }
+    signal += term_frame::dottedMeterMarkup(5, static_cast<double>(percent) / 100.0, true);
+    signal += std::format(" {:>3}%", percent);
+    row.detail = quickDetailOr(row.id, signal, now);
+    if (saved || ap.active) {
+      row.menu.push_back(makeItem("forget", "forget", 0, true));
+    }
+    rows.push_back(std::move(row));
+  }
+  if (seen.empty()) {
+    emptyText = "no networks found";
+  }
+  return rows;
+}
+
+std::vector<QRow> NetworkTab::quickTailscaleRows(std::chrono::steady_clock::time_point now) const {
+  std::vector<QRow> rows;
+  if (!m_qHasTailscale) {
+    return rows;
+  }
+  QRow toggle;
+  toggle.id = "t:toggle";
+  toggle.name = "tailscale";
+  toggle.lit = m_qTs.running;
+  toggle.badge = m_qTs.running ? "on" : "off";
+  std::string state;
+  if (!m_qTs.loaded) {
+    state = dimSpan("…");
+  } else if (!m_qTs.problem.empty()) {
+    state = colorSpan(ColorRole::Warning, m_qTs.problem);
+  }
+  toggle.detail = quickDetailOr(toggle.id, state, now);
+  rows.push_back(std::move(toggle));
+  if (!m_qTs.running) {
+    return rows;
+  }
+
+  QRow exit;
+  exit.id = "t:exit";
+  exit.name = "exit node";
+  exit.detail = quickDetailOr(
+      exit.id, m_qTs.exitNode.empty() ? dimSpan("none") : colorSpan(ColorRole::Primary, m_qTs.exitNode), now
+  );
+  std::size_t number = 0;
+  for (const auto& peer : m_qTs.peers) {
+    if (!peer.exitOption || number >= kMaxExitNodes) {
+      continue;
+    }
+    exit.menu.push_back(
+        makeItem("x" + std::to_string(number), std::format("{} {}", number + 1, clip(peer.name, kExitNameChars)), 0)
+    );
+    ++number;
+  }
+  exit.menu.push_back(makeItem("none", "none", 0));
+  rows.push_back(std::move(exit));
+  for (const auto& peer : m_qTs.peers) {
+    QRow row;
+    row.id = "p:" + peer.name;
+    row.name = peer.name;
+    const std::string dot = peer.online ? colorSpan(ColorRole::Primary, "●") : dimSpan("○");
+    const std::string ip = peer.online ? escapeMarkup(peer.ip) : dimSpan(netq::lastSeenText(peer.lastSeen));
+    row.detail = quickDetailOr(row.id, dot + " " + ip, now);
+    if (!peer.ip.empty()) {
+      row.menu.push_back(makeItem("copy", "copy ip", 0));
+    }
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
+// Rows of one section into elements: a window around the selection, the open menu and the credential field
+// directly under their rows.
+void NetworkTab::placeQuickRows(
+    QuickModel& model, QSection& section, const std::vector<QRow>& rows, std::size_t cap, float usablePx
+) const {
+  const bool windowed = rows.size() > cap;
+  std::size_t start = 0;
+  if (windowed) {
+    start = visibleWindowStart(rows, cap, m_qWinStart[section.key], model.sel, model.passwordRow);
+    m_qWinStart[section.key] = start;
+  }
+  const std::size_t end = std::min(rows.size(), start + cap);
+  if (windowed && start > 0) {
+    QElem more;
+    more.text = std::format("  … {} more above", start);
+    section.elems.push_back(std::move(more));
+  }
+  const bool armedAny = !m_qArmed.empty();
+  for (std::size_t i = start; i < end; ++i) {
+    const QRow& row = rows[i];
+    QElem elem;
+    elem.kind = ElemKind::Row;
+    elem.row = row;
+    section.elems.push_back(std::move(elem));
+    if (row.id == model.sel && !row.menu.empty()) {
+      model.selHasMenu = true;
+      if (row.id == m_qMenuId) {
+        QElem menu;
+        menu.kind = ElemKind::Menu;
+        menu.row.id = row.id;
+        menu.lines = wrapMenu(row.menu, usablePx, armedAny);
+        section.elems.push_back(std::move(menu));
+        for (const auto& item : row.menu) {
+          model.menuKeys.push_back(MenuKey{.key = item.key, .id = item.id, .destructive = item.destructive});
+        }
+      }
+    }
+    if (!model.passwordRow.empty() && row.id == model.passwordRow) {
+      QElem password;
+      password.kind = ElemKind::Password;
+      password.row.id = row.id;
+      section.elems.push_back(std::move(password));
+      model.passwordPlaced = true;
+    }
+  }
+  if (windowed && end < rows.size()) {
+    QElem more;
+    more.text = std::format("  … {} more below", rows.size() - end);
+    section.elems.push_back(std::move(more));
+  }
+}
+
+NetworkTab::QuickModel NetworkTab::buildQuickModel(float width, const QuickSnapshot& snap) const {
+  QuickModel model;
+  const auto now = std::chrono::steady_clock::now();
+  const float usablePx = std::max(kMinMenuWidthPx, width - kQuickBoxInset - kGutterPx - Style::spaceSm - kMenuTrailPx);
+  const bool available = networkAvailable();
   const bool wifiSection = snap.hasWifiDevice || m_hasPendingSecret;
-  std::vector<QRow> wifiRows;
+
+  const std::vector<QRow> ipRows = quickIpRows(snap, now);
+  const std::vector<QRow> connRows = quickConnectionRows(now);
   std::string wifiText;
-  if (wifiSection) {
-    if (!available) {
-      wifiText = "network service unavailable";
-    } else {
-      const NetworkState& state = m_network->state();
-      const bool shown = m_wifiTogglePending ? m_wifiToggleTarget : state.wirelessEnabled;
-      QRow radio;
-      radio.id = "w:radio";
-      radio.name = "wifi radio";
-      radio.lit = shown;
-      radio.badge = shown ? "on" : "off";
-      radio.detail = detailOr(
-          radio.id, m_wifiTogglePending ? dimSpan("switching…") : (state.scanning ? dimSpan("scanning") : std::string{})
-      );
-      if (state.wirelessEnabled && !m_wifiTogglePending) {
-        radio.menu.push_back(makeItem("off", "turn off", 5, true));
-      }
-      wifiRows.push_back(std::move(radio));
-      if (state.wirelessEnabled) {
-        std::vector<std::string> seen;
-        for (const auto& ap : sortedAccessPoints(m_network->accessPoints())) {
-          if (ap.ssid.empty() || std::ranges::find(seen, ap.ssid) != seen.end()) {
-            continue;
-          }
-          seen.push_back(ap.ssid);
-          const bool saved = m_network->hasSavedConnection(ap.ssid);
-          QRow row;
-          row.id = "w:" + ap.ssid;
-          row.name = ap.ssid;
-          row.lit = ap.active;
-          row.badge = ap.active ? "active" : "";
-          // Signal in steps of 5 %, so a scan jitter does not rebuild the rows.
-          const int percent = ((static_cast<int>(ap.strength) + 2) / 5) * 5;
-          std::string signal;
-          if (saved && !ap.active) {
-            signal += dimSpan("saved") + " ";
-          }
-          if (ap.secured) {
-            signal += "\uf023 ";
-          }
-          signal += term_frame::dottedMeterMarkup(5, static_cast<double>(percent) / 100.0, true);
-          signal += std::format(" {:>3}%", percent);
-          row.detail = detailOr(row.id, signal);
-          if (saved || ap.active) {
-            row.menu.push_back(makeItem("forget", "forget", 0, true));
-          }
-          wifiRows.push_back(std::move(row));
-        }
-        if (seen.empty()) {
-          wifiText = "no networks found";
-        }
-      }
-    }
-  }
+  const std::vector<QRow> wifiRows = wifiSection ? quickWifiRows(now, wifiText) : std::vector<QRow>{};
+  const std::vector<QRow> tsRows = quickTailscaleRows(now);
 
-  std::vector<QRow> tsRows;
-  if (m_qHasTailscale) {
-    QRow toggle;
-    toggle.id = "t:toggle";
-    toggle.name = "tailscale";
-    toggle.lit = m_qTs.running;
-    toggle.badge = m_qTs.running ? "on" : "off";
-    std::string state;
-    if (!m_qTs.loaded) {
-      state = dimSpan("…");
-    } else if (!m_qTs.problem.empty()) {
-      state = colorSpan(ColorRole::Warning, m_qTs.problem);
-    }
-    toggle.detail = detailOr(toggle.id, state);
-    tsRows.push_back(std::move(toggle));
-    if (m_qTs.running) {
-      QRow exit;
-      exit.id = "t:exit";
-      exit.name = "exit node";
-      exit.detail =
-          detailOr(exit.id, m_qTs.exitNode.empty() ? dimSpan("none") : colorSpan(ColorRole::Primary, m_qTs.exitNode));
-      std::size_t number = 0;
-      for (const auto& peer : m_qTs.peers) {
-        if (!peer.exitOption || number >= kMaxExitNodes) {
-          continue;
-        }
-        exit.menu.push_back(makeItem(
-            "x" + std::to_string(number), std::format("{} {}", number + 1, clip(peer.name, 12)), 0
-        ));
-        ++number;
-      }
-      exit.menu.push_back(makeItem("none", "none", 0));
-      tsRows.push_back(std::move(exit));
-      for (const auto& peer : m_qTs.peers) {
-        QRow row;
-        row.id = "p:" + peer.name;
-        row.name = peer.name;
-        const std::string dot = peer.online ? colorSpan(ColorRole::Primary, "●") : dimSpan("○");
-        const std::string ip = peer.online ? escapeMarkup(peer.ip) : dimSpan(netq::lastSeenText(peer.lastSeen));
-        row.detail = detailOr(row.id, dot + " " + ip);
-        if (!peer.ip.empty()) {
-          row.menu.push_back(makeItem("copy", "copy ip", 0));
-        }
-        tsRows.push_back(std::move(row));
-      }
-    }
-  }
-
-  // ---- selection ----
-  const auto collect = [&](const std::vector<QRow>& rows) {
-    for (const auto& row : rows) {
+  for (const auto* rows : {&ipRows, &connRows, &wifiRows, &tsRows}) {
+    for (const auto& row : *rows) {
       model.selectables.push_back(row.id);
     }
-  };
-  collect(ipRows);
-  collect(connRows);
-  collect(wifiRows);
-  collect(tsRows);
+  }
   model.sel = m_qSel;
   if (std::ranges::find(model.selectables, model.sel) == model.selectables.end()) {
     model.sel = model.selectables.empty() ? std::string{} : model.selectables.front();
   }
-
-  const std::string pwRow = (m_hasPendingSecret && !m_pendingSsid.empty()) ? "w:" + m_pendingSsid : std::string{};
-  bool pwPlaced = false;
-  const bool armedAny = !m_qArmed.empty();
-
-  // Rows of one section into elements: a window around the selection, the open menu and the credential field
-  // directly under their rows.
-  const auto place = [&](QSection& section, const std::vector<QRow>& rows, std::size_t cap) {
-    std::size_t start = 0;
-    const bool windowed = rows.size() > cap;
-    if (windowed) {
-      std::size_t focus = rows.size();
-      for (std::size_t i = 0; i < rows.size(); ++i) {
-        if (!pwRow.empty() && rows[i].id == pwRow) {
-          focus = i;
-          break;
-        }
-        if (rows[i].id == model.sel) {
-          focus = i;
-        }
-      }
-      start = m_qWinStart[section.key];
-      if (focus < rows.size()) {
-        if (focus < start) {
-          start = focus;
-        } else if (focus >= start + cap) {
-          start = focus + 1 - cap;
-        }
-      }
-      start = std::min(start, rows.size() - cap);
-      m_qWinStart[section.key] = start;
-    }
-    const std::size_t end = std::min(rows.size(), start + cap);
-    if (windowed && start > 0) {
-      QElem more;
-      more.text = std::format("  … {} more above", start);
-      section.elems.push_back(std::move(more));
-    }
-    for (std::size_t i = start; i < end; ++i) {
-      QElem elem;
-      elem.kind = ElemKind::Row;
-      elem.row = rows[i];
-      section.elems.push_back(std::move(elem));
-      const QRow& row = rows[i];
-      if (row.id == model.sel && row.id == m_qMenuId && !row.menu.empty()) {
-        QElem menu;
-        menu.kind = ElemKind::Menu;
-        menu.row.id = row.id;
-        menu.lines = wrapMenu(row.menu, usable, armedAny);
-        section.elems.push_back(std::move(menu));
-        model.selHasMenu = true;
-        for (const auto& item : row.menu) {
-          model.menuKeys.push_back(MenuKey{.key = item.key, .id = item.id, .destructive = item.destructive});
-        }
-      } else if (row.id == model.sel && !row.menu.empty()) {
-        model.selHasMenu = true;
-      }
-      if (!pwRow.empty() && row.id == pwRow) {
-        QElem password;
-        password.kind = ElemKind::Password;
-        password.row.id = row.id;
-        section.elems.push_back(std::move(password));
-        pwPlaced = true;
-      }
-    }
-    if (windowed && end < rows.size()) {
-      QElem more;
-      more.text = std::format("  … {} more below", rows.size() - end);
-      section.elems.push_back(std::move(more));
-    }
-  };
+  model.passwordRow = quickPasswordRowId();
 
   model.ip.key = "ip";
-  place(model.ip, ipRows, 1);
+  placeQuickRows(model, model.ip, ipRows, 1, usablePx);
   model.conn.key = "conn";
   model.conn.title = "connections";
-  place(model.conn, connRows, kConnCap);
+  placeQuickRows(model, model.conn, connRows, kConnCap, usablePx);
 
   model.wifi.key = "wifi";
   model.wifi.title = "wifi";
@@ -2381,7 +2455,7 @@ NetworkTab::QuickModel NetworkTab::buildQuickModel(float width, const QuickSnaps
       text.text = "  " + wifiText;
       model.wifi.elems.push_back(std::move(text));
     } else {
-      place(model.wifi, wifiRows, kWifiCap);
+      placeQuickRows(model, model.wifi, wifiRows, kWifiCap, usablePx);
       if (!wifiText.empty()) {
         QElem text;
         text.text = "  " + wifiText + "   r to rescan";
@@ -2393,59 +2467,21 @@ NetworkTab::QuickModel NetworkTab::buildQuickModel(float width, const QuickSnaps
 
   model.tailscale.key = "tailscale";
   model.tailscale.title = "tailscale";
-  place(model.tailscale, tsRows, kTailscaleCap);
+  placeQuickRows(model, model.tailscale, tsRows, kTailscaleCap, usablePx);
 
   // A credential request whose network is not on the list (a saved profile asking for its secret).
-  if (m_hasPendingSecret && !pwPlaced) {
+  if (m_hasPendingSecret && !model.passwordPlaced) {
     QElem text;
     text.text = "  password for " + (m_pendingSsid.empty() ? std::string("network") : m_pendingSsid);
     QElem password;
     password.kind = ElemKind::Password;
     model.conn.elems.insert(model.conn.elems.begin(), {std::move(text), std::move(password)});
-    model.conn.title = "connections";
   }
 
   model.traffic = m_monitor != nullptr && m_monitor->isRunning();
-
-  // ---- height and rebuild key ----
-  std::vector<float> items;
-  items.push_back(kQuickHeroHeight + kQuickRow);
-  if (!model.ip.elems.empty()) {
-    items.push_back(elemsHeight(model.ip));
-  }
-  for (const QSection* section : {&model.conn, &model.wifi, &model.tailscale}) {
-    if (!section->elems.empty()) {
-      items.push_back(boxHeight(*section));
-    }
-  }
-  if (model.traffic) {
-    items.push_back(kQuickBoxInset + 2.0F * kQuickRow + kQuickGraphHeight + 2.0F * Style::spaceXs);
-  }
-  float total = 0.0F;
-  for (const float item : items) {
-    total += item;
-  }
-  model.height = total + kQuickGap * static_cast<float>(items.size() - 1);
-
-  std::string& key = model.key;
-  key = std::format("{}|{}|", static_cast<int>(width), model.sel);
-  for (const QSection* section : {&model.ip, &model.conn, &model.wifi, &model.tailscale}) {
-    key += section->title + "/" + section->chip + "{";
-    for (const auto& elem : section->elems) {
-      key += std::format("{}:{}:{}:{}:{}:{}:", static_cast<int>(elem.kind), elem.row.id, elem.row.name, elem.row.badge,
-                         elem.row.lit ? 1 : 0, elem.row.detail);
-      key += elem.text;
-      for (const auto& line : elem.lines) {
-        for (const auto& item : line) {
-          key += item.word;
-          key += (item.destructive && m_qArmed == elem.row.id + "|" + item.id) ? '!' : '.';
-        }
-        key += '\n';
-      }
-      key += ';';
-    }
-    key += "}";
-  }
+  const std::array<const QSection*, 4> sections{&model.ip, &model.conn, &model.wifi, &model.tailscale};
+  model.height = stackHeight(sections, model.traffic);
+  model.key = bodyKey(sections, width, model.sel, m_qArmed);
   return model;
 }
 
@@ -2757,35 +2793,34 @@ void NetworkTab::quickEditConnections(const std::string& uuid, const std::string
   }
 }
 
+// Runs `args` for a row: success clears its note, failure shows the reason; `refresh` re-reads the state either way.
+void NetworkTab::quickRunRowCommand(
+    const std::string& rowId, std::vector<std::string> args, std::chrono::seconds timeout, void (NetworkTab::*refresh)()
+) {
+  asynccmd::run(std::move(args), timeout, m_alive, [this, rowId, refresh](process::RunResult result) {
+    if (result) {
+      quickClearNote(rowId);
+    } else {
+      quickSetNote(rowId, "failed: " + netq::failureReason(result), NoteTone::Error, kFailureTtl);
+    }
+    (this->*refresh)();
+  });
+}
+
 void NetworkTab::quickConnectProfile(const netq::Profile& profile) {
   const std::string rowId = "c:" + profile.uuid;
   quickSetBusy(rowId, "connecting…");
-  asynccmd::run(
-      {"nmcli", "connection", "up", "uuid", profile.uuid}, std::chrono::seconds(45), m_alive,
-      [this, rowId](process::RunResult result) {
-        if (result) {
-          quickClearNote(rowId);
-        } else {
-          quickSetNote(rowId, "failed: " + netq::failureReason(result), NoteTone::Error, kFailureTtl);
-        }
-        quickRefreshProfiles();
-      }
+  quickRunRowCommand(
+      rowId, {"nmcli", "connection", "up", "uuid", profile.uuid}, kProfileUpTimeout, &NetworkTab::quickRefreshProfiles
   );
 }
 
 void NetworkTab::quickDisconnectProfile(const netq::Profile& profile) {
   const std::string rowId = "c:" + profile.uuid;
   quickSetBusy(rowId, "disconnecting…");
-  asynccmd::run(
-      {"nmcli", "connection", "down", "uuid", profile.uuid}, std::chrono::seconds(20), m_alive,
-      [this, rowId](process::RunResult result) {
-        if (result) {
-          quickClearNote(rowId);
-        } else {
-          quickSetNote(rowId, "failed: " + netq::failureReason(result), NoteTone::Error, kFailureTtl);
-        }
-        quickRefreshProfiles();
-      }
+  quickRunRowCommand(
+      rowId, {"nmcli", "connection", "down", "uuid", profile.uuid}, kProfileDownTimeout,
+      &NetworkTab::quickRefreshProfiles
   );
 }
 
@@ -2880,8 +2915,8 @@ void NetworkTab::quickTailscaleToggle() {
   const std::string rowId = "t:toggle";
   quickSetBusy(rowId, up ? "connecting…" : "disconnecting…");
   asynccmd::run(
-      std::vector<std::string>{std::string("tailscale"), std::string(up ? "up" : "down")}, std::chrono::seconds(up ? 12 : 8), m_alive,
-      [this, rowId, up](process::RunResult result) {
+      std::vector<std::string>{std::string("tailscale"), std::string(up ? "up" : "down")},
+      std::chrono::seconds(up ? 12 : 8), m_alive, [this, rowId, up](process::RunResult result) {
         if (result) {
           quickClearNote(rowId);
         } else if (up && result.timedOut) {
@@ -2898,112 +2933,85 @@ void NetworkTab::quickTailscaleToggle() {
 void NetworkTab::quickTailscaleExit(const std::string& target, const std::string& label) {
   const std::string rowId = "t:exit";
   quickSetBusy(rowId, label.empty() ? "clearing…" : "using " + label + "…");
-  asynccmd::run(
-      {"tailscale", "set", "--exit-node=" + target}, std::chrono::seconds(10), m_alive,
-      [this, rowId](process::RunResult result) {
-        if (result) {
-          quickClearNote(rowId);
-        } else {
-          quickSetNote(rowId, "failed: " + netq::failureReason(result), NoteTone::Error, kFailureTtl);
-        }
-        m_qTsAt = {};
-        quickRefreshTailscale();
-      }
+  quickRunRowCommand(
+      rowId, {"tailscale", "set", "--exit-node=" + target}, kTailscaleExitTimeout, &NetworkTab::quickRefreshTailscale
   );
 }
 
-void NetworkTab::quickRunItem(const std::string& rowId, const std::string& itemId, bool destructive) {
-  if (destructive) {
-    const std::string key = rowId + "|" + itemId;
-    if (m_qArmed != key) {
-      m_qArmed = key;
-      m_qArmedUntil = std::chrono::steady_clock::now() + kArmTtl;
-      m_qArmTimer.start(std::chrono::duration_cast<std::chrono::milliseconds>(kArmTtl), [this]() {
-        m_qArmed.clear();
-        quickRequestUpdate();
-      });
-      quickRequestUpdate();
-      return;
-    }
+// Destructive items ask for a second press within kArmTtl; returns true once the press is confirmed.
+bool NetworkTab::quickConfirmDestructive(const std::string& rowId, const std::string& itemId) {
+  const std::string key = rowId + "|" + itemId;
+  if (m_qArmed == key) {
+    return true;
   }
-  quickDisarm();
-  m_qMenuId.clear();
+  m_qArmed = key;
+  m_qArmedUntil = std::chrono::steady_clock::now() + kArmTtl;
+  m_qArmTimer.start(std::chrono::duration_cast<std::chrono::milliseconds>(kArmTtl), [this]() {
+    m_qArmed.clear();
+    quickRequestUpdate();
+  });
+  quickRequestUpdate();
+  return false;
+}
 
-  if (rowId == "ip") {
-    if (itemId == "copy") {
-      quickCopy(rowId, m_qSnap.ipPlain);
-    } else if (itemId == "ext") {
-      const std::string external = m_externalIpService != nullptr ? m_externalIpService->externalIp() : std::string{};
-      if (external.empty()) {
-        quickSetNote(rowId, "ext ip unavailable", NoteTone::Warning, kFailureTtl);
-      } else {
-        if (m_clipboard != nullptr) {
-          m_clipboard->setClipboardText(external);
-        }
-        quickSetNote(
-            rowId, "ext " + external + (m_clipboard != nullptr ? " · copied" : ""), NoteTone::Accent,
-            std::chrono::seconds(8)
-        );
-      }
-    }
-  } else if (rowId.starts_with("c:")) {
-    const auto it = std::ranges::find(m_qProfiles, rowId.substr(2), &netq::Profile::uuid);
-    if (it == m_qProfiles.end()) {
-      return;
-    }
-    const netq::Profile profile = *it;
-    if (itemId == "connect") {
-      quickConnectProfile(profile);
-    } else if (itemId == "disconnect") {
-      quickDisconnectProfile(profile);
-    } else if (itemId == "copyip") {
-      quickCopyProfileIp(rowId, profile);
-    } else if (itemId == "auto") {
-      quickSetBusy(rowId, "updating…");
-      asynccmd::run(
-          {"nmcli", "connection", "modify", "uuid", profile.uuid, "connection.autoconnect",
-           profile.autoconnect ? "no" : "yes"},
-          std::chrono::seconds(8), m_alive,
-          [this, rowId](process::RunResult result) {
-            if (result) {
-              quickClearNote(rowId);
-            } else {
-              quickSetNote(rowId, "failed: " + netq::failureReason(result), NoteTone::Error, kFailureTtl);
-            }
-            quickRefreshProfiles();
-          }
-      );
-    } else if (itemId == "forget") {
-      quickSetBusy(rowId, "forgetting…");
-      asynccmd::run(
-          {"nmcli", "connection", "delete", "uuid", profile.uuid}, std::chrono::seconds(10), m_alive,
-          [this, rowId](process::RunResult result) {
-            if (result) {
-              quickClearNote(rowId);
-            } else {
-              quickSetNote(rowId, "failed: " + netq::failureReason(result), NoteTone::Error, kFailureTtl);
-            }
-            quickRefreshProfiles();
-          }
-      );
-    } else if (itemId == "edit") {
-      quickEditConnections(profile.uuid, profile.name);
-    }
-  } else if (rowId == "w:radio") {
-    if (itemId == "off") {
-      quickToggleWifi();
-    }
-  } else if (rowId.starts_with("w:")) {
-    if (itemId == "forget" && m_network != nullptr) {
-      m_network->forgetSsid(rowId.substr(2));
-      quickSetNote(rowId, "forgotten", NoteTone::Dim, kInfoTtl);
-      quickRefreshProfiles();
-      PanelManager::instance().refresh();
-    }
-  } else if (rowId == "t:exit") {
+void NetworkTab::quickRunIpItem(const std::string& rowId, const std::string& itemId) {
+  if (itemId == "copy") {
+    quickCopy(rowId, m_qSnap.ipPlain);
+    return;
+  }
+  if (itemId != "ext") {
+    return;
+  }
+  const std::string external = m_externalIpService != nullptr ? m_externalIpService->externalIp() : std::string{};
+  if (external.empty()) {
+    quickSetNote(rowId, "ext ip unavailable", NoteTone::Warning, kFailureTtl);
+    return;
+  }
+  if (m_clipboard != nullptr) {
+    m_clipboard->setClipboardText(external);
+  }
+  quickSetNote(
+      rowId, "ext " + external + (m_clipboard != nullptr ? " · copied" : ""), NoteTone::Accent, kExternalIpTtl
+  );
+}
+
+void NetworkTab::quickRunProfileItem(const std::string& rowId, const std::string& itemId) {
+  const auto it = std::ranges::find(m_qProfiles, rowId.substr(2), &netq::Profile::uuid);
+  if (it == m_qProfiles.end()) {
+    return;
+  }
+  const netq::Profile profile = *it; // the list may be replaced while the command runs
+  if (itemId == "connect") {
+    quickConnectProfile(profile);
+  } else if (itemId == "disconnect") {
+    quickDisconnectProfile(profile);
+  } else if (itemId == "copyip") {
+    quickCopyProfileIp(rowId, profile);
+  } else if (itemId == "auto") {
+    quickSetBusy(rowId, "updating…");
+    quickRunRowCommand(
+        rowId,
+        {"nmcli", "connection", "modify", "uuid", profile.uuid, "connection.autoconnect",
+         profile.autoconnect ? "no" : "yes"},
+        kProfileEditTimeout, &NetworkTab::quickRefreshProfiles
+    );
+  } else if (itemId == "forget") {
+    quickSetBusy(rowId, "forgetting…");
+    quickRunRowCommand(
+        rowId, {"nmcli", "connection", "delete", "uuid", profile.uuid}, kProfileDeleteTimeout,
+        &NetworkTab::quickRefreshProfiles
+    );
+  } else if (itemId == "edit") {
+    quickEditConnections(profile.uuid, profile.name);
+  }
+}
+
+void NetworkTab::quickRunTailscaleItem(const std::string& rowId, const std::string& itemId) {
+  if (rowId == "t:exit") {
     if (itemId == "none") {
       quickTailscaleExit({}, {});
     } else if (itemId.size() > 1 && itemId.front() == 'x') {
+      // "x<N>": the N-th exit-capable peer, in the order the menu listed them.
       const std::size_t wanted = static_cast<std::size_t>(std::atoi(itemId.c_str() + 1));
       std::size_t number = 0;
       for (const auto& peer : m_qTs.peers) {
@@ -3016,7 +3024,7 @@ void NetworkTab::quickRunItem(const std::string& rowId, const std::string& itemI
         }
       }
     }
-  } else if (rowId.starts_with("p:") && itemId == "copy") {
+  } else if (itemId == "copy") { // "p:<peer>"
     const std::string name = rowId.substr(2);
     for (const auto& peer : m_qTs.peers) {
       if (peer.name == name) {
@@ -3024,6 +3032,33 @@ void NetworkTab::quickRunItem(const std::string& rowId, const std::string& itemI
         break;
       }
     }
+  }
+}
+
+void NetworkTab::quickRunItem(const std::string& rowId, const std::string& itemId, bool destructive) {
+  if (destructive && !quickConfirmDestructive(rowId, itemId)) {
+    return;
+  }
+  quickDisarm();
+  m_qMenuId.clear();
+
+  if (rowId == "ip") {
+    quickRunIpItem(rowId, itemId);
+  } else if (rowId.starts_with("c:")) {
+    quickRunProfileItem(rowId, itemId);
+  } else if (rowId == "w:radio") {
+    if (itemId == "off") {
+      quickToggleWifi();
+    }
+  } else if (rowId.starts_with("w:")) {
+    if (itemId == "forget" && m_network != nullptr) {
+      m_network->forgetSsid(rowId.substr(2));
+      quickSetNote(rowId, "forgotten", NoteTone::Dim, kInfoTtl);
+      quickRefreshProfiles();
+      PanelManager::instance().refresh();
+    }
+  } else if (rowId == "t:exit" || (rowId.starts_with("p:") && itemId == "copy")) {
+    quickRunTailscaleItem(rowId, itemId);
   }
   quickRequestUpdate();
 }
@@ -3063,18 +3098,40 @@ void NetworkTab::quickRefreshTailscale() {
   }
   m_qTsInFlight = true;
   m_qTsAt = std::chrono::steady_clock::now();
+  asynccmd::run({"tailscale", "status", "--json"}, std::chrono::seconds(5), m_alive, [this](process::RunResult result) {
+    m_qTsInFlight = false;
+    if (result) {
+      m_qTs = netq::parseTailscaleStatus(result.out);
+    } else {
+      m_qTs = netq::TsState{};
+      m_qTs.loaded = true;
+      m_qTs.problem = (netq::contains(result.err, "tailscaled") || netq::contains(result.err, "connect"))
+          ? "daemon down"
+          : netq::failureReason(result);
+    }
+    quickRequestUpdate();
+  });
+}
+
+// One ping into `slot`. A reply that arrives after the slot's target changed (generation bumped) is dropped.
+void NetworkTab::quickProbe(const std::string& host, netq::Probe& slot) {
+  if (host.empty() || slot.inFlight) {
+    return;
+  }
+  slot.inFlight = true;
   asynccmd::run(
-      {"tailscale", "status", "--json"}, std::chrono::seconds(5), m_alive, [this](process::RunResult result) {
-        m_qTsInFlight = false;
-        if (result) {
-          m_qTs = netq::parseTailscaleStatus(result.out);
-        } else {
-          m_qTs = netq::TsState{};
-          m_qTs.loaded = true;
-          m_qTs.problem = (netq::contains(result.err, "tailscaled") || netq::contains(result.err, "connect"))
-                              ? "daemon down"
-                              : netq::failureReason(result);
+      {"ping", "-c1", "-W1", host}, kPingTimeout, m_alive,
+      [this, &slot, generation = slot.generation](process::RunResult result) {
+        if (generation != slot.generation) {
+          return;
         }
+        slot.inFlight = false;
+        if (result.exitCode < 0 && !result.timedOut) {
+          slot.known = false; // no ping binary: nothing to show
+          return;
+        }
+        slot.known = true;
+        slot.ms = result ? netq::parsePingMs(result.out) : std::nullopt;
         quickRequestUpdate();
       }
   );
@@ -3087,24 +3144,8 @@ void NetworkTab::quickProbeLatency() {
     m_qPingInternet.known = false;
     return;
   }
-  const auto probe = [this](const std::string& host, netq::Probe& slot) {
-    if (host.empty() || slot.inFlight) {
-      return;
-    }
-    slot.inFlight = true;
-    asynccmd::run({"ping", "-c1", "-W1", host}, std::chrono::seconds(3), m_alive, [this, &slot](process::RunResult result) {
-      slot.inFlight = false;
-      if (result.exitCode < 0 && !result.timedOut) {
-        slot.known = false; // no ping binary: nothing to show
-        return;
-      }
-      slot.known = true;
-      slot.ms = result ? netq::parsePingMs(result.out) : std::nullopt;
-      quickRequestUpdate();
-    });
-  };
-  probe(m_qSnap.gateway, m_qPingGateway);
-  probe("1.1.1.1", m_qPingInternet);
+  quickProbe(m_qSnap.gateway, m_qPingGateway);
+  quickProbe(kInternetProbeHost, m_qPingInternet);
 }
 
 void NetworkTab::quickTick() {
@@ -3121,6 +3162,8 @@ void NetworkTab::quickTick() {
   if (m_qSnap.gateway != m_qPingGatewayHost) {
     m_qPingGatewayHost = m_qSnap.gateway;
     m_qPingGateway.known = false;
+    m_qPingGateway.inFlight = false;
+    ++m_qPingGateway.generation;
     m_qPingAt = {};
   }
   if (now - m_qPingAt >= kPingEvery) {
@@ -3178,9 +3221,126 @@ void NetworkTab::resetQuick() {
   m_qLastPoll = {};
 }
 
+std::unique_ptr<Flex> NetworkTab::buildQuickHero(float scale) {
+  const float font = kMono * scale;
+  auto hero = ui::column({.align = FlexAlign::Stretch});
+  hero->addChild(
+      ui::row(
+          {.align = FlexAlign::Center,
+           .gap = Style::spaceMd * scale,
+           .minHeight = kQuickHeroHeight * scale,
+           .fillWidth = true},
+          ui::label({
+              .out = &m_qHeroMain,
+              .fontSize = Style::fontSizeTitle * scale,
+              .fontFamily = std::string(term_frame::kFont),
+              .color = colorSpecFromRole(ColorRole::OnSurface),
+              .maxLines = 1,
+          }),
+          ui::label({
+              .out = &m_qHeroDim,
+              .fontSize = Style::fontSizeCaption * scale,
+              .fontFamily = std::string(term_frame::kFont),
+              .color = term_frame::dimColor(),
+              .maxLines = 1,
+              .ellipsize = TextEllipsize::End,
+              .flexGrow = 1.0F,
+          })
+      )
+  );
+  hero->addChild(
+      ui::row(
+          {.align = FlexAlign::Center, .minHeight = kQuickRow * scale, .fillWidth = true},
+          ui::label({
+              .out = &m_qLatency,
+              .fontSize = font,
+              .fontFamily = std::string(term_frame::kFont),
+              .color = colorSpecFromRole(ColorRole::OnSurface),
+              .maxLines = 1,
+              .ellipsize = TextEllipsize::End,
+              .configure = [](Label& label) { label.setUseMarkup(true); },
+          })
+      )
+  );
+  return hero;
+}
+
+// The scale on the left of the traffic graph: peak on top, zero at the bottom.
+std::unique_ptr<Flex> NetworkTab::buildQuickGraphAxis(float scale) {
+  auto axis = ui::column({
+      .justify = FlexJustify::SpaceBetween,
+      .width = kAxisWidth * scale,
+      .height = kQuickGraphHeight * scale,
+  });
+  axis->addChild(
+      ui::label({
+          .out = &m_qAxisTop,
+          .text = "",
+          .fontSize = Style::fontSizeMini * scale,
+          .fontFamily = std::string(term_frame::kFont),
+          .color = term_frame::dimColor(),
+          .width = kAxisWidth * scale,
+          .maxLines = 1,
+          .textAlign = TextAlign::End,
+      })
+  );
+  axis->addChild(
+      ui::label({
+          .out = &m_qAxisBottom,
+          .text = "0",
+          .fontSize = Style::fontSizeMini * scale,
+          .fontFamily = std::string(term_frame::kFont),
+          .color = term_frame::dimColor(),
+          .width = kAxisWidth * scale,
+          .maxLines = 1,
+          .textAlign = TextAlign::End,
+      })
+  );
+  return axis;
+}
+
+// Holder box and the graph in it; doLayoutQuick resizes both once the width is known.
+std::unique_ptr<Box> NetworkTab::buildQuickGraphBox(float scale) {
+  auto graphBox = ui::box();
+  m_qGraphBox = graphBox.get();
+  m_qGraphBox->setSize(1.0F, kQuickGraphHeight * scale);
+  auto graph = std::make_unique<Graph>();
+  graph->setLineWidth(1.5F * scale);
+  graph->setFillOpacity(0.15F);
+  graph->setColor(colorSpecFromRole(ColorRole::Primary));
+  graph->setColor2(colorSpecFromRole(ColorRole::OnSurfaceVariant));
+  m_qGraph = static_cast<Graph*>(graphBox->addChild(std::move(graph)));
+  return graphBox;
+}
+
+// Traffic: rx/tx graph of the last minute with a scale on the left, and a figures line.
+std::unique_ptr<Flex> NetworkTab::buildQuickTrafficBox(float scale) {
+  auto traffic = quickBox("", "traffic", scale, &m_qTrafficTitle);
+  m_qTrafficBox = traffic.get();
+  auto axis = buildQuickGraphAxis(scale);
+  auto graphBox = buildQuickGraphBox(scale);
+  traffic->addChild(
+      ui::row({.align = FlexAlign::Start, .gap = Style::spaceXs * scale}, std::move(axis), std::move(graphBox))
+  );
+  traffic->addChild(
+      ui::row(
+          {.align = FlexAlign::Center, .minHeight = kQuickRow * scale, .fillWidth = true},
+          ui::label({
+              .out = &m_qTrafficText,
+              .fontSize = kMono * scale,
+              .fontFamily = std::string(term_frame::kFont),
+              .color = colorSpecFromRole(ColorRole::OnSurface),
+              .maxLines = 1,
+              .ellipsize = TextEllipsize::End,
+              .configure = [](Label& label) { label.setUseMarkup(true); },
+          })
+      )
+  );
+  return traffic;
+}
+
 std::unique_ptr<Flex> NetworkTab::createQuick() {
   const float scale = contentScale();
-  const float font = kMono * scale;
 
   m_qSnap = readQuickSnapshot();
   m_qBodyKey.clear();
@@ -3191,114 +3351,14 @@ std::unique_ptr<Flex> NetworkTab::createQuick() {
       .align = FlexAlign::Stretch,
       .gap = kQuickGap * scale,
   });
+  root->addChild(buildQuickHero(scale));
 
-  // Hero: the big interface / network name, its dim context and the latency line.
-  {
-    auto hero = ui::column({.align = FlexAlign::Stretch});
-    hero->addChild(
-        ui::row(
-            {.align = FlexAlign::Center, .gap = Style::spaceMd * scale, .minHeight = kQuickHeroHeight * scale,
-             .fillWidth = true},
-            ui::label({
-                .out = &m_qHeroMain,
-                .fontSize = Style::fontSizeTitle * scale,
-                .fontFamily = std::string(term_frame::kFont),
-                .color = colorSpecFromRole(ColorRole::OnSurface),
-                .maxLines = 1,
-            }),
-            ui::label({
-                .out = &m_qHeroDim,
-                .fontSize = Style::fontSizeCaption * scale,
-                .fontFamily = std::string(term_frame::kFont),
-                .color = term_frame::dimColor(),
-                .maxLines = 1,
-                .ellipsize = TextEllipsize::End,
-                .flexGrow = 1.0F,
-            })
-        )
-    );
-    hero->addChild(
-        ui::row(
-            {.align = FlexAlign::Center, .minHeight = kQuickRow * scale, .fillWidth = true},
-            ui::label({
-                .out = &m_qLatency,
-                .fontSize = font,
-                .fontFamily = std::string(term_frame::kFont),
-                .color = colorSpecFromRole(ColorRole::OnSurface),
-                .maxLines = 1,
-                .ellipsize = TextEllipsize::End,
-                .configure = [](Label& label) { label.setUseMarkup(true); },
-            })
-        )
-    );
-    root->addChild(std::move(hero));
+  // Filled by rebuildQuickBody().
+  for (Flex** holder : {&m_qIpHolder, &m_qConnHolder, &m_qWifiHolder, &m_qTsHolder}) {
+    root->addChild(ui::column({.out = holder, .align = FlexAlign::Stretch}));
   }
 
-  // Rebuilt by rebuildQuickBody().
-  root->addChild(ui::column({.out = &m_qIpHolder, .align = FlexAlign::Stretch}));
-  root->addChild(ui::column({.out = &m_qConnHolder, .align = FlexAlign::Stretch}));
-  root->addChild(ui::column({.out = &m_qWifiHolder, .align = FlexAlign::Stretch}));
-  root->addChild(ui::column({.out = &m_qTsHolder, .align = FlexAlign::Stretch}));
-
-  // Traffic: rx/tx graph of the last minute with a scale on the left, and a figures line.
-  {
-    auto traffic = quickBox("", "traffic", scale, &m_qTrafficTitle);
-    m_qTrafficBox = traffic.get();
-    auto axis = ui::column({
-        .justify = FlexJustify::SpaceBetween,
-        .width = kAxisWidth * scale,
-        .height = kQuickGraphHeight * scale,
-    });
-    axis->addChild(
-        ui::label({
-            .out = &m_qAxisTop,
-            .text = "",
-            .fontSize = Style::fontSizeMini * scale,
-            .fontFamily = std::string(term_frame::kFont),
-            .color = term_frame::dimColor(),
-            .width = kAxisWidth * scale,
-            .maxLines = 1,
-            .textAlign = TextAlign::End,
-        })
-    );
-    axis->addChild(
-        ui::label({
-            .out = &m_qAxisBottom,
-            .text = "0",
-            .fontSize = Style::fontSizeMini * scale,
-            .fontFamily = std::string(term_frame::kFont),
-            .color = term_frame::dimColor(),
-            .width = kAxisWidth * scale,
-            .maxLines = 1,
-            .textAlign = TextAlign::End,
-        })
-    );
-    auto graphBox = ui::box();
-    m_qGraphBox = graphBox.get();
-    m_qGraphBox->setSize(1.0F, kQuickGraphHeight * scale);
-    auto graph = std::make_unique<Graph>();
-    graph->setLineWidth(1.5F * scale);
-    graph->setFillOpacity(0.15F);
-    graph->setColor(colorSpecFromRole(ColorRole::Primary));
-    graph->setColor2(colorSpecFromRole(ColorRole::OnSurfaceVariant));
-    m_qGraph = static_cast<Graph*>(graphBox->addChild(std::move(graph)));
-    traffic->addChild(ui::row({.align = FlexAlign::Start, .gap = Style::spaceXs * scale}, std::move(axis), std::move(graphBox)));
-    traffic->addChild(
-        ui::row(
-            {.align = FlexAlign::Center, .minHeight = kQuickRow * scale, .fillWidth = true},
-            ui::label({
-                .out = &m_qTrafficText,
-                .fontSize = font,
-                .fontFamily = std::string(term_frame::kFont),
-                .color = colorSpecFromRole(ColorRole::OnSurface),
-                .maxLines = 1,
-                .ellipsize = TextEllipsize::End,
-                .configure = [](Label& label) { label.setUseMarkup(true); },
-            })
-        )
-    );
-    root->addChild(std::move(traffic));
-  }
+  root->addChild(buildQuickTrafficBox(scale));
   return root;
 }
 
@@ -3323,10 +3383,8 @@ void NetworkTab::doLayoutQuick(Renderer& renderer, float contentWidth, float bod
   }
 }
 
-void NetworkTab::rebuildQuickBody(const QuickModel& model, float scale) {
-  if (m_qIpHolder == nullptr || m_qConnHolder == nullptr || m_qWifiHolder == nullptr || m_qTsHolder == nullptr) {
-    return;
-  }
+// Drops the old rows and returns the password typed so far; keeps the field focused across the rebuild.
+std::string NetworkTab::quickClearBody() {
   std::string carried;
   if (m_qPwInput != nullptr) {
     carried = m_qPwInput->value();
@@ -3342,166 +3400,194 @@ void NetworkTab::rebuildQuickBody(const QuickModel& model, float scale) {
       holder->removeChild(holder->children().front().get());
     }
   }
+  return carried;
+}
 
-  const auto onRowClick = [this](const std::string& id) {
-    return [this, id]() {
+std::unique_ptr<Button> NetworkTab::quickRowButton(const QRow& row, bool selected, float scale) {
+  std::string markup = selected ? colorSpan(ColorRole::Primary, "▸") + " " : "  ";
+  markup += row.dimName ? dimSpan(row.name) : escapeMarkup(row.name);
+  term_frame::ToggleRow toggle;
+  std::function<void()> onRight;
+  if (!row.menu.empty()) {
+    onRight = [this, id = row.id]() {
       m_qSel = id;
-      m_qMenuId.clear();
+      m_qMenuId = m_qMenuId == id ? std::string{} : id;
       quickDisarm();
-      quickEnter();
       quickRequestUpdate();
     };
-  };
+  }
+  auto button = term_frame::toggleRow(
+      std::string{}, scale, toggle,
+      [this, id = row.id]() {
+        m_qSel = id;
+        m_qMenuId.clear();
+        quickDisarm();
+        quickEnter();
+        quickRequestUpdate();
+      },
+      std::move(onRight)
+  );
+  if (button->label() != nullptr) {
+    button->label()->setUseMarkup(true);
+  }
+  button->setText(markup);
+  if (toggle.detail != nullptr) {
+    toggle.detail->setUseMarkup(true);
+  }
+  term_frame::setToggleRow(toggle, true, row.lit, row.badge, row.detail);
+  setShown(toggle.stateBox, !row.badge.empty());
+  return button;
+}
 
-  const auto renderElems = [&](Flex& parent, const QSection& section) {
-    for (const auto& elem : section.elems) {
-      switch (elem.kind) {
-      case ElemKind::Row: {
-        const QRow& row = elem.row;
-        const bool selected = row.id == model.sel;
-        std::string markup = selected ? colorSpan(ColorRole::Primary, "▸") + " " : "  ";
-        markup += row.dimName ? dimSpan(row.name) : escapeMarkup(row.name);
-        term_frame::ToggleRow toggle;
-        std::function<void()> onRight;
-        if (!row.menu.empty()) {
-          onRight = [this, id = row.id]() {
-            m_qSel = id;
-            m_qMenuId = m_qMenuId == id ? std::string{} : id;
-            quickDisarm();
-            quickRequestUpdate();
-          };
-        }
-        auto button = term_frame::toggleRow(std::string{}, scale, toggle, onRowClick(row.id), std::move(onRight));
-        if (button->label() != nullptr) {
-          button->label()->setUseMarkup(true);
-        }
-        button->setText(markup);
-        if (toggle.detail != nullptr) {
-          toggle.detail->setUseMarkup(true);
-        }
-        term_frame::setToggleRow(toggle, true, row.lit, row.badge, row.detail);
-        showNode(toggle.stateBox, !row.badge.empty());
-        parent.addChild(std::move(button));
-        break;
+// An open action menu: its items wrapped into lines, the armed destructive one reading "confirm?".
+std::unique_ptr<Flex> NetworkTab::quickMenuBlock(const QElem& elem, float scale) {
+  auto block = ui::column({.align = FlexAlign::Stretch});
+  for (const auto& line : elem.lines) {
+    auto lineRow = ui::row({
+        .align = FlexAlign::Center,
+        .gap = Style::spaceSm * scale,
+        .minHeight = kQuickRow * scale,
+        .fillWidth = true,
+    });
+    lineRow->addChild(
+        ui::label({
+            .text = "  ",
+            .fontSize = kMono * scale,
+            .fontFamily = std::string(term_frame::kFont),
+            .color = term_frame::dimColor(),
+        })
+    );
+    for (const auto& item : line) {
+      auto keyword = std::make_unique<term_frame::Keyword>();
+      const bool armed = item.destructive && m_qArmed == elem.row.id + "|" + item.id;
+      lineRow->addChild(
+          term_frame::makeKeyword(
+              *keyword, item.word, item.hot, scale,
+              [this, rowId = elem.row.id, itemId = item.id, destructive = item.destructive]() {
+                quickRunItem(rowId, itemId, destructive);
+              }
+          )
+      );
+      if (armed) {
+        keyword->block = true;
+        keyword->blockText = "confirm?";
+        term_frame::refreshKeyword(*keyword);
       }
-      case ElemKind::Menu: {
-        auto block = ui::column({.align = FlexAlign::Stretch});
-        for (const auto& line : elem.lines) {
-          auto lineRow = ui::row({
-              .align = FlexAlign::Center,
-              .gap = Style::spaceSm * scale,
-              .minHeight = kQuickRow * scale,
-              .fillWidth = true,
-          });
-          lineRow->addChild(
-              ui::label({
-                  .text = "  ",
-                  .fontSize = kMono * scale,
-                  .fontFamily = std::string(term_frame::kFont),
-                  .color = term_frame::dimColor(),
-              })
-          );
-          for (const auto& item : line) {
-            auto keyword = std::make_unique<term_frame::Keyword>();
-            const bool armed = item.destructive && m_qArmed == elem.row.id + "|" + item.id;
-            lineRow->addChild(term_frame::makeKeyword(
-                *keyword, item.word, item.hot, scale,
-                [this, rowId = elem.row.id, itemId = item.id, destructive = item.destructive]() {
-                  quickRunItem(rowId, itemId, destructive);
-                }
-            ));
-            if (armed) {
-              keyword->block = true;
-              keyword->blockText = "confirm?";
-              term_frame::refreshKeyword(*keyword);
-            }
-            m_qKeywords.push_back(std::move(keyword));
-          }
-          block->addChild(std::move(lineRow));
-        }
-        parent.addChild(std::move(block));
-        break;
-      }
-      case ElemKind::Password: {
-        parent.addChild(
-            ui::row(
-                {.align = FlexAlign::Center, .gap = Style::spaceXs * scale, .minHeight = kQuickPasswordHeight * scale,
-                 .fillWidth = true},
-                ui::label({
-                    .text = "  ",
-                    .fontSize = kMono * scale,
-                    .fontFamily = std::string(term_frame::kFont),
-                    .color = term_frame::dimColor(),
-                }),
-                ui::input({
-                    .out = &m_qPwInput,
-                    .placeholder = "password",
-                    .fontSize = Style::fontSizeCaption * scale,
-                    .controlHeight = (kQuickPasswordHeight - 2.0F) * scale,
-                    .passwordMode = true,
-                    .surfaceRole = ColorRole::Surface,
-                    .flexGrow = 1.0F,
-                    .onSubmit =
-                        [this](const std::string& value) {
-                          if (value.empty()) {
-                            return;
-                          }
-                          if (!m_pendingSsid.empty()) {
-                            m_qAttempt = WifiAttempt{
-                                .ssid = m_pendingSsid, .since = std::chrono::steady_clock::now(), .withPassword = true};
-                            quickSetBusy("w:" + m_pendingSsid, "connecting…");
-                          }
-                          submitPasswordPrompt(value);
-                        },
-                })
-            )
-        );
-        break;
-      }
-      case ElemKind::Text:
-        parent.addChild(
-            ui::row(
-                {.align = FlexAlign::Center, .minHeight = kQuickRow * scale, .fillWidth = true},
-                ui::label({
-                    .text = elem.text,
-                    .fontSize = kMono * scale,
-                    .fontFamily = std::string(term_frame::kFont),
-                    .color = term_frame::dimColor(),
-                    .maxLines = 1,
-                    .ellipsize = TextEllipsize::End,
-                })
-            )
-        );
-        break;
-      }
+      m_qKeywords.push_back(std::move(keyword));
     }
-  };
+    block->addChild(std::move(lineRow));
+  }
+  return block;
+}
+
+std::unique_ptr<Flex> NetworkTab::quickPasswordRow(float scale) {
+  return ui::row(
+      {.align = FlexAlign::Center,
+       .gap = Style::spaceXs * scale,
+       .minHeight = kQuickPasswordHeight * scale,
+       .fillWidth = true},
+      ui::label({
+          .text = "  ",
+          .fontSize = kMono * scale,
+          .fontFamily = std::string(term_frame::kFont),
+          .color = term_frame::dimColor(),
+      }),
+      ui::input({
+          .out = &m_qPwInput,
+          .placeholder = "password",
+          .fontSize = Style::fontSizeCaption * scale,
+          .controlHeight = (kQuickPasswordHeight - 2.0F) * scale,
+          .passwordMode = true,
+          .surfaceRole = ColorRole::Surface,
+          .flexGrow = 1.0F,
+          .onSubmit = [this](const std::string& value) {
+            if (value.empty()) {
+              return;
+            }
+            if (!m_pendingSsid.empty()) {
+              m_qAttempt =
+                  WifiAttempt{.ssid = m_pendingSsid, .since = std::chrono::steady_clock::now(), .withPassword = true};
+              quickSetBusy("w:" + m_pendingSsid, "connecting…");
+            }
+            submitPasswordPrompt(value);
+          },
+      })
+  );
+}
+
+namespace {
+
+  std::unique_ptr<Flex> quickTextRow(const std::string& text, float scale) {
+    return ui::row(
+        {.align = FlexAlign::Center, .minHeight = kQuickRow * scale, .fillWidth = true},
+        ui::label({
+            .text = text,
+            .fontSize = kMono * scale,
+            .fontFamily = std::string(term_frame::kFont),
+            .color = term_frame::dimColor(),
+            .maxLines = 1,
+            .ellipsize = TextEllipsize::End,
+        })
+    );
+  }
+
+} // namespace
+
+void NetworkTab::quickRenderElems(Flex& parent, const QSection& section, const std::string& selectedId, float scale) {
+  for (const auto& elem : section.elems) {
+    switch (elem.kind) {
+    case ElemKind::Row:
+      parent.addChild(quickRowButton(elem.row, elem.row.id == selectedId, scale));
+      break;
+    case ElemKind::Menu:
+      parent.addChild(quickMenuBlock(elem, scale));
+      break;
+    case ElemKind::Password:
+      parent.addChild(quickPasswordRow(scale));
+      break;
+    case ElemKind::Text:
+      parent.addChild(quickTextRow(elem.text, scale));
+      break;
+    }
+  }
+}
+
+// A bordered, numbered section in `holder`; an empty section hides its holder.
+void NetworkTab::quickFillBox(
+    Flex* holder, const QSection& section, std::size_t& numeral, const std::string& selectedId, float scale
+) {
+  const bool show = !section.elems.empty();
+  setShown(holder, show);
+  if (!show) {
+    return;
+  }
+  Label* chip = nullptr;
+  auto box = quickBox(kNumerals[std::min(numeral++, kNumerals.size() - 1)], section.title, scale, nullptr, &chip);
+  if (chip != nullptr) {
+    term_frame::setChip(*chip, section.chip);
+  }
+  quickRenderElems(*box, section, selectedId, scale);
+  holder->addChild(std::move(box));
+}
+
+void NetworkTab::rebuildQuickBody(const QuickModel& model, float scale) {
+  if (m_qIpHolder == nullptr || m_qConnHolder == nullptr || m_qWifiHolder == nullptr || m_qTsHolder == nullptr) {
+    return;
+  }
+  const std::string carried = quickClearBody();
 
   std::size_t numeral = 0;
-  const auto fillBox = [&](Flex* holder, const QSection& section) {
-    const bool show = !section.elems.empty();
-    showNode(holder, show);
-    if (!show) {
-      return;
-    }
-    Label* chip = nullptr;
-    auto box = quickBox(kNumerals[std::min(numeral++, kNumerals.size() - 1)], section.title, scale, nullptr, &chip);
-    if (chip != nullptr) {
-      term_frame::setChip(*chip, section.chip);
-    }
-    renderElems(*box, section);
-    holder->addChild(std::move(box));
-  };
+  setShown(m_qIpHolder, !model.ip.elems.empty());
+  quickRenderElems(*m_qIpHolder, model.ip, model.sel, scale);
+  quickFillBox(m_qConnHolder, model.conn, numeral, model.sel, scale);
+  quickFillBox(m_qWifiHolder, model.wifi, numeral, model.sel, scale);
+  quickFillBox(m_qTsHolder, model.tailscale, numeral, model.sel, scale);
 
-  showNode(m_qIpHolder, !model.ip.elems.empty());
-  renderElems(*m_qIpHolder, model.ip);
-  fillBox(m_qConnHolder, model.conn);
-  fillBox(m_qWifiHolder, model.wifi);
-  fillBox(m_qTsHolder, model.tailscale);
-
-  showNode(m_qTrafficBox, model.traffic);
+  setShown(m_qTrafficBox, model.traffic);
   if (m_qTrafficTitle != nullptr) {
-    m_qTrafficTitle->setText(std::string(model.traffic ? kNumerals[std::min(numeral, kNumerals.size() - 1)] : "") + "traffic");
+    m_qTrafficTitle->setText(
+        std::string(model.traffic ? kNumerals[std::min(numeral, kNumerals.size() - 1)] : "") + "traffic"
+    );
   }
 
   if (m_qPwInput != nullptr) {
@@ -3556,9 +3642,75 @@ void NetworkTab::syncQuickTraffic(Renderer& renderer) {
   const double curTx = txRaw.empty() ? 0.0 : txRaw.back();
   const std::string rxTag = "<span foreground=\"" + term_frame::paletteHex(ColorRole::Primary) + "\">rx</span>";
   m_qTrafficText->setText(
-      rxTag + " " + rateText(curRx) + "  " + dimSpan("peak") + " " + rateText(peakRx) + "   " + dimSpan("tx") + " "
-      + rateText(curTx) + "  " + dimSpan("peak") + " " + rateText(peakTx)
+      rxTag
+      + " "
+      + rateText(curRx)
+      + "  "
+      + dimSpan("peak")
+      + " "
+      + rateText(peakRx)
+      + "   "
+      + dimSpan("tx")
+      + " "
+      + rateText(curTx)
+      + "  "
+      + dimSpan("peak")
+      + " "
+      + rateText(peakTx)
   );
+}
+
+void NetworkTab::quickHeroText(std::string& main, std::string& dim) const {
+  if (!networkAvailable()) {
+    main = "unavailable";
+    dim = "network service is not running";
+  } else if (!m_qSnap.connected) {
+    main = "offline";
+    dim = m_qSnap.hasWifiDevice ? (m_network->state().wirelessEnabled ? "wi-fi on" : "wi-fi off") : "no link";
+  } else if (m_qSnap.medium == "wi-fi") {
+    main = m_qSnap.ssid.empty() ? m_qSnap.iface : m_qSnap.ssid;
+    dim = "wi-fi";
+    if (m_qSnap.signal > 0) {
+      dim += std::format(" · {}%", m_qSnap.signal);
+    }
+    if (!m_qSnap.band.empty()) {
+      dim += " · " + m_qSnap.band;
+    }
+  } else {
+    main = m_qSnap.iface.empty() ? m_qSnap.medium : m_qSnap.iface;
+    dim = m_qSnap.medium;
+    if (!m_qSnap.speed.empty()) {
+      dim += " · " + m_qSnap.speed;
+    }
+  }
+}
+
+std::string NetworkTab::quickLatencyMarkup() const {
+  if (!m_qSnap.connected) {
+    return {};
+  }
+  std::string latency;
+  if (!m_qSnap.gateway.empty()) {
+    latency = dimSpan("gateway") + " " + probeMarkup(m_qPingGateway, true) + "  ";
+  }
+  return latency + dimSpan("internet") + " " + probeMarkup(m_qPingInternet, false);
+}
+
+// A credential request that just arrived (the secret agent, or Enter on a locked network) selects its network and
+// focuses the field. A request with no SSID ("-") has no row; it only focuses the field once.
+void NetworkTab::quickTrackPasswordOwner() {
+  const std::string owner = quickPasswordRowId();
+  if (owner != m_qPwOwner) {
+    m_qPwOwner = owner;
+    if (!owner.empty()) {
+      m_qSel = owner;
+      m_qMenuId.clear();
+      m_qFocusPassword = true;
+    }
+  } else if (m_hasPendingSecret && m_pendingSsid.empty() && m_qPwOwner != "-") {
+    m_qPwOwner = "-";
+    m_qFocusPassword = true;
+  }
 }
 
 void NetworkTab::syncQuick(Renderer& renderer, bool force) {
@@ -3580,77 +3732,33 @@ void NetworkTab::syncQuick(Renderer& renderer, bool force) {
   quickPruneNotes();
   quickSyncAttempts();
 
-  // A credential request that just arrived (the secret agent, or Enter on a locked network): select its network.
-  {
-    const std::string owner = (m_hasPendingSecret && !m_pendingSsid.empty()) ? "w:" + m_pendingSsid : std::string{};
-    if (owner != m_qPwOwner) {
-      m_qPwOwner = owner;
-      if (!owner.empty()) {
-        m_qSel = owner;
-        m_qMenuId.clear();
-        m_qFocusPassword = true;
-      }
-    } else if (m_hasPendingSecret && m_pendingSsid.empty() && m_qPwOwner != "-") {
-      m_qPwOwner = "-";
-      m_qFocusPassword = true;
-    }
-  }
+  quickTrackPasswordOwner();
 
   QuickModel model = buildQuickModel(m_qWidth, m_qSnap);
   m_qSel = model.sel;
   if (m_qMenuId != m_qSel) {
     m_qMenuId.clear();
   }
-  m_qSelectables = model.selectables;
-  m_qMenuKeys = model.menuKeys;
+  m_qSelectables = std::move(model.selectables);
+  m_qMenuKeys = std::move(model.menuKeys);
   m_qSelHasMenu = model.selHasMenu;
 
   bool relayout = false;
 
-  // Hero.
-  {
-    std::string main;
-    std::string dim;
-    if (!networkAvailable()) {
-      main = "unavailable";
-      dim = "network service is not running";
-    } else if (!m_qSnap.connected) {
-      main = "offline";
-      dim = m_qSnap.hasWifiDevice ? (m_network->state().wirelessEnabled ? "wi-fi on" : "wi-fi off") : "no link";
-    } else if (m_qSnap.medium == "wi-fi") {
-      main = m_qSnap.ssid.empty() ? m_qSnap.iface : m_qSnap.ssid;
-      dim = "wi-fi";
-      if (m_qSnap.signal > 0) {
-        dim += std::format(" · {}%", m_qSnap.signal);
-      }
-      if (!m_qSnap.band.empty()) {
-        dim += " · " + m_qSnap.band;
-      }
-    } else {
-      main = m_qSnap.iface.empty() ? m_qSnap.medium : m_qSnap.iface;
-      dim = m_qSnap.medium;
-      if (!m_qSnap.speed.empty()) {
-        dim += " · " + m_qSnap.speed;
-      }
-    }
-    if (m_qHeroMain != nullptr && m_qHeroMain->setText(main)) {
+  std::string heroMain;
+  std::string heroDim;
+  quickHeroText(heroMain, heroDim);
+  if (m_qHeroMain != nullptr && m_qHeroMain->setText(heroMain)) {
+    relayout = true;
+  }
+  if (m_qHeroDim != nullptr && m_qHeroDim->setText(heroDim)) {
+    relayout = true;
+  }
+  if (m_qLatency != nullptr) {
+    const std::string latency = quickLatencyMarkup();
+    if (m_qLatency->text() != latency) {
+      m_qLatency->setText(latency);
       relayout = true;
-    }
-    if (m_qHeroDim != nullptr && m_qHeroDim->setText(dim)) {
-      relayout = true;
-    }
-    if (m_qLatency != nullptr) {
-      std::string latency;
-      if (m_qSnap.connected) {
-        if (!m_qSnap.gateway.empty()) {
-          latency = dimSpan("gateway") + " " + probeMarkup(m_qPingGateway, true) + "  ";
-        }
-        latency += dimSpan("internet") + " " + probeMarkup(m_qPingInternet, false);
-      }
-      if (m_qLatency->text() != latency) {
-        m_qLatency->setText(latency);
-        relayout = true;
-      }
     }
   }
 

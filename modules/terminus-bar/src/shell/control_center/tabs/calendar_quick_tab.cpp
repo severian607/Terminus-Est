@@ -1,3 +1,5 @@
+// Bar-clock quick panel: hero clock, month grid (¹) and agenda (²) with a fixed row budget for events and tasks.
+
 #include "shell/control_center/tabs/calendar_quick_tab.h"
 
 #include "calendar/calendar_service.h"
@@ -18,13 +20,16 @@
 #include "ui/style.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <ctime>
 #include <format>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 #include <xkbcommon/xkbcommon-keysyms.h>
@@ -37,23 +42,39 @@ namespace {
   constexpr float kCellWidth = 24.0F;
   constexpr float kWeekColumnWidth = 20.0F;
   constexpr float kRowHeight = term_frame::kRowHeight;
-  constexpr int kAgendaRows = 12; // events first, then up to three open tasks (a long title wraps to two lines)
-  constexpr int kMaxTasks = 3;
   constexpr float kTitleRowHeight = 17.0F;
   constexpr float kHeroHeight = 46.0F;
   constexpr float kHeroClockSize = 32.0F;
+  constexpr float kFallbackBodyWidth = 442.0F;
+  constexpr float kEventDotWidth = 4.0F;
+  constexpr float kEventDotHeight = 2.0F;
+  constexpr float kEventDotBottomMargin = 3.0F;
+  constexpr float kPassedAlpha = 0.55F;
+  constexpr float kMonoAdvanceEm = 0.6F; // JetBrains Mono glyph advance, for the wrap estimate
+
+  constexpr int kDaysPerWeek = 7;
+  constexpr int kGridWeeks = 6;
+  constexpr int kGridRows = 2 + kGridWeeks; // navigation + weekday initials + weeks
+  constexpr int kThursday = 4;              // tm_wday; ISO week numbers are named by the week's Thursday
+
+  // Agenda row budget: events first, then up to kMaxTasks open tasks (a long title wraps to two lines).
+  constexpr int kAgendaRows = 12;
+  constexpr int kMaxSelectedRows = 3; // the last slot turns into "+N more" on overflow
+  constexpr int kMaxTasks = 3;
+  constexpr int kNextDays = 7;
+  constexpr std::size_t kTimeColumnChars = 11;
+
   constexpr float kBoxHeight =
       2.0F * (Style::spaceSm + Style::borderWidth) + kTitleRowHeight + Style::spaceXs + kAgendaRows * kRowHeight;
   constexpr float kPanelHeight = kHeroHeight + Style::spaceSm + kBoxHeight;
-  constexpr float kFallbackBodyWidth = 442.0F;
-  constexpr int kMaxSelectedRows = 3;
-  constexpr int kNextDays = 7;
-  constexpr float kPassedAlpha = 0.55F;
+
+  constexpr std::array<const char*, 12> kMonthAbbreviations = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
   using term_frame::dimColor;
 
-  std::tm localTm(std::chrono::system_clock::time_point time) {
-    const std::time_t raw = std::chrono::system_clock::to_time_t(time);
+  std::tm localTm(chr::system_clock::time_point time) {
+    const std::time_t raw = chr::system_clock::to_time_t(time);
     std::tm local{};
     localtime_r(&raw, &local);
     return local;
@@ -61,18 +82,16 @@ namespace {
 
   chr::year_month_day today() {
     const std::tm local = localTm(chr::system_clock::now());
-    return chr::year{local.tm_year + 1900} / chr::month{static_cast<unsigned>(local.tm_mon + 1)}
-        / chr::day{static_cast<unsigned>(local.tm_mday)};
+    return chr::year{local.tm_year + 1900}
+    / chr::month{static_cast<unsigned>(local.tm_mon + 1)}
+    / chr::day{static_cast<unsigned>(local.tm_mday)};
   }
 
+  // yyyymmdd, comparable as an integer.
   int keyOf(chr::year_month_day date) {
-    return static_cast<int>(date.year()) * 10000 + static_cast<int>(static_cast<unsigned>(date.month())) * 100
+    return static_cast<int>(date.year()) * 10000
+        + static_cast<int>(static_cast<unsigned>(date.month())) * 100
         + static_cast<int>(static_cast<unsigned>(date.day()));
-  }
-
-  int keyOf(chr::system_clock::time_point time) {
-    const std::tm local = localTm(time);
-    return (local.tm_year + 1900) * 10000 + (local.tm_mon + 1) * 100 + local.tm_mday;
   }
 
   std::tm tmOf(chr::year_month_day date) {
@@ -83,6 +102,9 @@ namespace {
     value.tm_wday = static_cast<int>(chr::weekday{chr::sys_days{date}}.c_encoding());
     return value;
   }
+
+  // Minutes since the epoch: changes exactly when the local clock face does, without formatting a string.
+  std::int64_t currentMinute() { return chr::floor<chr::minutes>(chr::system_clock::now()).time_since_epoch().count(); }
 
   // First `count` UTF-8 codepoints of `text`.
   std::string firstCodepoints(const std::string& text, int count) {
@@ -108,15 +130,413 @@ namespace {
 #endif
   }
 
-  struct AgendaItem {
-    const CalendarEvent* event = nullptr;
-    int startKey = 0;
-  };
-
   chr::year_month_day addMonths(chr::year_month_day date, int months) {
     const chr::year_month target = chr::year_month{date.year(), date.month()} + chr::months{months};
     const chr::day last = (target / chr::last).day();
     return target / (date.day() > last ? last : date.day());
+  }
+
+  std::string clockTime(const CalendarEvent& event) { return formatStrftime("%H:%M", localTm(event.start)); }
+
+} // namespace
+
+// Everything one rebuild() derives once and the section builders share.
+struct CalendarFrame {
+  float scale = 1.0F;
+  float font = 0.0F;
+  float rowHeight = 0.0F;
+  float boxHeight = 0.0F;
+  float gap = 0.0F;
+  float bodyWidth = 0.0F;
+  float cellWidth = 0.0F;
+  float weekWidth = 0.0F; // 0 when week numbers are hidden
+  float gridWidth = 0.0F; // inner width of the month grid
+  float monthBoxWidth = 0.0F;
+  float agendaBoxWidth = 0.0F;
+  bool showWeeks = false;
+  int firstDay = 0; // tm_wday of the first column
+  std::string family;
+  ColorSpec text;
+  ColorSpec primary;
+  chr::system_clock::time_point now;
+  chr::year_month_day today;
+  int todayKey = 0;
+  int selectedKey = 0;
+  const CalendarSnapshot* snapshot = nullptr;
+  std::vector<std::pair<int, int>> eventDays; // eventDayKeys of snapshot->events, index-aligned
+
+  [[nodiscard]] bool dayHasEvents(int key) const {
+    return std::any_of(eventDays.begin(), eventDays.end(), [key](const auto& range) {
+      return key >= range.first && key <= range.second;
+    });
+  }
+};
+
+namespace {
+
+  std::unique_ptr<Label> frameLabel(
+      const CalendarFrame& frame, std::string text, const ColorSpec& color,
+      std::optional<FontWeight> weight = std::nullopt
+  ) {
+    return ui::label({
+        .text = std::move(text),
+        .fontSize = frame.font,
+        .fontWeight = weight,
+        .fontFamily = frame.family,
+        .color = color,
+        .maxLines = 1,
+    });
+  }
+
+  // A fixed-width, centred grid cell holding one label.
+  std::unique_ptr<Flex> centeredCell(const CalendarFrame& frame, float width, std::unique_ptr<Label> label) {
+    auto cell = ui::column({.align = FlexAlign::Center, .justify = FlexJustify::Center});
+    cell->addChild(std::move(label));
+    term_frame::pinSize(*cell, width, frame.rowHeight);
+    return cell;
+  }
+
+  std::unique_ptr<Flex> buildHero(const CalendarFrame& frame) {
+    const std::tm nowTm = localTm(frame.now);
+    const chr::days left = chr::sys_days{frame.today.year() / chr::December / 31} - chr::sys_days{frame.today};
+    const float clockSize = kHeroClockSize * frame.scale;
+    const float gap = Style::spaceMd * frame.scale;
+
+    auto hero = ui::row({.align = FlexAlign::Center, .gap = gap});
+    hero->addChild(
+        ui::label({
+            .text = formatStrftime("%H:%M", nowTm),
+            .fontSize = clockSize,
+            .fontWeight = FontWeight::Medium,
+            .fontFamily = frame.family,
+            .color = frame.primary,
+            .maxLines = 1,
+        })
+    );
+    auto info = ui::column({.align = FlexAlign::Start, .justify = FlexJustify::Center, .gap = 0.0F, .flexGrow = 1.0F});
+    info->addChild(
+        ui::label({
+            .text = formatStrftime("%A %-d %B %Y", nowTm),
+            .fontSize = frame.font,
+            .fontFamily = frame.family,
+            .color = dimColor(),
+            .maxWidth = std::max(0.0F, frame.bodyWidth - term_frame::monoWidth(6, clockSize) - gap),
+            .maxLines = 1,
+            .ellipsize = TextEllipsize::End,
+        })
+    );
+    info->addChild(frameLabel(
+        frame, std::format("{} days left in {}", left.count(), static_cast<int>(frame.today.year())), dimColor()
+    ));
+    hero->addChild(std::move(info));
+    term_frame::pinSize(*hero, frame.bodyWidth, kHeroHeight * frame.scale);
+    return hero;
+  }
+
+  std::unique_ptr<Flex> buildWeekdayRow(const CalendarFrame& frame) {
+    auto row = ui::row({.align = FlexAlign::Center});
+    if (frame.showWeeks) {
+      row->addChild(centeredCell(frame, frame.weekWidth, frameLabel(frame, "wk", dimColor())));
+    }
+    for (int i = 0; i < kDaysPerWeek; ++i) {
+      std::tm value{};
+      value.tm_wday = (frame.firstDay + i) % kDaysPerWeek;
+      value.tm_mday = 1;
+      row->addChild(centeredCell(
+          frame, frame.cellWidth, frameLabel(frame, firstCodepoints(formatStrftime("%a", value), 2), frame.text)
+      ));
+    }
+    term_frame::pinSize(*row, frame.gridWidth, frame.rowHeight);
+    return row;
+  }
+
+  // One day of the month grid: today is a filled cell, the selection a bordered one, event days carry a dot.
+  std::unique_ptr<Flex>
+  buildDayCell(const CalendarFrame& frame, chr::year_month_day date, chr::year_month_day selected) {
+    const int key = keyOf(date);
+    const bool inMonth = date.month() == selected.month() && date.year() == selected.year();
+    const bool isToday = key == frame.todayKey;
+    const bool isSelected = key == frame.selectedKey;
+
+    ColorSpec labelColor = inMonth ? frame.text : colorSpecFromRole(ColorRole::OnSurfaceVariant, 0.55F);
+    if (isToday) {
+      labelColor = colorSpecFromRole(ColorRole::Surface);
+    } else if (isSelected) {
+      labelColor = frame.primary;
+    }
+    auto cell = ui::column({
+        .align = FlexAlign::Center,
+        .justify = FlexJustify::Center,
+        .fill = isToday ? std::optional<ColorSpec>(frame.primary) : std::nullopt,
+        .radius = 0.0F,
+        .border = isSelected
+            ? std::optional<ColorSpec>(isToday ? colorSpecFromRole(ColorRole::OnSurface) : frame.primary)
+            : std::nullopt,
+        .borderWidth = Style::borderWidth,
+    });
+    cell->addChild(frameLabel(
+        frame, std::to_string(static_cast<unsigned>(date.day())), labelColor,
+        isToday || isSelected ? FontWeight::Bold : FontWeight::Normal
+    ));
+    if (frame.dayHasEvents(key)) {
+      const float dotWidth = kEventDotWidth * frame.scale;
+      const float dotHeight = kEventDotHeight * frame.scale;
+      auto dot = ui::box({
+          .fill = isToday ? colorSpecFromRole(ColorRole::Surface) : frame.primary,
+          .radius = 0.0F,
+          .width = dotWidth,
+          .height = dotHeight,
+          .participatesInLayout = false,
+      });
+      dot->setPosition(
+          std::round((frame.cellWidth - dotWidth) * 0.5F),
+          frame.rowHeight - dotHeight - kEventDotBottomMargin * frame.scale
+      );
+      cell->addChild(std::move(dot));
+    }
+    term_frame::pinSize(*cell, frame.cellWidth, frame.rowHeight);
+    return cell;
+  }
+
+  // ---- agenda ---------------------------------------------------------------------------------------
+
+  // The agenda's column of rows plus its budget. Every row goes through addLine/addEntry, which keep
+  // rowsUsed() in step with the pixel height pinned on the row, so callers only ask fits(n) before adding.
+  class AgendaList {
+  public:
+    AgendaList(const CalendarFrame& frame, float listWidth)
+        : m_frame(frame), m_list(ui::column({.align = FlexAlign::Start, .gap = 0.0F})), m_listWidth(listWidth),
+          m_timeWidth(term_frame::monoWidth(kTimeColumnChars, frame.font)),
+          m_titleWidth(std::max(0.0F, listWidth - m_timeWidth - Style::spaceXs * frame.scale)) {}
+
+    [[nodiscard]] bool fits(int rows) const { return m_rowsUsed + rows <= kAgendaRows; }
+
+    void addLine(std::string text, const ColorSpec& color) {
+      auto line = ui::label({
+          .text = std::move(text),
+          .fontSize = m_frame.font,
+          .fontFamily = m_frame.family,
+          .color = color,
+          .maxWidth = m_listWidth,
+          .maxLines = 1,
+          .ellipsize = TextEllipsize::End,
+      });
+      auto row = ui::row({.align = FlexAlign::Center});
+      row->addChild(std::move(line));
+      term_frame::pinSize(*row, m_listWidth, m_frame.rowHeight);
+      m_list->addChild(std::move(row));
+      ++m_rowsUsed;
+    }
+
+    // Rows addEntry(…, wrapTitle) will take. The estimate counts bytes against the title column's monospace
+    // capacity, so the pinned height and the label's maxLines always agree.
+    [[nodiscard]] int entryRows(const std::string& title, bool wrapTitle) const {
+      const auto charsPerLine =
+          std::max<std::size_t>(1, static_cast<std::size_t>(m_titleWidth / (m_frame.font * kMonoAdvanceEm)));
+      return wrapTitle && title.size() > charsPerLine ? 2 : 1;
+    }
+
+    // `when` in the dim time column, then the title; a wrapped title takes two rows.
+    void addEntry(const std::string& when, const std::string& title, float alpha, bool wrapTitle = false) {
+      const int rows = entryRows(title, wrapTitle);
+      auto row =
+          ui::row({.align = rows == 2 ? FlexAlign::Start : FlexAlign::Center, .gap = Style::spaceXs * m_frame.scale});
+      row->addChild(
+          ui::label({
+              .text = when,
+              .fontSize = m_frame.font,
+              .fontFamily = m_frame.family,
+              .color = dimColor(),
+              .width = m_timeWidth,
+              .maxLines = 1,
+          })
+      );
+      row->addChild(
+          ui::label({
+              .text = title.empty() ? "(untitled)" : title,
+              .fontSize = m_frame.font,
+              .fontFamily = m_frame.family,
+              .color = colorSpecFromRole(ColorRole::OnSurface, alpha),
+              .maxWidth = m_titleWidth,
+              .maxLines = rows,
+              .ellipsize = TextEllipsize::End,
+          })
+      );
+      term_frame::pinSize(*row, m_listWidth, static_cast<float>(rows) * m_frame.rowHeight);
+      m_list->addChild(std::move(row));
+      m_rowsUsed += rows;
+    }
+
+    // The list pinned to the full budget height, so the box never resizes with its content.
+    [[nodiscard]] std::unique_ptr<Flex> finish() {
+      term_frame::pinSize(*m_list, m_listWidth, m_frame.rowHeight * static_cast<float>(kAgendaRows));
+      return std::move(m_list);
+    }
+
+  private:
+    const CalendarFrame& m_frame;
+    std::unique_ptr<Flex> m_list;
+    float m_listWidth;
+    float m_timeWidth;
+    float m_titleWidth;
+    int m_rowsUsed = 0;
+  };
+
+  struct AgendaEvents {
+    std::vector<const CalendarEvent*> onSelectedDay; // all-day first, then by start
+    std::vector<const CalendarEvent*> upcoming;      // other events starting today..+kNextDays, not yet passed
+  };
+
+  [[nodiscard]] AgendaEvents collectAgendaEvents(const CalendarFrame& frame) {
+    AgendaEvents events;
+    if (frame.snapshot == nullptr) {
+      return events;
+    }
+    const int endKey = keyOf(chr::year_month_day{chr::sys_days{frame.today} + chr::days{kNextDays}});
+    for (std::size_t i = 0; i < frame.snapshot->events.size(); ++i) {
+      const CalendarEvent& event = frame.snapshot->events[i];
+      const auto [startKey, endDayKey] = frame.eventDays[i];
+      if (frame.selectedKey >= startKey && frame.selectedKey <= endDayKey) {
+        events.onSelectedDay.push_back(&event);
+      } else if (startKey >= frame.todayKey && startKey <= endKey && !calendar_view::eventPassed(event, frame.now)) {
+        events.upcoming.push_back(&event);
+      }
+    }
+    std::sort(
+        events.onSelectedDay.begin(), events.onSelectedDay.end(), [](const CalendarEvent* a, const CalendarEvent* b) {
+          return a->allDay != b->allDay ? a->allDay : a->start < b->start;
+        }
+    );
+    std::sort(events.upcoming.begin(), events.upcoming.end(), [](const CalendarEvent* a, const CalendarEvent* b) {
+      return a->start < b->start;
+    });
+    return events;
+  }
+
+  // Empty when the last sync was fine.
+  [[nodiscard]] std::string_view syncErrorText(const CalendarService* calendar) {
+    if (calendar == nullptr) {
+      return {};
+    }
+    switch (calendar->syncError()) {
+    case CalendarService::SyncError::AuthFailed:
+      return "calendar: auth failed";
+    case CalendarService::SyncError::Unreachable:
+      return "calendar: server unreachable";
+    case CalendarService::SyncError::NoCalendars:
+      return "connected · no event calendar";
+    case CalendarService::SyncError::Failed:
+      return "calendar: sync failed";
+    case CalendarService::SyncError::None:
+      break;
+    }
+    return {};
+  }
+
+  // The selected day's events (or why there are none), at most kMaxSelectedRows rows.
+  void addSelectedDay(
+      AgendaList& list, const CalendarFrame& frame, const std::vector<const CalendarEvent*>& events,
+      std::string_view syncError, bool configured
+  ) {
+    if (events.empty()) {
+      if (!syncError.empty()) {
+        list.addLine(std::string(syncError), colorSpecFromRole(ColorRole::Error));
+      } else {
+        list.addLine(configured ? "connected · no events" : "no calendar connected", dimColor());
+      }
+      return;
+    }
+    const bool isToday = frame.selectedKey == frame.todayKey;
+    const int total = static_cast<int>(events.size());
+    const int shown = total > kMaxSelectedRows ? kMaxSelectedRows - 1 : total;
+    for (int i = 0; i < shown; ++i) {
+      const CalendarEvent& event = *events[static_cast<std::size_t>(i)];
+      const float alpha = isToday && calendar_view::eventPassed(event, frame.now) ? kPassedAlpha : 1.0F;
+      list.addEntry(event.allDay ? "all day" : clockTime(event), event.title, alpha);
+    }
+    if (shown < total) {
+      list.addLine(std::format("+{} more", total - shown), dimColor());
+    }
+  }
+
+  // "next 7 days" with as many upcoming events as the budget allows, or why there are none.
+  void addUpcoming(
+      AgendaList& list, const CalendarFrame& frame, const std::vector<const CalendarEvent*>& upcoming,
+      std::string_view syncError, bool selectedDayHasEvents
+  ) {
+    constexpr int kHeaderAndOneEntry = 2;
+    if (!list.fits(kHeaderAndOneEntry)) {
+      return;
+    }
+    list.addLine("next 7 days", dimColor());
+    int shown = 0;
+    for (const CalendarEvent* event : upcoming) {
+      if (!list.fits(1)) {
+        break;
+      }
+      std::string when = formatStrftime("%a", localTm(event->start));
+      when += event->allDay ? " all-day" : " " + clockTime(*event);
+      list.addEntry(when, event->title, 1.0F);
+      ++shown;
+    }
+    if (!list.fits(1)) {
+      return;
+    }
+    if (!syncError.empty() && selectedDayHasEvents) {
+      list.addLine(std::string(syncError), colorSpecFromRole(ColorRole::Error));
+    } else if (shown == 0) {
+      list.addLine(frame.snapshot != nullptr && frame.snapshot->valid ? "none" : "syncing…", dimColor());
+    }
+  }
+
+  // "12 Nov" for a yyyy-mm-dd due date, "late 12 Nov" once it is before `todayIso`; empty when undated or malformed.
+  [[nodiscard]] std::string taskDueLabel(const std::string& dueDate, const std::string& todayIso) {
+    constexpr std::size_t kIsoDateLength = 10;
+    if (dueDate.size() != kIsoDateLength) {
+      return {};
+    }
+    const int month = std::atoi(dueDate.substr(5, 2).c_str());
+    const int day = std::atoi(dueDate.substr(8, 2).c_str());
+    std::string label = std::format("{} {}", day, month >= 1 && month <= 12 ? kMonthAbbreviations[month - 1] : "?");
+    return dueDate < todayIso ? "late " + label : label;
+  }
+
+  // Open tasks under the events: dated ones first (soonest first), then undated. The "tasks" header only appears
+  // together with the first task under it; later tasks stop at kMaxTasks or when the next one no longer fits.
+  void addTasks(AgendaList& list, const TaskService& tasks, chr::year_month_day todayDate) {
+    std::vector<const TaskItem*> open;
+    for (const TaskItem& task : tasks.snapshot().items) {
+      if (!task.completed) {
+        open.push_back(&task);
+      }
+    }
+    if (open.empty()) {
+      return;
+    }
+    std::stable_sort(open.begin(), open.end(), [](const TaskItem* a, const TaskItem* b) {
+      if (a->dueDate.empty() != b->dueDate.empty()) {
+        return !a->dueDate.empty();
+      }
+      return a->dueDate < b->dueDate;
+    });
+    constexpr int kHeaderRows = 1;
+    if (!list.fits(kHeaderRows + list.entryRows(open.front()->title, true))) {
+      return;
+    }
+
+    const std::string todayIso = std::format(
+        "{:04d}-{:02d}-{:02d}", static_cast<int>(todayDate.year()), static_cast<unsigned>(todayDate.month()),
+        static_cast<unsigned>(todayDate.day())
+    );
+    list.addLine(std::format("tasks · {} open", open.size()), dimColor());
+    int shownTasks = 0;
+    for (const TaskItem* task : open) {
+      if (shownTasks >= kMaxTasks || !list.fits(list.entryRows(task->title, true))) {
+        break;
+      }
+      list.addEntry(taskDueLabel(task->dueDate, todayIso), task->title, 1.0F, true);
+      ++shownTasks;
+    }
   }
 
 } // namespace
@@ -146,7 +566,6 @@ std::unique_ptr<Flex> CalendarQuickTab::create() {
       .gap = Style::spaceSm * contentScale(),
   });
   m_dirty = true;
-  m_lastMinuteKey = minuteKey();
   rebuild();
   return root;
 }
@@ -161,7 +580,7 @@ void CalendarQuickTab::setActive(bool active) {
   m_selected = today();
   m_dirty = true;
   m_clockTimer.startRepeating(std::chrono::seconds{1}, [this]() {
-    if (minuteKey() != m_lastMinuteKey) {
+    if (currentMinute() != m_lastMinute) {
       PanelManager::instance().refresh();
     }
   });
@@ -174,11 +593,7 @@ void CalendarQuickTab::onClose() {
   m_bodyHeight = 0.0F;
 }
 
-float CalendarQuickTab::quickPanelHeight(float width, float fallback) const {
-  (void)width;
-  (void)fallback;
-  return kPanelHeight;
-}
+float CalendarQuickTab::quickPanelHeight(float /*width*/, float /*fallback*/) const { return kPanelHeight; }
 
 std::string CalendarQuickTab::quickPanelHints() const { return "←→ day  PgUp/Dn month  t today"; }
 
@@ -188,8 +603,7 @@ std::string CalendarQuickTab::quickPanelStatus() const {
   return std::format("week {:%V} · day {}", chr::sys_days{now}, yday.count());
 }
 
-bool CalendarQuickTab::handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) {
-  (void)modifiers;
+bool CalendarQuickTab::handleQuickPanelKey(std::uint32_t sym, std::uint32_t /*modifiers*/, bool pressed, bool preedit) {
   if (preedit) {
     return false;
   }
@@ -204,10 +618,10 @@ bool CalendarQuickTab::handleQuickPanelKey(std::uint32_t sym, std::uint32_t modi
     days = 1;
     break;
   case XKB_KEY_Up:
-    days = -7;
+    days = -kDaysPerWeek;
     break;
   case XKB_KEY_Down:
-    days = 7;
+    days = kDaysPerWeek;
     break;
   case XKB_KEY_Page_Up:
     months = -1;
@@ -243,9 +657,7 @@ void CalendarQuickTab::select(chr::year_month_day date) {
   markDirty();
 }
 
-void CalendarQuickTab::shiftDays(int days) {
-  select(chr::year_month_day{chr::sys_days{m_selected} + chr::days{days}});
-}
+void CalendarQuickTab::shiftDays(int days) { select(chr::year_month_day{chr::sys_days{m_selected} + chr::days{days}}); }
 
 void CalendarQuickTab::shiftMonths(int months) { select(addMonths(m_selected, months)); }
 
@@ -253,8 +665,6 @@ void CalendarQuickTab::markDirty() {
   m_dirty = true;
   PanelManager::instance().refresh();
 }
-
-std::string CalendarQuickTab::minuteKey() const { return formatLocalTime("%Y%m%d%H%M"); }
 
 void CalendarQuickTab::doLayout(Renderer& renderer, float contentWidth, float bodyHeight) {
   if (m_root == nullptr) {
@@ -276,7 +686,7 @@ void CalendarQuickTab::doUpdate(Renderer& renderer) {
   if (m_root == nullptr) {
     return;
   }
-  if (const std::string key = minuteKey(); key != m_lastMinuteKey) {
+  if (currentMinute() != m_lastMinute) {
     m_dirty = true;
   }
   if (!m_dirty) {
@@ -287,459 +697,171 @@ void CalendarQuickTab::doUpdate(Renderer& renderer) {
   m_root->layout(renderer);
 }
 
+CalendarFrame CalendarQuickTab::makeFrame() const {
+  CalendarFrame frame;
+  frame.scale = contentScale();
+  frame.font = Style::fontSizeCaption * frame.scale;
+  frame.rowHeight = kRowHeight * frame.scale;
+  frame.boxHeight = kBoxHeight * frame.scale;
+  frame.gap = Style::spaceSm * frame.scale;
+  frame.bodyWidth = m_bodyWidth > 0.0F ? m_bodyWidth : kFallbackBodyWidth * frame.scale;
+  frame.family = term_frame::kFont;
+  frame.text = colorSpecFromRole(ColorRole::OnSurface);
+  frame.primary = colorSpecFromRole(ColorRole::Primary);
+
+  const auto* calendarConfig = m_config != nullptr ? &m_config->config().controlCenter.calendarTab : nullptr;
+  frame.showWeeks = calendarConfig != nullptr && calendarConfig->showWeekNumbers;
+  frame.firstDay = calendarConfig != nullptr ? calendar_view::resolveFirstDayOfWeek(calendarConfig->firstDayOfWeek)
+                                             : localeFirstDayOfWeek();
+  frame.cellWidth = kCellWidth * frame.scale;
+  frame.weekWidth = frame.showWeeks ? kWeekColumnWidth * frame.scale : 0.0F;
+  frame.gridWidth = static_cast<float>(kDaysPerWeek) * frame.cellWidth + frame.weekWidth;
+  frame.monthBoxWidth = frame.gridWidth + 2.0F * term_frame::boxInset(frame.scale);
+  frame.agendaBoxWidth = std::max(0.0F, frame.bodyWidth - frame.monthBoxWidth - frame.gap);
+
+  frame.now = chr::system_clock::now();
+  frame.today = today();
+  frame.todayKey = keyOf(frame.today);
+  frame.selectedKey = keyOf(m_selected);
+  frame.snapshot = m_calendar != nullptr ? &m_calendar->snapshot() : nullptr;
+  if (frame.snapshot != nullptr) {
+    frame.eventDays.reserve(frame.snapshot->events.size());
+    for (const CalendarEvent& event : frame.snapshot->events) {
+      frame.eventDays.push_back(calendar_view::eventDayKeys(event));
+    }
+  }
+  return frame;
+}
+
 void CalendarQuickTab::rebuild() {
   if (m_root == nullptr) {
     return;
   }
   m_dirty = false;
-  m_lastMinuteKey = minuteKey();
+  m_lastMinute = currentMinute();
   while (!m_root->children().empty()) {
     m_root->removeChild(m_root->children().front().get());
   }
 
-  const float s = contentScale();
-  const float font = Style::fontSizeCaption * s;
-  const std::string family(term_frame::kFont);
-  const ColorSpec textColor = colorSpecFromRole(ColorRole::OnSurface);
-  const ColorSpec primary = colorSpecFromRole(ColorRole::Primary);
-  const float inset = Style::spaceSm * s + Style::borderWidth;
-  const float bodyWidth = (m_bodyWidth > 0.0F ? m_bodyWidth : kFallbackBodyWidth * s);
-  const float rowH = kRowHeight * s;
-  const float boxH = kBoxHeight * s;
-  const float gap = Style::spaceSm * s;
-
-  const bool showWeeks = m_config != nullptr && m_config->config().controlCenter.calendarTab.showWeekNumbers;
-  const int firstDay = m_config != nullptr
-      ? calendar_view::resolveFirstDayOfWeek(m_config->config().controlCenter.calendarTab.firstDayOfWeek)
-      : localeFirstDayOfWeek();
-
-  const auto nowTime = chr::system_clock::now();
-  const chr::year_month_day todayDate = today();
-  const int todayKey = keyOf(todayDate);
-  const int selectedKey = keyOf(m_selected);
-  const CalendarSnapshot* snapshot = m_calendar != nullptr ? &m_calendar->snapshot() : nullptr;
-
-  // ---- hero -------------------------------------------------------------------------------------
-  {
-    const std::tm nowTm = localTm(nowTime);
-    const chr::days left =
-        chr::sys_days{todayDate.year() / chr::December / 31} - chr::sys_days{todayDate};
-    auto hero = ui::row({.align = FlexAlign::Center, .gap = Style::spaceMd * s});
-    hero->addChild(
-        ui::label({
-            .text = formatStrftime("%H:%M", nowTm),
-            .fontSize = kHeroClockSize * s,
-            .fontWeight = FontWeight::Medium,
-            .fontFamily = family,
-            .color = primary,
-            .maxLines = 1,
-        })
-    );
-    auto info = ui::column({.align = FlexAlign::Start, .justify = FlexJustify::Center, .gap = 0.0F, .flexGrow = 1.0F});
-    info->addChild(
-        ui::label({
-            .text = formatStrftime("%A %-d %B %Y", nowTm),
-            .fontSize = font,
-            .fontFamily = family,
-            .color = dimColor(),
-            .maxWidth = std::max(0.0F, bodyWidth - term_frame::monoWidth(6, kHeroClockSize * s) - Style::spaceMd * s),
-            .maxLines = 1,
-            .ellipsize = TextEllipsize::End,
-        })
-    );
-    info->addChild(
-        ui::label({
-            .text = std::format("{} days left in {}", left.count(), static_cast<int>(todayDate.year())),
-            .fontSize = font,
-            .fontFamily = family,
-            .color = dimColor(),
-            .maxLines = 1,
-        })
-    );
-    hero->addChild(std::move(info));
-    term_frame::pinSize(*hero, bodyWidth, kHeroHeight * s);
-    m_root->addChild(std::move(hero));
-  }
-
-  // ---- geometry shared by both boxes ------------------------------------------------------------
-  const float cellW = kCellWidth * s;
-  const float weekW = showWeeks ? kWeekColumnWidth * s : 0.0F;
-  const float gridInnerW = 7.0F * cellW + weekW;
-  const float leftW = gridInnerW + 2.0F * inset;
-  const float rightW = std::max(0.0F, bodyWidth - leftW - gap);
-
-  auto columns = ui::row({.align = FlexAlign::Start, .gap = gap});
-
-  // ---- ¹ month grid -----------------------------------------------------------------------------
-  {
-    auto box = term_frame::box("¹", "calendar", s);
-    auto content = ui::column({.align = FlexAlign::Start, .gap = 0.0F});
-
-    // Navigation: ‹  November 2026  ›
-    auto nav = ui::row({.align = FlexAlign::Center});
-    const auto arrow = [&](const char* glyph, int delta) {
-      auto area = ui::inputArea(
-          {.onClick = [this, delta](const InputArea::PointerData&) { shiftMonths(delta); }},
-          ui::label({
-              .text = glyph,
-              .fontSize = font,
-              .fontFamily = family,
-              .color = primary,
-              .maxLines = 1,
-          })
-      );
-      area->setSize(cellW, rowH);
-      return area;
-    };
-    nav->addChild(arrow("‹", -1));
-    auto titleArea = ui::inputArea(
-        {.onClick = [this](const InputArea::PointerData&) { select(today()); }},
-        ui::label({
-            .text = monthTitle(m_selected),
-            .fontSize = font,
-            .fontFamily = family,
-            .color = textColor,
-            .width = gridInnerW - 2.0F * cellW,
-            .maxLines = 1,
-            .textAlign = TextAlign::Center,
-        })
-    );
-    titleArea->setSize(gridInnerW - 2.0F * cellW, rowH);
-    nav->addChild(std::move(titleArea));
-    nav->addChild(arrow("›", 1));
-    term_frame::pinSize(*nav, gridInnerW, rowH);
-    content->addChild(std::move(nav));
-
-    // Weekday initials.
-    auto weekdays = ui::row({.align = FlexAlign::Center});
-    if (showWeeks) {
-      auto cell = ui::column({.align = FlexAlign::Center, .justify = FlexJustify::Center});
-      cell->addChild(ui::label({.text = "wk", .fontSize = font, .fontFamily = family, .color = dimColor(), .maxLines = 1}));
-      term_frame::pinSize(*cell, weekW, rowH);
-      weekdays->addChild(std::move(cell));
-    }
-    for (int i = 0; i < 7; ++i) {
-      std::tm value{};
-      value.tm_wday = (firstDay + i) % 7;
-      value.tm_mday = 1;
-      auto cell = ui::column({.align = FlexAlign::Center, .justify = FlexJustify::Center});
-      cell->addChild(
-          ui::label({
-              .text = firstCodepoints(formatStrftime("%a", value), 2),
-              .fontSize = font,
-              .fontFamily = family,
-              .color = textColor,
-              .maxLines = 1,
-          })
-      );
-      term_frame::pinSize(*cell, cellW, rowH);
-      weekdays->addChild(std::move(cell));
-    }
-    term_frame::pinSize(*weekdays, gridInnerW, rowH);
-    content->addChild(std::move(weekdays));
-
-    // Day cells: six rows starting on the configured week start.
-    const chr::sys_days firstOfMonth{m_selected.year() / m_selected.month() / 1};
-    const int offset = (static_cast<int>(chr::weekday{firstOfMonth}.c_encoding()) - firstDay + 7) % 7;
-    const chr::sys_days gridStart = firstOfMonth - chr::days{offset};
-    const int thursdayColumn = (4 - firstDay + 7) % 7;
-
-    std::vector<std::pair<int, int>> ranges;
-    if (snapshot != nullptr) {
-      ranges.reserve(snapshot->events.size());
-      for (const CalendarEvent& event : snapshot->events) {
-        ranges.push_back(calendar_view::eventDayKeys(event));
-      }
-    }
-    const auto hasEvents = [&ranges](int key) {
-      return std::any_of(ranges.begin(), ranges.end(), [key](const auto& range) {
-        return key >= range.first && key <= range.second;
-      });
-    };
-
-    for (int week = 0; week < 6; ++week) {
-      auto row = ui::row({.align = FlexAlign::Center});
-      if (showWeeks) {
-        auto cell = ui::column({.align = FlexAlign::Center, .justify = FlexJustify::Center});
-        cell->addChild(
-            ui::label({
-                .text = std::format("{:%V}", gridStart + chr::days{week * 7 + thursdayColumn}),
-                .fontSize = font,
-                .fontFamily = family,
-                .color = colorSpecFromRole(ColorRole::OnSurfaceVariant, 0.7F),
-                .maxLines = 1,
-            })
-        );
-        term_frame::pinSize(*cell, weekW, rowH);
-        row->addChild(std::move(cell));
-      }
-      for (int col = 0; col < 7; ++col) {
-        const chr::year_month_day date{gridStart + chr::days{week * 7 + col}};
-        const int key = keyOf(date);
-        const bool inMonth = date.month() == m_selected.month() && date.year() == m_selected.year();
-        const bool isToday = key == todayKey;
-        const bool isSelected = key == selectedKey;
-
-        ColorSpec labelColor = inMonth ? textColor : colorSpecFromRole(ColorRole::OnSurfaceVariant, 0.55F);
-        if (isToday) {
-          labelColor = colorSpecFromRole(ColorRole::Surface);
-        } else if (isSelected) {
-          labelColor = primary;
-        }
-        auto cell = ui::column({
-            .align = FlexAlign::Center,
-            .justify = FlexJustify::Center,
-            .fill = isToday ? std::optional<ColorSpec>(primary) : std::nullopt,
-            .radius = 0.0F,
-            .border = isSelected ? std::optional<ColorSpec>(isToday ? colorSpecFromRole(ColorRole::OnSurface) : primary)
-                                 : std::nullopt,
-            .borderWidth = Style::borderWidth,
-        });
-        cell->addChild(
-            ui::label({
-                .text = std::to_string(static_cast<unsigned>(date.day())),
-                .fontSize = font,
-                .fontWeight = isToday || isSelected ? FontWeight::Bold : FontWeight::Normal,
-                .fontFamily = family,
-                .color = labelColor,
-                .maxLines = 1,
-            })
-        );
-        if (hasEvents(key)) {
-          const float dotW = 4.0F * s;
-          const float dotH = 2.0F * s;
-          auto dot = ui::box({
-              .fill = isToday ? colorSpecFromRole(ColorRole::Surface) : primary,
-              .radius = 0.0F,
-              .width = dotW,
-              .height = dotH,
-              .participatesInLayout = false,
-          });
-          dot->setPosition(std::round((cellW - dotW) * 0.5F), rowH - dotH - 3.0F * s);
-          cell->addChild(std::move(dot));
-        }
-        term_frame::pinSize(*cell, cellW, rowH);
-
-        auto area = ui::inputArea({.onClick = [this, date](const InputArea::PointerData&) { select(date); }}, std::move(cell));
-        area->setSize(cellW, rowH);
-        row->addChild(std::move(area));
-      }
-      term_frame::pinSize(*row, gridInnerW, rowH);
-      content->addChild(std::move(row));
-    }
-    term_frame::pinSize(*content, gridInnerW, rowH * 8.0F);
-    box->addChild(std::move(content));
-    term_frame::pinSize(*box, leftW, boxH);
-    columns->addChild(std::move(box));
-  }
-
-  // ---- ² agenda ---------------------------------------------------------------------------------
-  {
-    auto box = term_frame::box("²", "agenda", s);
-    auto list = ui::column({.align = FlexAlign::Start, .gap = 0.0F});
-
-    const float timeW = term_frame::monoWidth(11, font);
-    const float listW = std::max(0.0F, rightW - 2.0F * inset);
-    const float titleW = std::max(0.0F, listW - timeW - Style::spaceXs * s);
-    int rows = 0;
-
-    const auto addLine = [&](std::string text, const ColorSpec& color) {
-      auto line = ui::label({
-          .text = std::move(text),
-          .fontSize = font,
-          .fontFamily = family,
-          .color = color,
-          .maxWidth = listW,
-          .maxLines = 1,
-          .ellipsize = TextEllipsize::End,
-      });
-      auto row = ui::row({.align = FlexAlign::Center});
-      row->addChild(std::move(line));
-      term_frame::pinSize(*row, listW, rowH);
-      list->addChild(std::move(row));
-      ++rows;
-    };
-    // A wrapping row (tasks) takes two lines when the title does not fit on one.
-    const auto wrapsToTwoLines = [&](const std::string& title) {
-      const std::size_t perLine = std::max<std::size_t>(1, static_cast<std::size_t>(titleW / (font * 0.6F)));
-      return title.size() > perLine;
-    };
-    const auto addEvent = [&](const std::string& when, const std::string& title, float alpha, bool wrap = false) {
-      const bool twoLines = wrap && wrapsToTwoLines(title);
-      auto row = ui::row({.align = twoLines ? FlexAlign::Start : FlexAlign::Center, .gap = Style::spaceXs * s});
-      row->addChild(
-          ui::label({
-              .text = when,
-              .fontSize = font,
-              .fontFamily = family,
-              .color = dimColor(),
-              .width = timeW,
-              .maxLines = 1,
-          })
-      );
-      row->addChild(
-          ui::label({
-              .text = title.empty() ? "(untitled)" : title,
-              .fontSize = font,
-              .fontFamily = family,
-              .color = colorSpecFromRole(ColorRole::OnSurface, alpha),
-              .maxWidth = titleW,
-              .maxLines = twoLines ? 2 : 1,
-              .ellipsize = TextEllipsize::End,
-          })
-      );
-      term_frame::pinSize(*row, listW, twoLines ? 2.0F * rowH : rowH);
-      list->addChild(std::move(row));
-      rows += twoLines ? 2 : 1;
-    };
-
-    const auto timeOf = [](const CalendarEvent& event) {
-      return formatStrftime("%H:%M", localTm(event.start));
-    };
-
-    std::vector<AgendaItem> selectedItems;
-    std::vector<AgendaItem> nextItems;
-    if (snapshot != nullptr) {
-      const chr::sys_days windowEnd = chr::sys_days{todayDate} + chr::days{kNextDays};
-      const int endKey = keyOf(chr::year_month_day{windowEnd});
-      for (const CalendarEvent& event : snapshot->events) {
-        const auto [startKey, endDayKey] = calendar_view::eventDayKeys(event);
-        const bool onSelected = selectedKey >= startKey && selectedKey <= endDayKey;
-        if (onSelected) {
-          selectedItems.push_back({&event, startKey});
-        } else if (startKey >= todayKey && startKey <= endKey && !calendar_view::eventPassed(event, nowTime)) {
-          nextItems.push_back({&event, startKey});
-        }
-      }
-    }
-    const auto byStart = [](const AgendaItem& a, const AgendaItem& b) {
-      if (a.event->allDay != b.event->allDay) {
-        return a.event->allDay;
-      }
-      return a.event->start < b.event->start;
-    };
-    std::sort(selectedItems.begin(), selectedItems.end(), byStart);
-    std::sort(nextItems.begin(), nextItems.end(), [](const AgendaItem& a, const AgendaItem& b) {
-      return a.event->start < b.event->start;
-    });
-
-    addLine(formatStrftime("%a %-d %b", tmOf(m_selected)), dimColor());
-    std::string syncError;
-    if (m_calendar != nullptr) {
-      switch (m_calendar->syncError()) {
-      case CalendarService::SyncError::AuthFailed:
-        syncError = "calendar: auth failed";
-        break;
-      case CalendarService::SyncError::Unreachable:
-        syncError = "calendar: server unreachable";
-        break;
-      case CalendarService::SyncError::NoCalendars:
-        syncError = "connected · no event calendar";
-        break;
-      case CalendarService::SyncError::Failed:
-        syncError = "calendar: sync failed";
-        break;
-      case CalendarService::SyncError::None:
-        break;
-      }
-    }
-    const ColorSpec errorColor = colorSpecFromRole(ColorRole::Error);
-    const bool configured = m_calendar != nullptr && m_calendar->enabled() && m_config != nullptr
-        && !m_config->config().calendar.accounts.empty();
-    // Nothing in the selected day or the next seven: one dim line instead of three.
-    const bool noneAtAll = configured && syncError.empty() && selectedItems.empty() && nextItems.empty()
-        && snapshot != nullptr && snapshot->valid;
-    if (noneAtAll) {
-      addLine("no events in 7 days", dimColor());
-    } else if (selectedItems.empty() && !syncError.empty()) {
-      addLine(syncError, errorColor);
-    } else if (selectedItems.empty()) {
-      addLine(configured ? "connected · no events" : "no calendar connected", dimColor());
-    } else {
-      const bool isToday = selectedKey == todayKey;
-      const int total = static_cast<int>(selectedItems.size());
-      // The last visible slot becomes "+N more" when the day overflows.
-      const int shown = total > kMaxSelectedRows ? kMaxSelectedRows - 1 : total;
-      for (int i = 0; i < shown; ++i) {
-        const CalendarEvent& event = *selectedItems[static_cast<std::size_t>(i)].event;
-        const float alpha = isToday && calendar_view::eventPassed(event, nowTime) ? kPassedAlpha : 1.0F;
-        addEvent(event.allDay ? "all day" : timeOf(event), event.title, alpha);
-      }
-      if (shown < total) {
-        addLine(std::format("+{} more", total - shown), dimColor());
-      }
-    }
-
-    if (configured && !noneAtAll && rows < kAgendaRows - 1) {
-      addLine("next 7 days", dimColor());
-      int shown = 0;
-      for (const AgendaItem& item : nextItems) {
-        if (rows >= kAgendaRows) {
-          break;
-        }
-        const CalendarEvent& event = *item.event;
-        std::string when = formatStrftime("%a", localTm(event.start));
-        when += event.allDay ? " all-day" : " " + timeOf(event);
-        addEvent(when, event.title, 1.0F);
-        ++shown;
-      }
-      if (!syncError.empty() && !selectedItems.empty() && rows < kAgendaRows) {
-        addLine(syncError, errorColor);
-      } else if (shown == 0 && rows < kAgendaRows) {
-        addLine(snapshot != nullptr && snapshot->valid ? "none" : "syncing…", dimColor());
-      }
-    }
-
-    // Open tasks from the Tasks collection under the events: dated ones first (soonest first), then undated.
-    // Overdue ones read "late <date>".
-    if (m_tasks != nullptr && rows < kAgendaRows - 1) {
-      std::vector<const TaskItem*> open;
-      for (const TaskItem& task : m_tasks->snapshot().items) {
-        if (!task.completed) {
-          open.push_back(&task);
-        }
-      }
-      std::stable_sort(open.begin(), open.end(), [](const TaskItem* a, const TaskItem* b) {
-        if (a->dueDate.empty() != b->dueDate.empty()) {
-          return !a->dueDate.empty();
-        }
-        return a->dueDate < b->dueDate;
-      });
-      // The header only appears with at least its first task under it.
-      if (!open.empty() && rows + 1 + (wrapsToTwoLines(open.front()->title) ? 2 : 1) <= kAgendaRows) {
-        const std::string todayIso = std::format(
-            "{:04d}-{:02d}-{:02d}", static_cast<int>(todayDate.year()), static_cast<unsigned>(todayDate.month()),
-            static_cast<unsigned>(todayDate.day())
-        );
-        static constexpr const char* kMonths[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                                                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-        addLine(std::format("tasks · {} open", open.size()), dimColor());
-        int shownTasks = 0;
-        for (const TaskItem* task : open) {
-          if (shownTasks >= kMaxTasks || rows + (wrapsToTwoLines(task->title) ? 2 : 1) > kAgendaRows) {
-            break;
-          }
-          ++shownTasks;
-          std::string when;
-          if (task->dueDate.size() == 10) {
-            const int month = std::atoi(task->dueDate.substr(5, 2).c_str());
-            const int day = std::atoi(task->dueDate.substr(8, 2).c_str());
-            when = std::format("{} {}", day, month >= 1 && month <= 12 ? kMonths[month - 1] : "?");
-            if (task->dueDate < todayIso) {
-              when = "late " + when;
-            }
-          }
-          addEvent(when, task->title, 1.0F, true);
-        }
-      }
-    }
-
-    term_frame::pinSize(*list, listW, rowH * static_cast<float>(kAgendaRows));
-    box->addChild(std::move(list));
-    term_frame::pinSize(*box, rightW, boxH);
-    columns->addChild(std::move(box));
-  }
-
-  term_frame::pinSize(*columns, bodyWidth, boxH);
+  const CalendarFrame frame = makeFrame();
+  m_root->addChild(buildHero(frame));
+  auto columns = ui::row({.align = FlexAlign::Start, .gap = frame.gap});
+  columns->addChild(buildMonthBox(frame));
+  columns->addChild(buildAgendaBox(frame));
+  term_frame::pinSize(*columns, frame.bodyWidth, frame.boxHeight);
   m_root->addChild(std::move(columns));
+}
+
+// ---- ¹ month grid -------------------------------------------------------------------------------------
+
+std::unique_ptr<Flex> CalendarQuickTab::buildMonthNav(const CalendarFrame& frame) {
+  auto nav = ui::row({.align = FlexAlign::Center});
+  const auto arrow = [&](const char* glyph, int deltaMonths) {
+    auto area = ui::inputArea(
+        {.onClick = [this, deltaMonths](const InputArea::PointerData&) { shiftMonths(deltaMonths); }},
+        frameLabel(frame, glyph, frame.primary)
+    );
+    area->setSize(frame.cellWidth, frame.rowHeight);
+    return area;
+  };
+  const float titleWidth = frame.gridWidth - 2.0F * frame.cellWidth;
+  nav->addChild(arrow("‹", -1));
+  auto titleArea = ui::inputArea(
+      {.onClick = [this](const InputArea::PointerData&) { select(today()); }},
+      ui::label({
+          .text = monthTitle(m_selected),
+          .fontSize = frame.font,
+          .fontFamily = frame.family,
+          .color = frame.text,
+          .width = titleWidth,
+          .maxLines = 1,
+          .textAlign = TextAlign::Center,
+      })
+  );
+  titleArea->setSize(titleWidth, frame.rowHeight);
+  nav->addChild(std::move(titleArea));
+  nav->addChild(arrow("›", 1));
+  term_frame::pinSize(*nav, frame.gridWidth, frame.rowHeight);
+  return nav;
+}
+
+// `weekStart`: the first day of the grid row, `week` rows below the grid's first day.
+std::unique_ptr<Flex> CalendarQuickTab::buildWeekRow(const CalendarFrame& frame, chr::sys_days weekStart) {
+  auto row = ui::row({.align = FlexAlign::Center});
+  if (frame.showWeeks) {
+    const int thursdayColumn = (kThursday - frame.firstDay + kDaysPerWeek) % kDaysPerWeek;
+    row->addChild(centeredCell(
+        frame, frame.weekWidth,
+        frameLabel(
+            frame, std::format("{:%V}", weekStart + chr::days{thursdayColumn}),
+            colorSpecFromRole(ColorRole::OnSurfaceVariant, 0.7F)
+        )
+    ));
+  }
+  for (int col = 0; col < kDaysPerWeek; ++col) {
+    const chr::year_month_day date{weekStart + chr::days{col}};
+    auto area = ui::inputArea(
+        {.onClick = [this, date](const InputArea::PointerData&) { select(date); }},
+        buildDayCell(frame, date, m_selected)
+    );
+    area->setSize(frame.cellWidth, frame.rowHeight);
+    row->addChild(std::move(area));
+  }
+  term_frame::pinSize(*row, frame.gridWidth, frame.rowHeight);
+  return row;
+}
+
+std::unique_ptr<Flex> CalendarQuickTab::buildMonthBox(const CalendarFrame& frame) {
+  auto box = term_frame::box("¹", "calendar", frame.scale);
+  auto content = ui::column({.align = FlexAlign::Start, .gap = 0.0F});
+  content->addChild(buildMonthNav(frame));
+  content->addChild(buildWeekdayRow(frame));
+
+  const chr::sys_days firstOfMonth{m_selected.year() / m_selected.month() / 1};
+  const int offset =
+      (static_cast<int>(chr::weekday{firstOfMonth}.c_encoding()) - frame.firstDay + kDaysPerWeek) % kDaysPerWeek;
+  const chr::sys_days gridStart = firstOfMonth - chr::days{offset};
+  for (int week = 0; week < kGridWeeks; ++week) {
+    content->addChild(buildWeekRow(frame, gridStart + chr::days{week * kDaysPerWeek}));
+  }
+  term_frame::pinSize(*content, frame.gridWidth, frame.rowHeight * static_cast<float>(kGridRows));
+  box->addChild(std::move(content));
+  term_frame::pinSize(*box, frame.monthBoxWidth, frame.boxHeight);
+  return box;
+}
+
+// ---- ² agenda -----------------------------------------------------------------------------------------
+
+std::unique_ptr<Flex> CalendarQuickTab::buildAgendaBox(const CalendarFrame& frame) const {
+  auto box = term_frame::box("²", "agenda", frame.scale);
+  const float listWidth = std::max(0.0F, frame.agendaBoxWidth - 2.0F * term_frame::boxInset(frame.scale));
+  AgendaList list(frame, listWidth);
+
+  const AgendaEvents events = collectAgendaEvents(frame);
+  const std::string_view syncError = syncErrorText(m_calendar);
+  const bool configured = m_calendar != nullptr
+      && m_calendar->enabled()
+      && m_config != nullptr
+      && !m_config->config().calendar.accounts.empty();
+  const bool snapshotValid = frame.snapshot != nullptr && frame.snapshot->valid;
+  // Nothing on the selected day or in the next seven: one dim line instead of three.
+  const bool nothingSoon =
+      configured && syncError.empty() && events.onSelectedDay.empty() && events.upcoming.empty() && snapshotValid;
+
+  list.addLine(formatStrftime("%a %-d %b", tmOf(m_selected)), dimColor());
+  if (nothingSoon) {
+    list.addLine("no events in 7 days", dimColor());
+  } else {
+    addSelectedDay(list, frame, events.onSelectedDay, syncError, configured);
+  }
+  if (configured && !nothingSoon) {
+    addUpcoming(list, frame, events.upcoming, syncError, !events.onSelectedDay.empty());
+  }
+  if (m_tasks != nullptr) {
+    addTasks(list, *m_tasks, frame.today);
+  }
+
+  box->addChild(list.finish());
+  term_frame::pinSize(*box, frame.agendaBoxWidth, frame.boxHeight);
+  return box;
 }

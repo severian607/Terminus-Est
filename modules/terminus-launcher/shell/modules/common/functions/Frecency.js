@@ -8,7 +8,7 @@
 //     "calcs":    [{ "expr": "2+2", "result": "4", "t": ms }, ...] }   newest first, at most MAX_CALCS
 //
 // frecency(id) sums 0.5^(age / HALF_LIFE) over the log, so a launch counts 1 now, 0.5 a week ago, 0.25 two weeks ago.
-// pickBoost(query, id) is 0..1: the share of the picks for exactly this query that went to this item, weighted up
+// pickBoosts(query)(id) is 0..1: the share of the picks for exactly this query that went to this item, weighted up
 // with repetition (one pick 0.5 of its share, three picks 0.75).
 
 var HALF_LIFE_MS = 7 * 24 * 3600 * 1000;
@@ -65,15 +65,18 @@ function lastUsed(state, id) {
     return log && log.length > 0 ? log[log.length - 1] : 0;
 }
 
-function pickBoost(state, query, id) {
+// The boost function of one query: the picks for exactly this query are looked up once, then it costs a lookup per id.
+function pickBoosts(state, query) {
     var p = state.picks[normQuery(query)];
-    if (!p || !p[id])
-        return 0;
-    var total = 0;
-    for (var k in p)
-        total += p[k].n;
-    var n = p[id].n;
-    return (n / total) * (n / (n + 1));
+    return function (id) {
+        if (!p || !p[id])
+            return 0;
+        var total = 0;
+        for (var k in p)
+            total += p[k].n;
+        var n = p[id].n;
+        return (n / total) * (n / (n + 1));
+    };
 }
 
 // Mutates and returns `state`.

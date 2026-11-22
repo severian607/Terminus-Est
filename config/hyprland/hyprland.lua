@@ -25,25 +25,29 @@ do
     file:close()
   end
 end
-local function module_file(name)
-  local hosted = root .. "/hosts/" .. hostname .. "/hyprland/" .. name .. ".lua"
-  local file = io.open(hosted, "r")
+local function readable(path)
+  local file = io.open(path, "r")
   if file then
     file:close()
+  end
+  return file ~= nil
+end
+-- # The host's file when it has one, else the shared one (also when neither exists, for the error message).
+local function module_file(name)
+  local hosted = root .. "/hosts/" .. hostname .. "/hyprland/" .. name .. ".lua"
+  if readable(hosted) then
     return hosted
   end
   return root .. "/hyprland/" .. name .. ".lua"
 end
 local function load_module(name, optional)
   local path = module_file(name)
-  local file = io.open(path, "r")
-  if not file then
+  if not readable(path) then
     if optional then
       return
     end
     error("missing Hyprland module " .. path)
   end
-  file:close()
   local key = "terminus_hypr." .. name
   package.preload[key] = function()
     return dofile(path)

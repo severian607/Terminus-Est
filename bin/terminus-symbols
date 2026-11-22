@@ -1,5 +1,5 @@
 #!/bin/sh
 # Activate the preloaded standalone panel without starting Python or GTK.
 exec gdbus call --session --dest local.terminus.Symbols \
-    --object-path /local/terminus/Symbols \
-    --method org.freedesktop.Application.Activate '{}'
+  --object-path /local/terminus/Symbols \
+  --method org.freedesktop.Application.Activate '{}'

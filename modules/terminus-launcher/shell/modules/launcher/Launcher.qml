@@ -60,6 +60,11 @@ Scope {
     readonly property color casing: mix(ground, Theme.accentDim, 0.07)
     readonly property color casingEdge: mix(ground, Theme.accentDim, 0.45)
 
+    // ===== limits =====
+    readonly property int maxQueryLength: 128
+    readonly property int wheelNotch: 120          // angleDelta units per mouse-wheel click
+    readonly property int promptCells: 70          // the query shows its last 69 characters behind a "…" beyond this
+
     // ===== geometry, in px =====
     property var targetScreen: null
     readonly property real u: ShellScale.forScreen(root.targetScreen)
@@ -110,7 +115,7 @@ Scope {
     readonly property int casingH: 2 * inset + 2 * plateH + 2 * plateGap + screenH
     readonly property real lowered: 0.3        // 0 = centred, 1 = on the bottom edge
 
-    // ===== open / close =====
+    // ===== state (what changes; the sections below read and change it) =====
     property bool open: false
     property bool shown: false
 
@@ -129,6 +134,103 @@ Scope {
         duration: 3600 * 1000
         loops: Animation.Infinite
     }
+
+    // The action menus opened on top of the result list: [{ crumb, items, owner, retSelected, retScroll }].
+    property var stack: []
+    readonly property var level: root.stack.length > 0 ? root.stack[root.stack.length - 1] : null
+    readonly property var items: root.level ? root.level.items : root.router.items
+    property int selected: 0
+    property int scroll: 0
+    readonly property var current: root.items[root.selected]
+
+    // Type-on: when the rows change they appear top to bottom over 60 ms. `typeOn` counts rows shown.
+    property string rowsSig: ""
+    property real typeOn: root.visibleRows
+
+    // The prompt's block cursor blinks; typing shows it at once.
+    property bool cursorOn: true
+
+    // The afterglow: where the selection just was, fading.
+    property int ghostRow: -1
+
+    // The selected row's slow details (Item.probe), asked for after a pause on the row.
+    property var probed: []
+    property int probeSeq: 0
+
+    // Running an action: `busy` from its done() until the launcher closes; `message` replaces the hint row.
+    property bool busy: false
+    property string message: ""
+    // The confirming action waiting for its second Enter, as "<item id>#<action id>" (a var property does not keep
+    // the identity of the action object, so it is matched by key).
+    property string pending: ""
+
+    // ===== what the frame says =====
+    // "[ index · 4/212 ]" while typing, "[ index · 212 ]" on an empty prompt, the breadcrumb in a menu.
+    readonly property string slotText: {
+        if (root.level)
+            return root.level.crumb
+        const mode = LauncherConfig.label(root.router.mode)
+        const matches = root.router.items.filter(it => !it.inert).length
+        if (root.router.query === "")
+            return mode + " · " + (root.router.total > 0 ? root.router.total : matches)
+        return mode + " · " + matches + (root.router.total > 0 ? "/" + root.router.total : "")
+    }
+
+    readonly property string detailLabel: {
+        if (root.level)
+            return root.level.owner.title
+        return root.current ? root.current.title : "detail"
+    }
+
+    // The mode strip's entries, in a fixed order: [{ mode, prefix, available }]. Index has no prefix; a provider
+    // whose tool or bar command is missing is listed but unavailable.
+    readonly property var modeOrder: ["index", "computus", "archivum", "imperium", "memoria"]
+    readonly property var modes: {
+        const out = [{ mode: "index", prefix: "", available: true }]
+        for (const p of root.router.providers) {
+            if (p.prefix !== "")
+                out.push({ mode: p.mode, prefix: p.prefix, available: p.missing === "" })
+        }
+        return out.sort((a, b) => root.modeOrder.indexOf(a.mode) - root.modeOrder.indexOf(b.mode))
+    }
+
+    // [{ key, action }] for the hint row, as many as fit: `p` is the priority (lower is dropped first).
+    readonly property var hints: {
+        const it = root.current
+        const all = []
+        if (root.level) {
+            if (it && !it.inert && it.actions.length > 0)
+                all.push({ key: "enter", action: it.actions[0].menu ? "open" : it.title, p: 9 })
+            all.push({ key: "esc", action: "back", p: 8 })
+        } else {
+            if (it && !it.inert && it.actions.length > 0) {
+                all.push({ key: "enter", action: it.actions[0].label, p: 9 })
+                const s = it.actions.find(x => x.shift)
+                if (s && s !== it.actions[0])
+                    all.push({ key: "shift+enter", action: s.label, p: 6 })
+                all.push({ key: "tab", action: "actions", p: 7 })
+                if (it.pinnable)
+                    all.push({ key: "ctrl+1-9", action: "pin", p: 4 })
+            }
+            if (root.router.query === "")
+                all.push({ key: "alt+1-9", action: "slot", p: 5 })
+            else
+                all.push({ key: "ctrl+u", action: "clear", p: 3 })
+            // The prefixes have their own strip under the prompt.
+            all.push({ key: "esc", action: "close", p: 8 })
+        }
+
+        const cells = Math.floor((root.screenW - 2 * root.pad) / root.cw)
+        const width = list => list.reduce((n, h) => n + h.key.length + 1 + h.action.length, 0) + 2 * Math.max(0, list.length - 1)
+        let out = all
+        while (out.length > 1 && width(out) > cells) {
+            const low = out.reduce((m, h) => (h.p < m.p ? h : m), out[0])
+            out = out.filter(h => h !== low)
+        }
+        return out
+    }
+
+    // ===== open / close =====
 
     // Terminus-Bar watches this file to glow its launcher chip while the launcher is up.
     function publishState() {
@@ -232,14 +334,7 @@ Scope {
         root.setQuery("")
     }
 
-    // ===== levels =====
-    // [{ crumb, items, owner, retSelected, retScroll }]: the action menus opened on top of the result list.
-    property var stack: []
-    readonly property var level: root.stack.length > 0 ? root.stack[root.stack.length - 1] : null
-    readonly property var items: root.level ? root.level.items : root.router.items
-    property int selected: 0
-    property int scroll: 0
-    readonly property var current: root.items[root.selected]
+    // ===== levels and selection =====
 
     function push(crumb, items, owner) {
         root.stack = root.stack.concat([{ crumb: crumb, items: items, owner: owner, retSelected: root.selected, retScroll: root.scroll }])
@@ -297,9 +392,6 @@ Scope {
         }
     }
 
-    // Type-on: when the rows change they appear top to bottom over 60 ms. `typeOn` counts rows shown.
-    property string rowsSig: ""
-    property real typeOn: root.visibleRows
     NumberAnimation {
         id: typeOnAnim
         target: root
@@ -309,8 +401,6 @@ Scope {
         duration: 60
     }
 
-    // The prompt's block cursor blinks; typing shows it at once.
-    property bool cursorOn: true
     Timer {
         id: cursorTimer
         interval: 530
@@ -336,9 +426,6 @@ Scope {
         root.scroll = Math.max(0, Math.min(root.scroll, Math.max(0, root.items.length - root.visibleRows)))
     }
 
-    // The afterglow: where the selection just was, fading.
-    property int ghostRow: -1
-
     function select(index) {
         if (index === root.selected)
             return
@@ -355,8 +442,6 @@ Scope {
     }
 
     // ===== the selected row's slow details =====
-    property var probed: []
-    property int probeSeq: 0
 
     onCurrentChanged: {
         root.probed = []
@@ -384,11 +469,6 @@ Scope {
     }
 
     // ===== running actions =====
-    property bool busy: false
-    property string message: ""
-    // The confirming action waiting for its second Enter, as "<item id>#<action id>" (a var property does not keep
-    // the identity of the action object, so it is matched by key).
-    property string pending: ""
 
     Timer {
         id: messageReset
@@ -479,6 +559,8 @@ Scope {
         root.runAction(it, it.actions[0])
     }
 
+    // ===== keys =====
+
     function digitOf(key) {
         return key >= Qt.Key_0 && key <= Qt.Key_9 ? key - Qt.Key_0 : -1
     }
@@ -545,77 +627,11 @@ Scope {
         } else if (ctrl || alt || meta) {
             event.accepted = false
         } else if (event.text.length === 1 && event.text.charCodeAt(0) >= 32) {
-            if (root.router.query.length < 128)
+            if (root.router.query.length < root.maxQueryLength)
                 root.setQuery(root.router.query + event.text)
         } else {
             event.accepted = false
         }
-    }
-
-    // ===== what the frame says =====
-    // "[ index · 4/212 ]" while typing, "[ index · 212 ]" on an empty prompt, the breadcrumb in a menu.
-    readonly property string slotText: {
-        if (root.level)
-            return root.level.crumb
-        const mode = LauncherConfig.label(root.router.mode)
-        const matches = root.router.items.filter(it => !it.inert).length
-        if (root.router.query === "")
-            return mode + " · " + (root.router.total > 0 ? root.router.total : matches)
-        return mode + " · " + matches + (root.router.total > 0 ? "/" + root.router.total : "")
-    }
-
-    readonly property string detailLabel: {
-        if (root.level)
-            return root.level.owner.title
-        return root.current ? root.current.title : "detail"
-    }
-
-    // The mode strip's entries, in a fixed order: [{ mode, prefix, available }]. Index has no prefix; a provider
-    // whose tool or bar command is missing is listed but unavailable.
-    readonly property var modeOrder: ["index", "computus", "archivum", "imperium", "memoria"]
-    readonly property var modes: {
-        const out = [{ mode: "index", prefix: "", available: true }]
-        for (const p of root.router.providers) {
-            if (p.prefix !== "")
-                out.push({ mode: p.mode, prefix: p.prefix, available: p.missing === "" })
-        }
-        return out.sort((a, b) => root.modeOrder.indexOf(a.mode) - root.modeOrder.indexOf(b.mode))
-    }
-
-    // [{ key, action }] for the hint row, as many as fit: `p` is the priority (lower is dropped first).
-    readonly property var hints: {
-        const it = root.current
-        const all = []
-        if (root.level) {
-            if (it && !it.inert && it.actions.length > 0)
-                all.push({ key: "enter", action: it.actions[0].menu ? "open" : it.title, p: 9 })
-            all.push({ key: "esc", action: "back", p: 8 })
-        } else {
-            if (it && !it.inert && it.actions.length > 0) {
-                all.push({ key: "enter", action: it.actions[0].label, p: 9 })
-                const s = it.actions.find(x => x.shift)
-                if (s && s !== it.actions[0])
-                    all.push({ key: "shift+enter", action: s.label, p: 6 })
-                all.push({ key: "tab", action: "actions", p: 7 })
-                if (it.pinnable)
-                    all.push({ key: "ctrl+1-9", action: "pin", p: 4 })
-            }
-            if (root.router.query === "")
-                all.push({ key: "alt+1-9", action: "slot", p: 5 })
-            else
-                all.push({ key: "ctrl+u", action: "clear", p: 3 })
-            // The prefixes have their own strip under the prompt.
-            all.push({ key: "esc", action: "close", p: 8 })
-        }
-
-        const cells = Math.floor((root.screenW - 2 * root.pad) / root.cw)
-        const width = list => list.reduce((n, h) => n + h.key.length + 1 + h.action.length, 0) + 2 * Math.max(0, list.length - 1)
-        let out = all
-        while (out.length > 1 && width(out) > cells) {
-            const low = out.reduce((m, h) => (h.p < m.p ? h : m), out[0])
-            out = out.filter(h => h !== low)
-        }
-        return out
     }
 
     // ===== IPC =====
@@ -666,7 +682,7 @@ Scope {
         }
     }
 
-    // ===== drawing =====
+    // ===== components =====
     component Cell: Text {
         font.family: root.fontFamily
         font.pixelSize: root.fontPx
@@ -708,6 +724,112 @@ Scope {
             width: parent.width - x
             elide: Text.ElideRight
             text: parent.text
+        }
+    }
+
+    // One visible row of the result list: view position `index` shows item `root.scroll + index`.
+    component ResultRow: Item {
+        id: row
+        required property int index
+        readonly property int meterCells: 5
+        readonly property int at: root.scroll + index
+        readonly property var it: root.items[at]
+        readonly property bool sel: it !== undefined && at === root.selected
+        readonly property color ink: sel ? root.ground : (it && it.danger ? root.cWarn : (it && it.inert ? root.cDim : root.cNormal))
+        readonly property color inkDim: sel ? root.ground : root.cDim
+        readonly property var meter: it && it.meter >= 0 ? Schema.meterText(it.meter, meterCells) : null
+
+        x: root.pad + root.cw
+        y: root.listY + index * root.rowPx
+        width: root.listW - 2 * root.cw
+        height: root.rowPx
+        visible: it !== undefined && index < root.typeOn
+
+        Rectangle {
+            anchors.fill: parent
+            color: row.it && row.it.danger ? root.cWarn : root.cNormal
+            visible: row.sel
+        }
+        Cell {
+            x: 0
+            text: row.it && row.it.slot ? row.it.slot : " "
+            color: row.inkDim
+        }
+        Cell {
+            x: 2 * root.cw
+            text: row.it ? row.it.glyph : ""
+            color: row.sel ? root.ground : (row.it && row.it.glyph === "●" ? root.cNormal : root.cDim)
+        }
+        Cell {
+            x: 4 * root.cw
+            width: valueText.x - x - root.cw
+            elide: Text.ElideRight
+            text: row.it ? row.it.title : ""
+            color: row.ink
+        }
+        Cell {
+            id: valueText
+            // At most 45% of the row; long values (paths) keep their end.
+            width: Math.min(implicitWidth, Math.floor(row.width * 0.45 / root.cw) * root.cw)
+            elide: Text.ElideLeft
+            x: (row.meter ? meterOn.x - root.cw : row.width) - width
+            text: row.it ? row.it.value : ""
+            color: row.inkDim
+        }
+        Cell {
+            id: meterOn
+            x: row.width - row.meterCells * root.cw
+            text: row.meter ? row.meter.on : ""
+            color: row.sel ? root.ground : root.cNormal
+            visible: row.meter !== null
+        }
+        Cell {
+            x: meterOn.x + meterOn.width
+            text: row.meter ? row.meter.off : ""
+            color: row.inkDim
+            visible: row.meter !== null
+        }
+        MouseArea {
+            anchors.fill: parent
+            onClicked: {
+                root.select(row.at)
+                root.enter(false)
+            }
+        }
+    }
+
+    // A row of the detail pane is one line of label + text, or (with `image`) a picture six rows tall, tinted to
+    // the phosphor like everything else on the tube.
+    component DetailRow: Item {
+        required property var modelData
+        width: parent.width
+        height: modelData.image ? 6 * root.rowPx : root.rowPx
+
+        DetailLine {
+            visible: !modelData.image
+            width: parent.width
+            label: modelData.label
+            text: modelData.text
+            labelCols: 10
+        }
+        Image {
+            id: pic
+            visible: false
+            anchors.fill: parent
+            anchors.topMargin: root.rowPx / 2
+            source: modelData.image ? "file://" + modelData.image : ""
+            fillMode: Image.PreserveAspectFit
+            horizontalAlignment: Image.AlignLeft
+            asynchronous: true
+            cache: false
+            sourceSize.height: height
+        }
+        MultiEffect {
+            anchors.fill: pic
+            source: pic
+            visible: !!modelData.image
+            colorization: 1.0
+            colorizationColor: root.cNormal
         }
     }
 
@@ -770,6 +892,7 @@ Scope {
         }
     }
 
+    // ===== view =====
     PanelWindow {
         id: win
 
@@ -804,9 +927,9 @@ Scope {
                 acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
                 onWheel: event => {
                     travel += event.angleDelta.y
-                    const rows = Math.trunc(travel / 120)
+                    const rows = Math.trunc(travel / root.wheelNotch)
                     if (rows !== 0) {
-                        travel -= rows * 120
+                        travel -= rows * root.wheelNotch
                         root.move(-rows)
                     }
                 }
@@ -896,7 +1019,7 @@ Scope {
                                 color: root.level ? root.cDim : root.cGlow
                             }
                             Cell {
-                                text: root.router.query.length > 70 ? "…" + root.router.query.slice(-69) : root.router.query
+                                text: root.router.query.length > root.promptCells ? "…" + root.router.query.slice(1 - root.promptCells) : root.router.query
                                 color: root.level ? root.cDim : root.cGlow
                             }
                             Rectangle {
@@ -974,74 +1097,7 @@ Scope {
                         Repeater {
                             model: root.visibleRows
 
-                            Item {
-                                id: row
-                                required property int index
-                                readonly property int at: root.scroll + index
-                                readonly property var it: root.items[at]
-                                readonly property bool sel: it !== undefined && at === root.selected
-                                readonly property color ink: sel ? root.ground : (it && it.danger ? root.cWarn : (it && it.inert ? root.cDim : root.cNormal))
-                                readonly property color inkDim: sel ? root.ground : root.cDim
-                                readonly property var meter: it && it.meter >= 0 ? Schema.meterText(it.meter, 5) : null
-
-                                x: root.pad + root.cw
-                                y: root.listY + index * root.rowPx
-                                width: root.listW - 2 * root.cw
-                                height: root.rowPx
-                                visible: it !== undefined && index < root.typeOn
-
-                                Rectangle {
-                                    anchors.fill: parent
-                                    color: row.it && row.it.danger ? root.cWarn : root.cNormal
-                                    visible: row.sel
-                                }
-                                Cell {
-                                    x: 0
-                                    text: row.it && row.it.slot ? row.it.slot : " "
-                                    color: row.inkDim
-                                }
-                                Cell {
-                                    x: 2 * root.cw
-                                    text: row.it ? row.it.glyph : ""
-                                    color: row.sel ? root.ground : (row.it && row.it.glyph === "●" ? root.cNormal : root.cDim)
-                                }
-                                Cell {
-                                    x: 4 * root.cw
-                                    width: valueText.x - x - root.cw
-                                    elide: Text.ElideRight
-                                    text: row.it ? row.it.title : ""
-                                    color: row.ink
-                                }
-                                Cell {
-                                    id: valueText
-                                    // At most 45% of the row; long values (paths) keep their end.
-                                    width: Math.min(implicitWidth, Math.floor(row.width * 0.45 / root.cw) * root.cw)
-                                    elide: Text.ElideLeft
-                                    x: (row.meter ? meterOn.x - root.cw : row.width) - width
-                                    text: row.it ? row.it.value : ""
-                                    color: row.inkDim
-                                }
-                                Cell {
-                                    id: meterOn
-                                    x: row.width - 5 * root.cw
-                                    text: row.meter ? row.meter.on : ""
-                                    color: row.sel ? root.ground : root.cNormal
-                                    visible: row.meter !== null
-                                }
-                                Cell {
-                                    x: meterOn.x + meterOn.width
-                                    text: row.meter ? row.meter.off : ""
-                                    color: row.inkDim
-                                    visible: row.meter !== null
-                                }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    onClicked: {
-                                        root.select(row.at)
-                                        root.enter(false)
-                                    }
-                                }
-                            }
+                            ResultRow {}
                         }
 
                         Cell {
@@ -1129,40 +1185,7 @@ Scope {
                             Repeater {
                                 model: detailCol.rows
 
-                                // A row is one line of label + text, or (with `image`) a picture six rows tall,
-                                // tinted to the phosphor like everything else on the tube.
-                                Item {
-                                    required property var modelData
-                                    width: parent.width
-                                    height: modelData.image ? 6 * root.rowPx : root.rowPx
-
-                                    DetailLine {
-                                        visible: !modelData.image
-                                        width: parent.width
-                                        label: modelData.label
-                                        text: modelData.text
-                                        labelCols: 10
-                                    }
-                                    Image {
-                                        id: pic
-                                        visible: false
-                                        anchors.fill: parent
-                                        anchors.topMargin: root.rowPx / 2
-                                        source: modelData.image ? "file://" + modelData.image : ""
-                                        fillMode: Image.PreserveAspectFit
-                                        horizontalAlignment: Image.AlignLeft
-                                        asynchronous: true
-                                        cache: false
-                                        sourceSize.height: height
-                                    }
-                                    MultiEffect {
-                                        anchors.fill: pic
-                                        source: pic
-                                        visible: !!modelData.image
-                                        colorization: 1.0
-                                        colorizationColor: root.cNormal
-                                    }
-                                }
+                                DetailRow {}
                             }
                             Item {
                                 width: 1

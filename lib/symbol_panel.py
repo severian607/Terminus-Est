@@ -15,12 +15,14 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk4LayerShell", "1.0")
-from gi.repository import Gdk, Gio, GLib, Gtk, Gtk4LayerShell as LayerShell
+from gi.repository import Gdk, Gio, GLib, Gtk
+from gi.repository import Gtk4LayerShell as LayerShell
 
 ALT_SHORTCUTS = tuple(
-    line.split("\t") for line in
-    (Path(__file__).resolve().parent.parent / "config/symbol-shortcuts.tsv")
-    .read_text(encoding="utf-8").splitlines()
+    line.split("\t")
+    for line in (Path(__file__).resolve().parent.parent / "config/symbol-shortcuts.tsv")
+    .read_text(encoding="utf-8")
+    .splitlines()
 )
 SYMBOLS = {key: symbol for key, symbol, _ in ALT_SHORTCUTS}
 # The TSV has no group column (the Hyprland binder reads it too), so groups live here.
@@ -32,24 +34,37 @@ GROUPS = {
 }
 GROUP_OF = {key: group for group, keys in GROUPS.items() for key in keys.split()}
 ALL = "\0all"
-MODIFIERS = (Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.CONTROL_MASK
-             | Gdk.ModifierType.ALT_MASK | Gdk.ModifierType.SUPER_MASK
-             | Gdk.ModifierType.META_MASK | Gdk.ModifierType.HYPER_MASK)
+MODIFIERS = (
+    Gdk.ModifierType.SHIFT_MASK
+    | Gdk.ModifierType.CONTROL_MASK
+    | Gdk.ModifierType.ALT_MASK
+    | Gdk.ModifierType.SUPER_MASK
+    | Gdk.ModifierType.META_MASK
+    | Gdk.ModifierType.HYPER_MASK
+)
 RELEASED_MASKS = {
-    "Shift_L": Gdk.ModifierType.SHIFT_MASK, "Shift_R": Gdk.ModifierType.SHIFT_MASK,
-    "Control_L": Gdk.ModifierType.CONTROL_MASK, "Control_R": Gdk.ModifierType.CONTROL_MASK,
-    "Alt_L": Gdk.ModifierType.ALT_MASK, "Alt_R": Gdk.ModifierType.ALT_MASK,
-    "Super_L": Gdk.ModifierType.SUPER_MASK, "Super_R": Gdk.ModifierType.SUPER_MASK,
-    "Meta_L": Gdk.ModifierType.META_MASK, "Meta_R": Gdk.ModifierType.META_MASK,
-    "Hyper_L": Gdk.ModifierType.HYPER_MASK, "Hyper_R": Gdk.ModifierType.HYPER_MASK,
+    "Shift_L": Gdk.ModifierType.SHIFT_MASK,
+    "Shift_R": Gdk.ModifierType.SHIFT_MASK,
+    "Control_L": Gdk.ModifierType.CONTROL_MASK,
+    "Control_R": Gdk.ModifierType.CONTROL_MASK,
+    "Alt_L": Gdk.ModifierType.ALT_MASK,
+    "Alt_R": Gdk.ModifierType.ALT_MASK,
+    "Super_L": Gdk.ModifierType.SUPER_MASK,
+    "Super_R": Gdk.ModifierType.SUPER_MASK,
+    "Meta_L": Gdk.ModifierType.META_MASK,
+    "Meta_R": Gdk.ModifierType.META_MASK,
+    "Hyper_L": Gdk.ModifierType.HYPER_MASK,
+    "Hyper_R": Gdk.ModifierType.HYPER_MASK,
 }
-SYMBOL_FOOTER = ("key  insert on release    Tab  category    F1  truth table"
-                 "    Esc  cancel    ·  clipboard untouched")
+SYMBOL_FOOTER = "key  insert on release    Tab  category    F1  truth table    Esc  cancel    ·  clipboard untouched"
 TABLE_FOOTER = "2-4  insert table    Backspace  symbols    Esc  cancel"
 SYMBOL_MODE = ("press a key to insert", "   ·   alt+key works anywhere without this panel")
 TABLE_MODE = ("choose the number of variables", "   ·   pasted as an editable markdown table, replaces clipboard")
 COLUMNS = 4
 PANEL_WIDTH, PANEL_HEIGHT = 1240, 560
+# The panel shrinks to leave this much of the monitor free, and drops to fewer grid columns below these widths.
+SCREEN_MARGIN_X_PX, SCREEN_MARGIN_Y_PX = 48, 96
+WIDE_GRID_MIN_WIDTH_PX, MEDIUM_GRID_MIN_WIDTH_PX = 1100, 800
 TABLES = (
     ("2", "p, q", "4 rows"),
     ("3", "p, q, r", "8 rows"),
@@ -76,11 +91,10 @@ def truth_table(variable_count):
     """Return every assignment, true first, with three blank working columns."""
     headers = list("pqrs"[:variable_count]) + ["Step 1", "Step 2", "Result"]
     rows = [headers, ["---"] * len(headers)]
-    for assignment in range(1 << variable_count):
-        rows.append([
-            "F" if assignment & (1 << bit) else "T"
-            for bit in reversed(range(variable_count))
-        ] + ["", "", ""])
+    rows.extend(
+        ["F" if assignment & (1 << bit) else "T" for bit in reversed(range(variable_count))] + ["", "", ""]
+        for assignment in range(1 << variable_count)
+    )
     return "\n\n" + "\n".join("| " + " | ".join(row) + " |" for row in rows) + "\n\n"
 
 
@@ -97,12 +111,10 @@ def key_caption(key):
 
 class SymbolPanel(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id="local.terminus.Symbols",
-                         flags=Gio.ApplicationFlags.IS_SERVICE)
+        super().__init__(application_id="local.terminus.Symbols", flags=Gio.ApplicationFlags.IS_SERVICE)
         self.target = None
         self.delivering = False
         self.selected = None
-        self.selected_key = None
         self.selected_keycode = None
         self.key_released = False
         self.table_mode = False
@@ -203,11 +215,11 @@ class SymbolPanel(Gtk.Application):
             cell.set_tooltip_text(f"Alt+{key_caption(key)}")
             cell.append(make_label("sym-key", key_caption(key)))
             cell.append(make_label("sym-glyph", symbol))
-            cell.append(make_label("sym-desc", description.lower(), xalign=0, hexpand=True,
-                                   ellipsize=3, max_width_chars=10))
+            cell.append(
+                make_label("sym-desc", description.lower(), xalign=0, hexpand=True, ellipsize=3, max_width_chars=10)
+            )
             self.cells[key] = (GROUP_OF.get(key, "algebra"), cell)
-        scroll = Gtk.ScrolledWindow(hexpand=True, vexpand=True, focusable=False,
-                                    hscrollbar_policy=Gtk.PolicyType.NEVER)
+        scroll = Gtk.ScrolledWindow(hexpand=True, vexpand=True, focusable=False, hscrollbar_policy=Gtk.PolicyType.NEVER)
         scroll.set_child(self.grid)
         body.append(scroll)
         return body
@@ -222,8 +234,10 @@ class SymbolPanel(Gtk.Application):
             cell.append(make_label("sym-desc", f"·  {rows}", xalign=0, hexpand=True))
             page.append(cell)
             self.table_cells[key] = cell
-        for text in ("t/f combinations filled in   ·   step 1, step 2 and result left blank",
-                     "pastes an editable markdown table   ·   replaces clipboard"):
+        for text in (
+            "t/f combinations filled in   ·   step 1, step 2 and result left blank",
+            "pastes an editable markdown table   ·   replaces clipboard",
+        ):
             page.append(make_label("strip-label", text, xalign=0, margin_top=14, ellipsize=3))
         return page
 
@@ -237,8 +251,7 @@ class SymbolPanel(Gtk.Application):
     def fill_grid(self):
         while child := self.grid.get_first_child():
             self.grid.remove(child)
-        shown = [cell for group, cell in self.cells.values()
-                 if self.category == ALL or group == self.category]
+        shown = [cell for group, cell in self.cells.values() if self.category == ALL or group == self.category]
         for index, cell in enumerate(shown):
             self.grid.attach(cell, index % self.columns, index // self.columns, 1, 1)
         self.state.set_label(f"symbols::{len(shown)}")
@@ -248,9 +261,9 @@ class SymbolPanel(Gtk.Application):
         width, height = PANEL_WIDTH, PANEL_HEIGHT
         if monitor is not None:
             geometry = monitor.get_geometry()
-            width = min(width, geometry.width - 48)
-            height = min(height, geometry.height - 96)
-        columns = 4 if width >= 1100 else 3 if width >= 800 else 2
+            width = min(width, geometry.width - SCREEN_MARGIN_X_PX)
+            height = min(height, geometry.height - SCREEN_MARGIN_Y_PX)
+        columns = 4 if width >= WIDE_GRID_MIN_WIDTH_PX else 3 if width >= MEDIUM_GRID_MIN_WIDTH_PX else 2
         self.panel.set_size_request(width, height)
         if columns != self.columns:
             self.columns = columns
@@ -291,10 +304,8 @@ class SymbolPanel(Gtk.Application):
         self.key_released = False
         self.select_category(ALL)
         self.show_tables(False)
-        monitor_name = next((m["name"] for m in hypr_json("monitors")
-                             if m["id"] == target.get("monitor")), None)
-        monitor = next((m for m in Gdk.Display.get_default().get_monitors()
-                        if m.get_connector() == monitor_name), None)
+        monitor_name = next((m["name"] for m in hypr_json("monitors") if m["id"] == target.get("monitor")), None)
+        monitor = next((m for m in Gdk.Display.get_default().get_monitors() if m.get_connector() == monitor_name), None)
         self.fit_to_monitor(monitor)
         LayerShell.set_monitor(self.window, monitor)
         self.window.present()
@@ -338,8 +349,7 @@ class SymbolPanel(Gtk.Application):
                 print("Symbol insertion cancelled: the original window lost focus.", file=sys.stderr)
             elif paste:
                 Gdk.Display.get_default().get_clipboard().set(symbol)
-                subprocess.run(["wtype", "-M", "ctrl", "-k", "v", "-m", "ctrl"],
-                               check=True, timeout=3)
+                subprocess.run(["wtype", "-M", "ctrl", "-k", "v", "-m", "ctrl"], check=True, timeout=3)
             else:
                 subprocess.run(["wtype", "--", symbol], check=True, timeout=3)
         except (OSError, subprocess.SubprocessError, ValueError) as error:

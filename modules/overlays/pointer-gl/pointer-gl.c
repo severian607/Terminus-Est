@@ -31,9 +31,23 @@
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "xdg-output-unstable-v1-client-protocol.h"
 
-#define MAX_PTS 320  // most points a trail can have on the CPU side
-#define CHUNK 48    // points per draw: the shader array holds 64, and each chunk is shaded only inside its own box
-#define MAX_RAW 4096
+#define MAX_PTS 320   // most points handed to the shader per frame
+#define CHUNK 48      // points per draw: the shader array holds 64, and each chunk is shaded only inside its own box
+#define MAX_RAW 4096  // pointer samples kept; the trail's life ends long before this
+
+#define MOVE_EPSILON_PX 0.5         // smaller pointer jumps are not movement
+#define TRAIL_PAUSE_S 0.15          // a gap this long between samples starts a new trail
+#define TRAIL_SEED_LEAD_S 1e-3      // the seed point of a new trail is this much older than its first sample
+#define PAD_ABOVE_FACTOR 1.6        // flames rise: the effect reaches this much further above the path than beside it
+#define PATH_WRAP_PX 100000.0       // path positions wrap here
+#define TIME_WRAP_S 1000.0          // u_time wraps so float precision does not decay over hours
+#define POLL_SLOW_S 0.04            // pointer poll period shortly after the pointer stopped, and at start
+#define POLL_FAST_WINDOW_S 0.5      // frame-rate polling continues this long after the last movement
+#define POLL_SLOW_WINDOW_S 5        // slow polling continues until the pointer has rested this long
+#define POLL_IDLE_S 0.1
+#define MIN_PLAUSIBLE_REFRESH_MHZ 20000  // lower reports are bogus (nested or virtual outputs)
+#define FRAME_FALLBACK_S (1.0 / 60.0)
+#define FRAME_MIN_S 0.004
 
 typedef enum { FX_FIRE = 0, FX_LIGHTNING = 1, FX_PLASMA = 2 } Fx;
 
@@ -80,6 +94,7 @@ static struct {
   double lx, ly;  // last sampled position
   int n_raw;
   double last_move;
+  bool animating;  // the last tick had something to draw
   int timer_fd;
   double timer_period;
 } S;
@@ -305,6 +320,8 @@ static bool build_program(void) {
   glAttachShader(S.prog, vs);
   glAttachShader(S.prog, fs);
   glLinkProgram(S.prog);
+  glDeleteShader(vs);
+  glDeleteShader(fs);
   GLint ok = 0;
   glGetProgramiv(S.prog, GL_LINK_STATUS, &ok);
   if (!ok) {
@@ -321,6 +338,16 @@ static bool build_program(void) {
   S.u_mode = glGetUniformLocation(S.prog, "u_mode");
   S.u_tail = glGetUniformLocation(S.prog, "u_tail");
   S.u_vis = glGetUniformLocation(S.prog, "u_vis");
+
+  // State that never changes between frames or outputs (one context serves every output surface).
+  glUseProgram(S.prog);
+  glUniform3f(S.u_color, (float)S.rgb[0], (float)S.rgb[1], (float)S.rgb[2]);
+  glUniform1f(S.u_life, (float)S.life);
+  glUniform1i(S.u_mode, (int)S.fx);
+  glUniform1f(S.u_vis, 1.0f);
+  glEnable(GL_BLEND);  // chunks overlap at their edges; every effect already combines segments with max
+  glBlendEquation(GL_MAX);
+  glBlendFunc(GL_ONE, GL_ONE);
   return true;
 }
 
@@ -384,22 +411,28 @@ static void expire(double now) {
   if (S.n_raw == 1) S.n_raw = 0;  // one point has no segment
 }
 
-static void sample(double now) {
-  double x, y;
-  if (!cursor_pos(&x, &y)) return;
-  Pt *last = S.n_raw ? &S.raw[S.n_raw - 1] : NULL;
-  if (last && hypot(x - last->x, y - last->y) < 0.5) return;
-  S.last_move = now;
-  S.travel += hypot(x - S.lx, y - S.ly);
-  S.lx = x;
-  S.ly = y;
+static void raw_push(Pt p) {
   if (S.n_raw == MAX_RAW) {
     memmove(S.raw, S.raw + 1, (MAX_RAW - 1) * sizeof(Pt));
     S.n_raw--;
   }
-  if (last && now - last->t > 0.15) S.n_raw = 0;  // a pause starts a new trail
-  if (S.n_raw == 0) S.raw[S.n_raw++] = (Pt){x, y, now - 1e-3, S.travel};
-  S.raw[S.n_raw++] = (Pt){x, y, now, S.travel};
+  S.raw[S.n_raw++] = p;
+}
+
+static void sample(double now) {
+  double x, y;
+  if (!cursor_pos(&x, &y)) return;
+  const Pt *last = S.n_raw ? &S.raw[S.n_raw - 1] : NULL;
+  if (last && hypot(x - last->x, y - last->y) < MOVE_EPSILON_PX) return;
+  S.last_move = now;
+  S.travel += hypot(x - S.lx, y - S.ly);
+  S.lx = x;
+  S.ly = y;
+  if (!last || now - last->t > TRAIL_PAUSE_S) {  // a pause starts a new trail
+    S.n_raw = 0;
+    raw_push((Pt){x, y, now - TRAIL_SEED_LEAD_S, S.travel});
+  }
+  raw_push((Pt){x, y, now, S.travel});
 }
 
 // At most MAX_PTS points, oldest first, always ending with the newest: x, y, age, absolute path position.
@@ -410,15 +443,14 @@ static int resample(double now, float out[MAX_PTS * 4]) {
   if (stride < 1) stride = 1;
   int idx[MAX_PTS], m = 0;
   for (int i = n - 1; i >= 0 && m < S.maxpts; i -= stride) idx[m++] = i;  // newest first
-  float tmp[MAX_PTS][4];
   for (int k = 0; k < m; k++) {
-    Pt *p = &S.raw[idx[k]];
-    tmp[k][0] = (float)p->x;
-    tmp[k][1] = (float)p->y;
-    tmp[k][2] = (float)(now - p->t);
-    tmp[k][3] = (float)fmod(p->s, 100000.0);
+    const Pt *p = &S.raw[idx[k]];
+    float *dst = &out[(m - 1 - k) * 4];  // oldest first
+    dst[0] = (float)p->x;
+    dst[1] = (float)p->y;
+    dst[2] = (float)(now - p->t);
+    dst[3] = (float)fmod(p->s, PATH_WRAP_PX);  // keeps float precision; the patterns repeat well within it
   }
-  for (int k = 0; k < m; k++) memcpy(&out[k * 4], tmp[m - 1 - k], sizeof tmp[0]);  // oldest first
   return m;
 }
 
@@ -440,6 +472,7 @@ static int resample(double now, float out[MAX_PTS * 4]) {
 #define LEN_MOVING 2700.0  // px of path in the ribbon while the pointer moves
 #define LEN_IDLE 230.0     // about one lap of the circle
 #define PATH_MAX 8000
+#define CHAIN_DT_MAX_S 0.1  // longest time step the ribbon integrates, so a stall does not make it jump
 #define PATH_STEP 1.5      // px the head must travel before a path point is recorded
 
 typedef struct { double x, y, s; } PathPt;  // s: distance along the path
@@ -472,7 +505,7 @@ static void chain_step(double now) {
   }
   double x = cx, y = cy;
   double dt = chain_ready ? now - chain_t : 0.0;
-  if (dt > 0.1) dt = 0.1;
+  if (dt > CHAIN_DT_MAX_S) dt = CHAIN_DT_MAX_S;
   chain_t = now;
   static double px, py;
   if (!chain_ready) {
@@ -483,7 +516,7 @@ static void chain_step(double now) {
     S.last_move = now;
     chain_ready = true;
   }
-  if (hypot(x - px, y - py) >= 0.5) S.last_move = now;
+  if (hypot(x - px, y - py) >= MOVE_EPSILON_PX) S.last_move = now;
   px = x;
   py = y;
 
@@ -533,6 +566,87 @@ static int chain_points(float out[MAX_PTS * 4]) {
   return n;
 }
 
+// A run of up to CHUNK trail points and the buffer-pixel scissor (GL origin) that bounds its effect.
+typedef struct { int first, count; int x, y, w, h; } Chunk;
+#define MAX_CHUNKS (MAX_PTS / (CHUNK - 1) + 2)
+
+// Splits the output-local points into chunks that share their end points. Each chunk is shaded only inside its own
+// padded box, so a trail that crosses the screen costs what its length costs, not the whole screen.
+static int plan_chunks(const Output *o, const float *local, int n, Chunk chunks[MAX_CHUNKS]) {
+  int count = 0;
+  for (int first = 0; first + 1 < n; first += CHUNK - 1) {
+    int len = n - first < CHUNK ? n - first : CHUNK;
+    double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (int i = first; i < first + len; i++) {
+      x0 = fmin(x0, local[i * 4]);
+      x1 = fmax(x1, local[i * 4]);
+      y0 = fmin(y0, local[i * 4 + 1]);
+      y1 = fmax(y1, local[i * 4 + 1]);
+    }
+    x0 = fmax(x0 - S.pad, 0);
+    x1 = fmin(x1 + S.pad, o->w);
+    y0 = fmax(y0 - S.pad * PAD_ABOVE_FACTOR, 0);  // flames rise
+    y1 = fmin(y1 + S.pad, o->h);
+    if (x1 <= x0 || y1 <= y0) continue;
+    chunks[count++] = (Chunk){first, len,
+                              (int)floor(x0 * o->scale), (int)floor((o->h - y1) * o->scale),
+                              (int)ceil((x1 - x0) * o->scale) + 1, (int)ceil((y1 - y0) * o->scale) + 1};
+  }
+  return count;
+}
+
+// Tells the compositor what changed since the last frame: where the trail was plus where it is now.
+static void swap_buffers(Output *o, const Chunk *chunks, int count, int pw, int ph) {
+  int x0 = 1 << 30, y0 = 1 << 30, x1 = 0, y1 = 0;  // union of this frame's chunks
+  for (int k = 0; k < count; k++) {
+    x0 = chunks[k].x < x0 ? chunks[k].x : x0;
+    y0 = chunks[k].y < y0 ? chunks[k].y : y0;
+    x1 = chunks[k].x + chunks[k].w > x1 ? chunks[k].x + chunks[k].w : x1;
+    y1 = chunks[k].y + chunks[k].h > y1 ? chunks[k].y + chunks[k].h : y1;
+  }
+  if (S.swap_damage) {
+    int ax = x0, ay = y0, bx = x1, by = y1;
+    if (o->dmg[2] > 0) {
+      ax = o->dmg[0] < ax ? o->dmg[0] : ax;
+      ay = o->dmg[1] < ay ? o->dmg[1] : ay;
+      bx = o->dmg[0] + o->dmg[2] > bx ? o->dmg[0] + o->dmg[2] : bx;
+      by = o->dmg[1] + o->dmg[3] > by ? o->dmg[1] + o->dmg[3] : by;
+    } else {
+      ax = 0, ay = 0, bx = pw, by = ph;  // first frame after being hidden: everything
+    }
+    ax = ax < 0 ? 0 : ax;
+    ay = ay < 0 ? 0 : ay;
+    bx = bx > pw ? pw : bx;
+    by = by > ph ? ph : by;
+    EGLint rect[4] = {ax, ay, bx - ax, by - ay};
+    S.swap_damage(S.edpy, o->egl, rect, 1);
+  } else {
+    eglSwapBuffers(S.edpy, o->egl);
+  }
+  o->dmg[0] = x0, o->dmg[1] = y0, o->dmg[2] = x1 - x0, o->dmg[3] = y1 - y0;
+}
+
+// Draws `chunks` into the output's current surface. `local` holds the output-local shader points.
+static void draw_chunks(Output *o, double now, const float *local, const Chunk *chunks, int count) {
+  int pw = o->w * o->scale, ph = o->h * o->scale;
+  glViewport(0, 0, pw, ph);
+  glDisable(GL_SCISSOR_TEST);
+  glClearColor(0, 0, 0, 0);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEnable(GL_SCISSOR_TEST);
+  glUniform2f(S.u_res, (float)pw, (float)ph);
+  glUniform1f(S.u_scale, (float)o->scale);
+  glUniform1f(S.u_time, (float)fmod(now, TIME_WRAP_S));
+  glUniform1f(S.u_tail, local[3]);
+  for (int k = 0; k < count; k++) {
+    glScissor(chunks[k].x, chunks[k].y, chunks[k].w, chunks[k].h);
+    glUniform1i(S.u_n, chunks[k].count);
+    glUniform4fv(S.u_pts, chunks[k].count, &local[chunks[k].first * 4]);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+  }
+  swap_buffers(o, chunks, count, pw, ph);
+}
+
 static void render(double now) {
   float pts[MAX_PTS * 4];
   int n;
@@ -551,34 +665,9 @@ static void render(double now) {
       local[i * 4 + 2] = pts[i * 4 + 2];
       local[i * 4 + 3] = pts[i * 4 + 3];
     }
-    // The trail is drawn in chunks of CHUNK points that share their end points; each chunk is shaded only inside
-    // its own padded box, so a trail that crosses the screen costs what its length costs, not the whole screen.
-    int start[MAX_PTS / (CHUNK - 1) + 2], count[MAX_PTS / (CHUNK - 1) + 2], nr = 0;
-    double box[MAX_PTS / (CHUNK - 1) + 2][4];
-    for (int s = 0; s + 1 < n; s += CHUNK - 1) {
-      int c = n - s < CHUNK ? n - s : CHUNK;
-      double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
-      for (int i = s; i < s + c; i++) {
-        if (local[i * 4] < x0) x0 = local[i * 4];
-        if (local[i * 4] > x1) x1 = local[i * 4];
-        if (local[i * 4 + 1] < y0) y0 = local[i * 4 + 1];
-        if (local[i * 4 + 1] > y1) y1 = local[i * 4 + 1];
-      }
-      x0 -= S.pad;
-      x1 += S.pad;
-      y0 -= S.pad * 1.6;
-      y1 += S.pad;
-      if (x0 < 0) x0 = 0;
-      if (y0 < 0) y0 = 0;
-      if (x1 > o->w) x1 = o->w;
-      if (y1 > o->h) y1 = o->h;
-      if (x1 <= x0 || y1 <= y0) continue;
-      start[nr] = s;
-      count[nr] = c;
-      box[nr][0] = x0, box[nr][1] = y0, box[nr][2] = x1, box[nr][3] = y1;
-      nr++;
-    }
-    if (nr == 0) {
+    Chunk chunks[MAX_CHUNKS];
+    int count = plan_chunks(o, local, n, chunks);
+    if (count == 0) {
       output_hide(o);
       continue;
     }
@@ -589,59 +678,7 @@ static void render(double now) {
       quit_flag = 1;
       return;
     }
-    int pw = o->w * o->scale, ph = o->h * o->scale;
-    glViewport(0, 0, pw, ph);
-    glDisable(GL_SCISSOR_TEST);
-    glClearColor(0, 0, 0, 0);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glEnable(GL_SCISSOR_TEST);
-    glEnable(GL_BLEND);  // chunks overlap at their edges; every effect already combines segments with max
-    glBlendEquation(GL_MAX);
-    glBlendFunc(GL_ONE, GL_ONE);
-    glUseProgram(S.prog);
-    glUniform2f(S.u_res, (float)pw, (float)ph);
-    glUniform1f(S.u_scale, (float)o->scale);
-    glUniform1f(S.u_time, (float)fmod(now, 1000.0));
-    glUniform3f(S.u_color, (float)S.rgb[0], (float)S.rgb[1], (float)S.rgb[2]);
-    glUniform1f(S.u_life, (float)S.life);
-    glUniform1i(S.u_mode, (int)S.fx);
-    glUniform1f(S.u_tail, local[3]);
-    glUniform1f(S.u_vis, 1.0f);
-    int ux0 = 1 << 30, uy0 = 1 << 30, ux1 = 0, uy1 = 0;
-    for (int k = 0; k < nr; k++) {
-      int sx = (int)floor(box[k][0] * o->scale), sy = (int)floor((o->h - box[k][3]) * o->scale);
-      int sw = (int)ceil((box[k][2] - box[k][0]) * o->scale) + 1, sh = (int)ceil((box[k][3] - box[k][1]) * o->scale) + 1;
-      if (sx < ux0) ux0 = sx;
-      if (sy < uy0) uy0 = sy;
-      if (sx + sw > ux1) ux1 = sx + sw;
-      if (sy + sh > uy1) uy1 = sy + sh;
-      glScissor((GLint)floor(box[k][0] * o->scale), (GLint)floor((o->h - box[k][3]) * o->scale),
-                (GLsizei)ceil((box[k][2] - box[k][0]) * o->scale) + 1, (GLsizei)ceil((box[k][3] - box[k][1]) * o->scale) + 1);
-      glUniform1i(S.u_n, count[k]);
-      glUniform4fv(S.u_pts, count[k], &local[start[k] * 4]);
-      glDrawArrays(GL_TRIANGLES, 0, 3);
-    }
-    // Only what changed since the last frame needs compositing: where the trail was plus where it is now.
-    if (S.swap_damage) {
-      int ax = ux0, ay = uy0, bx = ux1, by = uy1;
-      if (o->dmg[2] > 0) {
-        if (o->dmg[0] < ax) ax = o->dmg[0];
-        if (o->dmg[1] < ay) ay = o->dmg[1];
-        if (o->dmg[0] + o->dmg[2] > bx) bx = o->dmg[0] + o->dmg[2];
-        if (o->dmg[1] + o->dmg[3] > by) by = o->dmg[1] + o->dmg[3];
-      } else {
-        ax = 0, ay = 0, bx = pw, by = ph;  // first frame after being hidden: everything
-      }
-      if (ax < 0) ax = 0;
-      if (ay < 0) ay = 0;
-      if (bx > pw) bx = pw;
-      if (by > ph) by = ph;
-      EGLint rect[4] = {ax, ay, bx - ax, by - ay};
-      S.swap_damage(S.edpy, o->egl, rect, 1);
-    } else {
-      eglSwapBuffers(S.edpy, o->egl);
-    }
-    o->dmg[0] = ux0, o->dmg[1] = uy0, o->dmg[2] = ux1 - ux0, o->dmg[3] = uy1 - uy0;
+    draw_chunks(o, now, local, chunks, count);
   }
   wl_display_flush(S.display);
 }
@@ -764,7 +801,7 @@ static void reg_remove(void *d, struct wl_registry *r, uint32_t name) {
 }
 static const struct wl_registry_listener registry_listener = {.global = reg_global, .global_remove = reg_remove};
 
-// ---- main loop --------------------------------------------------------------------------------------------
+// ---- startup ----------------------------------------------------------------------------------------------
 
 static void on_signal(int s) { (void)s; quit_flag = 1; }
 
@@ -780,48 +817,140 @@ static bool parse_color(const char *s, double rgb[3]) {
   return true;
 }
 
-int main(int argc, char **argv) {
-  if (argc < 2 || (strcmp(argv[1], "fire") && strcmp(argv[1], "lightning") && strcmp(argv[1], "plasma"))) {
+static bool parse_args(int argc, char **argv) {
+  static const char *const NAMES[] = {[FX_FIRE] = "fire", [FX_LIGHTNING] = "lightning", [FX_PLASMA] = "plasma"};
+  static const struct { double life_s; int shader_points; double pad_px; } PARAMS[] = {
+      [FX_FIRE] = {1.4, 48, 70}, [FX_LIGHTNING] = {0.9, 48, 90}, [FX_PLASMA] = {1.0, MAX_PTS, 90}};  // plasma: its fade runs along the ribbon, not over time
+  bool known = false;
+  for (Fx fx = FX_FIRE; argc >= 2 && fx <= FX_PLASMA; fx++)
+    if (!strcmp(argv[1], NAMES[fx])) S.fx = fx, known = true;
+  if (!known) {
     fprintf(stderr, "usage: pointer-gl fire|lightning|plasma [--color #rrggbb]\n");
-    return 2;
+    return false;
   }
-  S.fx = !strcmp(argv[1], "fire") ? FX_FIRE : !strcmp(argv[1], "lightning") ? FX_LIGHTNING : FX_PLASMA;
-  S.life = S.fx == FX_FIRE ? 1.4 : S.fx == FX_LIGHTNING ? 0.9 : 1.0;  // plasma: fade runs along the ribbon, not over time
-  S.maxpts = S.fx == FX_PLASMA ? MAX_PTS : 48;
-  S.pad = S.fx == FX_FIRE ? 70 : 90;
+  S.life = PARAMS[S.fx].life_s;
+  S.maxpts = PARAMS[S.fx].shader_points;
+  S.pad = PARAMS[S.fx].pad_px;
   parse_color("#ffcccd", S.rgb);
   for (int i = 2; i < argc; i++) {
     if (!strcmp(argv[i], "--color") && i + 1 < argc) {
       if (!parse_color(argv[++i], S.rgb)) {
         fprintf(stderr, "pointer-gl: bad colour %s\n", argv[i]);
-        return 2;
+        return false;
       }
     } else {
       fprintf(stderr, "pointer-gl: unknown argument %s\n", argv[i]);
-      return 2;
+      return false;
     }
   }
+  return true;
+}
 
+static bool connect_wayland(void) {
   S.display = wl_display_connect(NULL);
   if (!S.display) {
     fprintf(stderr, "pointer-gl: cannot connect to the Wayland compositor\n");
-    return 1;
+    return false;
   }
   S.registry = wl_display_get_registry(S.display);
   wl_registry_add_listener(S.registry, &registry_listener, NULL);
   wl_display_roundtrip(S.display);
   if (!S.compositor || !S.layer_shell) {
     fprintf(stderr, "pointer-gl: compositor lacks wl_compositor or wlr-layer-shell\n");
-    return 1;
+    return false;
   }
   if (!egl_init()) {
     fprintf(stderr, "pointer-gl: EGL with OpenGL ES 3 is unavailable\n");
-    return 1;
+    return false;
   }
   for (Output *o = S.outputs; o; o = o->next) output_init(o);
   S.ready = true;
   wl_display_roundtrip(S.display);
   wl_display_roundtrip(S.display);
+  return true;
+}
+
+// One frame per refresh of the fastest output.
+static void choose_frame_period(void) {
+  int mhz = 0;
+  for (Output *o = S.outputs; o; o = o->next) mhz = o->refresh_mhz > mhz ? o->refresh_mhz : mhz;
+  S.frame = mhz > MIN_PLAUSIBLE_REFRESH_MHZ ? 1000.0 / mhz : FRAME_FALLBACK_S;
+  if (S.frame < FRAME_MIN_S) S.frame = FRAME_MIN_S;
+}
+
+// ---- main loop --------------------------------------------------------------------------------------------
+
+static void on_tick(double now) {
+  uint64_t ticks;
+  if (read(S.timer_fd, &ticks, sizeof ticks) < 0) ticks = 0;  // nothing pending: a spurious wake-up
+  if (S.fx == FX_PLASMA) {
+    chain_step(now);
+    S.animating = chain_ready;
+  } else {
+    sample(now);
+    expire(now);
+    S.animating = S.n_raw > 0;
+  }
+  bool any_visible = false;
+  for (Output *o = S.outputs; o; o = o->next) any_visible |= o->egl != EGL_NO_SURFACE;
+  if (S.animating || any_visible) render(now);  // after the last frame: hand the buffers back
+}
+
+// Full frame rate while the pointer moves, slower after it stops; the plasma ring never rests.
+static double next_timer_period(double now) {
+  double still_s = now - S.last_move;
+  if (S.fx == FX_PLASMA || S.animating || still_s < POLL_FAST_WINDOW_S) return S.frame;
+  return still_s < POLL_SLOW_WINDOW_S ? POLL_SLOW_S : POLL_IDLE_S;
+}
+
+// Returns the exit code.
+static int run(void) {
+  while (!quit_flag) {
+    while (wl_display_prepare_read(S.display) != 0) wl_display_dispatch_pending(S.display);
+    wl_display_flush(S.display);
+    struct pollfd fds[2] = {{wl_display_get_fd(S.display), POLLIN, 0}, {S.timer_fd, POLLIN, 0}};
+    int ready = poll(fds, 2, -1);
+    if (ready < 0 && errno != EINTR) {
+      wl_display_cancel_read(S.display);
+      return 1;
+    }
+    if (ready > 0 && (fds[0].revents & POLLIN)) {
+      if (wl_display_read_events(S.display) < 0) return 0;
+    } else {
+      wl_display_cancel_read(S.display);
+    }
+    if (wl_display_dispatch_pending(S.display) < 0) return 1;
+    if (ready <= 0) continue;
+    if (fds[0].revents & (POLLERR | POLLHUP)) return 1;
+
+    double now = now_s();
+    if (fds[1].revents & POLLIN) on_tick(now);
+    set_timer(next_timer_period(now));
+  }
+  return 0;
+}
+
+// Safe from every failure point: unset handles are null or -1.
+static void shutdown_overlay(void) {
+  while (S.outputs) {
+    Output *o = S.outputs;
+    S.outputs = o->next;
+    output_destroy(o);
+  }
+  if (S.ectx != EGL_NO_CONTEXT) eglDestroyContext(S.edpy, S.ectx);
+  if (S.edpy != EGL_NO_DISPLAY) eglTerminate(S.edpy);
+  if (S.registry) wl_registry_destroy(S.registry);
+  if (S.display) wl_display_disconnect(S.display);
+  if (S.timer_fd >= 0) close(S.timer_fd);
+}
+
+int main(int argc, char **argv) {
+  if (!parse_args(argc, argv)) return 2;
+  S.timer_fd = -1;
+  if (!connect_wayland()) {
+    shutdown_overlay();
+    return 1;
+  }
 
   struct sigaction sa = {.sa_handler = on_signal};
   sigaction(SIGTERM, &sa, NULL);
@@ -829,62 +958,11 @@ int main(int argc, char **argv) {
   sigaction(SIGHUP, &sa, NULL);
 
   cursor_pos(&S.lx, &S.ly);
-  {
-    int mhz = 0;
-    for (Output *o = S.outputs; o; o = o->next) if (o->refresh_mhz > mhz) mhz = o->refresh_mhz;
-    S.frame = mhz > 20000 ? 1000.0 / mhz : 1.0 / 60.0;
-    if (S.frame < 0.004) S.frame = 0.004;
-  }
+  choose_frame_period();
   S.timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
-  set_timer(0.04);
+  set_timer(POLL_SLOW_S);
 
-  int exit_code = 0;
-  bool still_moving = false;
-  while (!quit_flag) {
-    while (wl_display_prepare_read(S.display) != 0) wl_display_dispatch_pending(S.display);
-    wl_display_flush(S.display);
-    struct pollfd fds[2] = {{wl_display_get_fd(S.display), POLLIN, 0}, {S.timer_fd, POLLIN, 0}};
-    int r = poll(fds, 2, -1);
-    if (r < 0 && errno != EINTR) {
-      wl_display_cancel_read(S.display);
-      exit_code = 1;
-      break;
-    }
-    if (r > 0 && (fds[0].revents & POLLIN)) {
-      if (wl_display_read_events(S.display) < 0) break;
-    } else {
-      wl_display_cancel_read(S.display);
-    }
-    if (wl_display_dispatch_pending(S.display) < 0) {
-      exit_code = 1;
-      break;
-    }
-    if (r <= 0) continue;
-    if (fds[0].revents & (POLLERR | POLLHUP)) {
-      exit_code = 1;
-      break;
-    }
-    double now = now_s();
-    if (fds[1].revents & POLLIN) {
-      uint64_t ticks;
-      if (read(S.timer_fd, &ticks, sizeof ticks) < 0) ticks = 0;
-      bool animating;
-      if (S.fx == FX_PLASMA) {
-        chain_step(now);
-        animating = chain_ready;
-      } else {
-        sample(now);
-        expire(now);
-        animating = S.n_raw > 0;
-      }
-      bool any = false;
-      for (Output *o = S.outputs; o; o = o->next) any |= o->egl != EGL_NO_SURFACE;
-      if (animating || any) render(now);  // after the last frame: hand the buffers back
-      still_moving = animating;
-    }
-    set_timer(S.fx == FX_PLASMA ? S.frame : still_moving || now - S.last_move < 0.5 ? S.frame : now - S.last_move < 5 ? 0.04 : 0.1);
-  }
-
-  for (Output *o = S.outputs; o; o = o->next) output_hide(o);
+  int exit_code = run();
+  shutdown_overlay();
   return exit_code;
 }

@@ -34,6 +34,12 @@ class Graph;
 class Box;
 class Button;
 
+namespace netpanel {
+  struct QElem;
+  struct QRow;
+  struct QSection;
+} // namespace netpanel
+
 namespace term_frame {
   struct Keyword;
   struct ToggleRow;
@@ -57,7 +63,8 @@ public:
   [[nodiscard]] float quickPanelHeight(float width, float fallback) const override;
   [[nodiscard]] std::string quickPanelHints() const override;
   [[nodiscard]] std::string quickPanelStatus() const override;
-  [[nodiscard]] bool handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
+  [[nodiscard]] bool
+  handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
 
 private:
   void doLayout(Renderer& renderer, float contentWidth, float bodyHeight) override;
@@ -101,16 +108,52 @@ private:
   };
   [[nodiscard]] QuickSnapshot readQuickSnapshot() const;
   [[nodiscard]] QuickModel buildQuickModel(float width, const QuickSnapshot& snap) const;
+  // Row builders of buildQuickModel, one per section; `now` is read once per model.
+  [[nodiscard]] std::string quickPasswordRowId() const;
+  [[nodiscard]] std::string
+  quickDetailOr(const std::string& id, std::string fallback, std::chrono::steady_clock::time_point now) const;
+  [[nodiscard]] std::vector<netpanel::QRow>
+  quickIpRows(const QuickSnapshot& snap, std::chrono::steady_clock::time_point now) const;
+  [[nodiscard]] std::vector<netpanel::QRow> quickConnectionRows(std::chrono::steady_clock::time_point now) const;
+  [[nodiscard]] std::vector<netpanel::QRow>
+  quickWifiRows(std::chrono::steady_clock::time_point now, std::string& emptyText) const;
+  [[nodiscard]] std::vector<netpanel::QRow> quickTailscaleRows(std::chrono::steady_clock::time_point now) const;
+  void placeQuickRows(
+      QuickModel& model, netpanel::QSection& section, const std::vector<netpanel::QRow>& rows, std::size_t cap,
+      float usablePx
+  ) const;
   std::unique_ptr<Flex> createQuick();
+  // Pieces of createQuick, in the order it adds them.
+  std::unique_ptr<Flex> buildQuickHero(float scale);
+  std::unique_ptr<Flex> buildQuickTrafficBox(float scale);
+  std::unique_ptr<Flex> buildQuickGraphAxis(float scale);
+  std::unique_ptr<Box> buildQuickGraphBox(float scale);
   std::unique_ptr<Flex> buildPasswordCard(float scale);
+  // Pieces of buildPasswordCard, in the order it adds them.
+  std::unique_ptr<Flex> buildEnterpriseFields(float scale);
+  std::unique_ptr<Flex> buildEapRow(float scale);
+  std::unique_ptr<Flex> buildPasswordRow(float scale);
   void doLayoutQuick(Renderer& renderer, float contentWidth, float bodyHeight);
   void syncQuick(Renderer& renderer, bool force);
   void rebuildQuickBody(const QuickModel& model, float scale);
+  // Pieces of rebuildQuickBody.
+  [[nodiscard]] std::string quickClearBody();
+  void quickRenderElems(Flex& parent, const netpanel::QSection& section, const std::string& selectedId, float scale);
+  void quickFillBox(
+      Flex* holder, const netpanel::QSection& section, std::size_t& numeral, const std::string& selectedId, float scale
+  );
+  [[nodiscard]] std::unique_ptr<Button> quickRowButton(const netpanel::QRow& row, bool selected, float scale);
+  [[nodiscard]] std::unique_ptr<Flex> quickMenuBlock(const netpanel::QElem& elem, float scale);
+  [[nodiscard]] std::unique_ptr<Flex> quickPasswordRow(float scale);
   void syncQuickTraffic(Renderer& renderer);
   void quickTick();
   void quickRefreshProfiles();
   void quickRefreshTailscale();
   void quickProbeLatency();
+  void quickProbe(const std::string& host, netq::Probe& slot);
+  void quickHeroText(std::string& main, std::string& dim) const;
+  [[nodiscard]] std::string quickLatencyMarkup() const;
+  void quickTrackPasswordOwner();
   void quickSyncAttempts();
   void quickPruneNotes();
   void quickRequestUpdate() const;
@@ -123,6 +166,14 @@ private:
   void quickDisarm();
   // Runs menu item `itemId` of row `rowId`; destructive items ask for a second press first.
   void quickRunItem(const std::string& rowId, const std::string& itemId, bool destructive);
+  [[nodiscard]] bool quickConfirmDestructive(const std::string& rowId, const std::string& itemId);
+  void quickRunIpItem(const std::string& rowId, const std::string& itemId);
+  void quickRunProfileItem(const std::string& rowId, const std::string& itemId);
+  void quickRunTailscaleItem(const std::string& rowId, const std::string& itemId);
+  void quickRunRowCommand(
+      const std::string& rowId, std::vector<std::string> args, std::chrono::seconds timeout,
+      void (NetworkTab::*refresh)()
+  );
   void quickConnectProfile(const netq::Profile& profile);
   void quickDisconnectProfile(const netq::Profile& profile);
   void quickCopyProfileIp(const std::string& rowId, const netq::Profile& profile);
@@ -238,8 +289,8 @@ private:
   std::vector<std::string> m_qSelectables;
   std::vector<MenuKey> m_qMenuKeys; // keys of the open action menu
   bool m_qSelHasMenu = false;
-  std::string m_qMenuId;  // row whose action menu is open
-  std::string m_qArmed;   // "<row>|<item>" waiting for its confirming second press
+  std::string m_qMenuId; // row whose action menu is open
+  std::string m_qArmed;  // "<row>|<item>" waiting for its confirming second press
   std::chrono::steady_clock::time_point m_qArmedUntil;
   std::unordered_map<std::string, Note> m_qNotes;
   mutable std::unordered_map<std::string, std::size_t> m_qWinStart;

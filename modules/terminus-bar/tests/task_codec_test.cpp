@@ -69,5 +69,10 @@ int main() {
       tasks::equivalent(tasks::restoreTask(restored, "original"), series),
       "restore must preserve recurrence exceptions, alarms, completion and provider metadata"
   );
+  ok &= expect(tasks::validDraft({"Title", "", "2026-02-28"}), "valid draft with due date must be accepted");
+  ok &= expect(tasks::validDraft({"Title", "", ""}), "empty due date must be accepted");
+  ok &= expect(!tasks::validDraft({"Title", "", "2026-02-30"}), "impossible calendar day must be refused");
+  ok &= expect(!tasks::validDraft({"Title", "", "2026-2-28"}), "malformed due date must be refused");
+  ok &= expect(!tasks::validDraft({" \t", "", ""}), "blank title must be refused");
   return ok ? 0 : 1;
 }

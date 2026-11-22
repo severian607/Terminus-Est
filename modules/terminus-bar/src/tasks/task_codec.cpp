@@ -1,3 +1,5 @@
+// VTODO <-> TaskItem codec, CalDAV REPORT parsing, and URL/ETag identity rules. Pure: no I/O besides libical/libxml.
+
 #include "tasks/task_codec.h"
 
 #include <algorithm>
@@ -15,6 +17,13 @@
 
 namespace tasks {
   namespace {
+    constexpr std::size_t MaxReportBytes = 32 * 1024 * 1024;
+    constexpr std::size_t MaxTitleBytes = 8192;
+    constexpr std::size_t MaxDescriptionBytes = 1024 * 1024;
+    constexpr std::size_t DueDateLength = 10; // YYYY-MM-DD
+    constexpr const char* DavNs = "DAV:";
+    constexpr const char* CaldavNs = "urn:ietf:params:xml:ns:caldav";
+    constexpr const char* UnsafeUrlChars = "\r\n\t ?#";
     using Calendar = std::unique_ptr<icalcomponent, decltype(&icalcomponent_free)>;
     using Url = std::unique_ptr<CURLU, decltype(&curl_url_cleanup)>;
     std::string part(CURLU* url, CURLUPart kind, unsigned flags = 0) {
@@ -77,39 +86,47 @@ namespace tasks {
       const char* v = kind == ICAL_SUMMARY_PROPERTY ? icalproperty_get_summary(p) : icalproperty_get_description(p);
       return v ? v : "";
     }
+    // A timed DUE shows its local calendar day; floating and all-day values keep their civil date.
+    void localizeTimedDue(icalcomponent* c, icalproperty* due, icaltimetype& date) {
+      if (date.is_date || icaltime_is_null_time(date))
+        return;
+      const icaltimezone* zone = icaltime_get_timezone(date);
+      if (zone == nullptr) {
+        auto* parameter = icalproperty_get_first_parameter(due, ICAL_TZID_PARAMETER);
+        if (parameter == nullptr)
+          return;
+        const char* tzid = icalparameter_get_tzid(parameter);
+        zone = icalcomponent_get_timezone(icalcomponent_get_parent(c), tzid);
+        if (zone == nullptr)
+          zone = icaltimezone_get_builtin_timezone(tzid);
+      }
+      if (zone == nullptr)
+        return;
+      const auto instant = static_cast<std::time_t>(icaltime_as_timet_with_zone(date, zone));
+      std::tm local{};
+      if (localtime_r(&instant, &local) == nullptr)
+        return;
+      date.year = local.tm_year + 1900;
+      date.month = local.tm_mon + 1;
+      date.day = local.tm_mday;
+    }
+    std::string dueDateOf(icalcomponent* c) {
+      auto* due = icalcomponent_get_first_property(c, ICAL_DUE_PROPERTY);
+      if (!due)
+        return {};
+      auto date = icalcomponent_get_due(c);
+      localizeTimedDue(c, due, date);
+      if (icaltime_is_null_time(date))
+        return {};
+      char buffer[32]; // room for a year past 9999 after a time zone shift
+      std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d", date.year, date.month, date.day);
+      return buffer;
+    }
     TaskItem item(icalcomponent* c) {
       TaskItem result;
       result.title = stringValue(c, ICAL_SUMMARY_PROPERTY);
       result.description = stringValue(c, ICAL_DESCRIPTION_PROPERTY);
-      auto* due = icalcomponent_get_first_property(c, ICAL_DUE_PROPERTY);
-      if (due) {
-        auto date = icalcomponent_get_due(c);
-        if (!date.is_date && !icaltime_is_null_time(date)) {
-          const icaltimezone* zone = icaltime_get_timezone(date);
-          if (zone == nullptr) {
-            if (auto* parameter = icalproperty_get_first_parameter(due, ICAL_TZID_PARAMETER)) {
-              const char* tzid = icalparameter_get_tzid(parameter);
-              zone = icalcomponent_get_timezone(icalcomponent_get_parent(c), tzid);
-              if (zone == nullptr)
-                zone = icaltimezone_get_builtin_timezone(tzid);
-            }
-          }
-          if (zone != nullptr) {
-            const auto instant = static_cast<std::time_t>(icaltime_as_timet_with_zone(date, zone));
-            std::tm local{};
-            if (localtime_r(&instant, &local) != nullptr) {
-              date.year = local.tm_year + 1900;
-              date.month = local.tm_mon + 1;
-              date.day = local.tm_mday;
-            }
-          }
-        }
-        if (!icaltime_is_null_time(date)) {
-          char buffer[32];
-          std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d", date.year, date.month, date.day);
-          result.dueDate = buffer;
-        }
-      }
+      result.dueDate = dueDateOf(c);
       auto* status = icalcomponent_get_first_property(c, ICAL_STATUS_PROPERTY);
       result.completed = (status && icalproperty_get_status(status) == ICAL_STATUS_COMPLETED)
           || icalcomponent_get_first_property(c, ICAL_COMPLETED_PROPERTY);
@@ -216,7 +233,7 @@ namespace tasks {
   } // namespace
 
   std::optional<std::string> collectionUrl(std::string_view input) {
-    if (input.empty() || input.find_first_of("\r\n\t ?#") != std::string_view::npos)
+    if (input.empty() || input.find_first_of(UnsafeUrlChars) != std::string_view::npos)
       return std::nullopt;
     Url url(curl_url(), curl_url_cleanup);
     if (!url
@@ -233,7 +250,7 @@ namespace tasks {
     return part(url.get(), CURLUPART_URL);
   }
   std::optional<std::string> resourceUrl(const std::string& collection, std::string_view href) {
-    if (href.empty() || href.find_first_of("\r\n\t ?#") != std::string_view::npos)
+    if (href.empty() || href.find_first_of(UnsafeUrlChars) != std::string_view::npos)
       return std::nullopt;
     Url base(curl_url(), curl_url_cleanup), url(curl_url(), curl_url_cleanup);
     if (!base
@@ -266,7 +283,7 @@ namespace tasks {
         && etag.find_first_of("\r\n") == std::string::npos;
   }
   bool parseReport(const std::string& body, const std::string& collection, Resources& out) {
-    if (body.empty() || body.size() > 32 * 1024 * 1024)
+    if (body.empty() || body.size() > MaxReportBytes)
       return false;
     std::unique_ptr<xmlDoc, decltype(&xmlFreeDoc)> doc(
         xmlReadMemory(
@@ -278,32 +295,30 @@ namespace tasks {
     if (!doc || doc->intSubset || doc->extSubset)
       return false;
     auto* root = xmlDocGetRootElement(doc.get());
-    if (!named(root, "multistatus", "DAV:"))
+    if (!named(root, "multistatus", DavNs))
       return false;
     Resources parsed;
     for (auto* response = root->children; response; response = response->next) {
-      if (!named(response, "response", "DAV:"))
+      if (!named(response, "response", DavNs))
         continue;
-      auto href = resourceUrl(collection, text(child(response, "href", "DAV:")));
+      auto href = resourceUrl(collection, text(child(response, "href", DavNs)));
       if (!href)
         return false;
       Resource resource;
       for (auto* propstat = response->children; propstat; propstat = propstat->next) {
-        if (!named(propstat, "propstat", "DAV:"))
+        if (!named(propstat, "propstat", DavNs))
           continue;
-        if (!successful(text(child(propstat, "status", "DAV:"))))
+        if (!successful(text(child(propstat, "status", DavNs))))
           return false;
-        auto* prop = child(propstat, "prop", "DAV:");
+        auto* prop = child(propstat, "prop", DavNs);
         if (!prop)
           return false;
-        if (auto* etag = child(prop, "getetag", "DAV:"))
+        if (auto* etag = child(prop, "getetag", DavNs))
           resource.etag = text(etag);
-        if (auto* data = child(prop, "calendar-data", "urn:ietf:params:xml:ns:caldav"))
+        if (auto* data = child(prop, "calendar-data", CaldavNs))
           resource.data = text(data);
       }
-      if (!strongEtag(resource.etag)
-          || !parseTask(resource.data)
-          || !parsed.emplace(*href, std::move(resource)).second)
+      if (!strongEtag(resource.etag) || !parseTask(resource.data) || !parsed.emplace(*href, std::move(resource)).second)
         return false;
     }
     out = std::move(parsed);
@@ -316,25 +331,28 @@ namespace tasks {
       return std::nullopt;
     return item(c);
   }
+  // Calendar date YYYY-MM-DD, digits only, a real day.
+  static bool validDueDate(const std::string& date) {
+    if (date.size() != DueDateLength || date[4] != '-' || date[7] != '-')
+      return false;
+    for (std::size_t i = 0; i < DueDateLength; ++i)
+      if (i != 4 && i != 7 && (date[i] < '0' || date[i] > '9'))
+        return false;
+    const int year = std::stoi(date.substr(0, 4));
+    const auto month = static_cast<unsigned>(std::stoi(date.substr(5, 2)));
+    const auto day = static_cast<unsigned>(std::stoi(date.substr(8, 2)));
+    return year > 0
+        && std::chrono::year_month_day(std::chrono::year(year), std::chrono::month(month), std::chrono::day(day)).ok();
+  }
   bool validDraft(const TaskDraft& draft) {
     if (draft.title.empty()
         || draft.title.find_first_not_of(" \t\r\n") == std::string::npos
-        || draft.title.size() > 8192
-        || draft.description.size() > 1024 * 1024
+        || draft.title.size() > MaxTitleBytes
+        || draft.description.size() > MaxDescriptionBytes
         || draft.title.find('\0') != std::string::npos
         || draft.description.find('\0') != std::string::npos)
       return false;
-    if (draft.dueDate.empty())
-      return true;
-    if (draft.dueDate.size() != 10 || draft.dueDate[4] != '-' || draft.dueDate[7] != '-')
-      return false;
-    for (std::size_t i = 0; i < 10; ++i)
-      if (i != 4 && i != 7 && (draft.dueDate[i] < '0' || draft.dueDate[i] > '9'))
-        return false;
-    const int y = std::stoi(draft.dueDate.substr(0, 4));
-    const auto m = static_cast<unsigned>(std::stoi(draft.dueDate.substr(5, 2)));
-    const auto d = static_cast<unsigned>(std::stoi(draft.dueDate.substr(8, 2)));
-    return y > 0 && std::chrono::year_month_day(std::chrono::year(y), std::chrono::month(m), std::chrono::day(d)).ok();
+    return draft.dueDate.empty() || validDueDate(draft.dueDate);
   }
   std::string newTask(const TaskDraft& draft, const std::string& uid) {
     Calendar root(icalcomponent_new_vcalendar(), icalcomponent_free);

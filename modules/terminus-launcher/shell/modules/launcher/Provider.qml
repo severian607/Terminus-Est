@@ -24,9 +24,43 @@ Scope {
     property string missing: ""
     property int total: 0
 
+    // Lane -> the one-shot process running in it (see launch()); plain scratch, not reactive.
+    readonly property var flights: ({})
+
     signal results(int token, var items)
     // What the provider showed for the current query changed (a window opened): the router asks again.
     signal stale()
+
+    Component {
+        id: oneShot
+
+        OneShot {}
+    }
+
+    // Runs `command` for its stdout: done(text) gets it unless the process is cancelled first.
+    function spawn(command, done) {
+        return oneShot.createObject(root, { command: command, done: done, running: true })
+    }
+
+    // Runs `command` as the only process of `lane`: the one running there is silenced and stopped first.
+    function launch(lane, command, done) {
+        root.cancelLane(lane)
+        const proc = root.spawn(command, done)
+        root.flights[lane] = proc
+        proc.exited.connect(() => {
+            if (root.flights[lane] === proc)
+                delete root.flights[lane]
+        })
+    }
+
+    function cancelLane(lane) {
+        const proc = root.flights[lane]
+        if (!proc)
+            return
+        delete root.flights[lane]
+        proc.done = null
+        proc.running = false
+    }
 
     function query(text, token, prefixed) {
         root.results(token, [])

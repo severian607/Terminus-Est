@@ -40,7 +40,8 @@ public:
   [[nodiscard]] float quickPanelHeight(float width, float fallback) const override;
   [[nodiscard]] std::string quickPanelHints() const override;
   [[nodiscard]] std::string quickPanelStatus() const override;
-  [[nodiscard]] bool handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
+  [[nodiscard]] bool
+  handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
 
 private:
   static constexpr std::size_t kMaxOthers = 4;
@@ -50,19 +51,35 @@ private:
     bool player = false;
     bool sink = false;
     std::size_t others = 0;
-    bool operator==(const Shape&) const = default;
+    [[nodiscard]] bool operator==(const Shape&) const = default;
   };
 
   void doLayout(Renderer& renderer, float contentWidth, float bodyHeight) override;
   void doUpdate(Renderer& renderer) override;
 
+  [[nodiscard]] std::unique_ptr<Flex> buildHero(float scale);
+  [[nodiscard]] std::unique_ptr<Flex> buildPlaybackBox(float scale);
+  [[nodiscard]] std::unique_ptr<Flex> buildOutputBox(float scale);
+  [[nodiscard]] std::unique_ptr<Flex> buildPlayersBox(float scale);
+  [[nodiscard]] std::unique_ptr<AudioVisualizer> buildSpectrum();
+
+  [[nodiscard]] std::optional<MprisPlayerInfo> withinGrace(std::optional<MprisPlayerInfo> live) const;
   [[nodiscard]] std::optional<MprisPlayerInfo> effectiveActive() const;
+  [[nodiscard]] std::optional<MprisPlayerInfo> trackActive();
   [[nodiscard]] std::string defaultSinkLabel() const;
-  [[nodiscard]] Shape currentShape() const;
+  [[nodiscard]] Shape currentShape(const std::optional<MprisPlayerInfo>& active) const;
   [[nodiscard]] static float heightFor(const Shape& shape);
   void applyShape(const Shape& shape);
-  void refresh(Renderer& renderer);
+  void refresh(Renderer& renderer, const std::optional<MprisPlayerInfo>& active);
+  void showIdle();
+  void refreshHero(Renderer& renderer, const MprisPlayerInfo& player);
+  void refreshArt(Renderer& renderer, const std::string& artUrl);
+  void refreshProgress(const MprisPlayerInfo& player);
+  void refreshTransport(const MprisPlayerInfo& player);
+  void refreshOutput(const MprisPlayerInfo& player, const Shape& shape);
+  void refreshOthers(const MprisPlayerInfo& player);
   void syncSpectrum(bool wanted);
+  std::int64_t setPendingSeek(double valueSeconds);
   void beginSeek(double valueSeconds);
   void commitSeek(double valueSeconds);
 
@@ -75,6 +92,7 @@ private:
   void cycleShuffle();
   void cycleRepeat();
   void cyclePlayer();
+  void pinPlayer(const std::string& busName);
 
   std::shared_ptr<void> m_aliveGuard = std::make_shared<int>(0);
 

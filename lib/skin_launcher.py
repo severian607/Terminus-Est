@@ -7,10 +7,12 @@ atomic replace can bypass, so a running launcher is told to re-read it.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 import tokens
+
+RELOAD_TIMEOUT_SECONDS = 5
 
 
 def _path(root: Path) -> Path:
@@ -43,7 +45,7 @@ def apply(settings: dict, root: Path, changed: set[Path]) -> list[str]:
         return ["Terminus-Launcher is not running; it reads the new theme when it starts."]
     command = [str(Path(__file__).resolve().parent.parent / "bin" / "terminus-launcher"), "theme-reload"]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=RELOAD_TIMEOUT_SECONDS)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise RuntimeError(f"{' '.join(command)} failed: {error}") from error
     output = f"{result.stdout}\n{result.stderr}".strip()

@@ -9,11 +9,10 @@
 #include "ui/controls/label.h"
 #include "ui/style.h"
 
-#include <xkbcommon/xkbcommon-keysyms.h>
-
 #include <algorithm>
 #include <cmath>
 #include <utility>
+#include <xkbcommon/xkbcommon-keysyms.h>
 
 namespace {
 
@@ -23,8 +22,11 @@ namespace {
   constexpr float kCaptionLine = 18.0F;
   // Everything around the tab body, in logical px: the panel decoration's padding, the frame's padding and
   // border, the title row, the footer, and the two gaps between the frame's three children.
-  constexpr float kChromeHeight = 2.0F * Style::panelPadding + 2.0F * (Style::spaceSm + Style::borderWidth)
-                                  + 2.0F * kCaptionLine + 2.0F * Style::spaceXs + kBodyClipInset;
+  constexpr float kChromeHeight = 2.0F * Style::panelPadding
+      + 2.0F * (Style::spaceSm + Style::borderWidth)
+      + 2.0F * kCaptionLine
+      + 2.0F * Style::spaceXs
+      + kBodyClipInset;
   constexpr float kChromeWidth = 2.0F * Style::panelPadding + 2.0F * (Style::spaceSm + Style::borderWidth);
 
 } // namespace
@@ -32,8 +34,8 @@ namespace {
 QuickPanel::QuickPanel(
     std::string panelId, std::string title, std::unique_ptr<Tab> tab, float width, float height, std::string fullContext
 )
-    : m_panelId(std::move(panelId)), m_title(std::move(title)), m_tab(std::move(tab)), m_width(width),
-      m_height(height), m_fullContext(std::move(fullContext)) {
+    : m_panelId(std::move(panelId)), m_title(std::move(title)), m_tab(std::move(tab)), m_width(width), m_height(height),
+      m_fullContext(std::move(fullContext)) {
   m_tab->setQuickPanelResizeRequest([this]() { onTabResizeRequest(); });
 }
 
@@ -154,10 +156,7 @@ void QuickPanel::doUpdate(Renderer& renderer) {
 
 void QuickPanel::onFrameTick(float deltaMs) { m_tab->onFrameTick(deltaMs); }
 
-void QuickPanel::onOpen(std::string_view context) {
-  (void)context;
-  m_tab->setActive(true);
-}
+void QuickPanel::onOpen(std::string_view /*context*/) { m_tab->setActive(true); }
 
 void QuickPanel::onClose() {
   m_tab->setActive(false);

@@ -40,9 +40,17 @@ namespace {
   // Full-height cards need room for rounded-rect AA before the tab viewport clips them.
   constexpr float kTabViewportClipInset = 1.0F;
 
+  // The Home dashboard opens wider and taller than the other tabs.
+  constexpr float kHomeWidthFactor = 1.55F;
+  constexpr float kHomeHeight = 600.0F;
+  constexpr float kTabHeight = 520.0F;
+
   float tabContentHeight(float viewportHeight) {
     return std::max(1.0F, std::floor(viewportHeight - kTabViewportClipInset));
   }
+
+  // The Home header reads like a terminal border: `┌─[ root :: Home ]`.
+  std::string homeTitle(const std::string& title) { return "┌─[ root :: " + title + " ]"; }
 
 } // namespace
 
@@ -82,7 +90,7 @@ float ControlCenterPanel::preferredWidth() const {
   const float fullSize = m_config != nullptr ? static_cast<float>(m_config->config().controlCenter.width)
                                              : static_cast<float>(ControlCenterConfig::kDefaultWidth);
   if (tabFromContext(pendingOpenContext()) == TabId::Home) {
-    return fullSize * 1.55F * m_contentScale;
+    return fullSize * kHomeWidthFactor * m_contentScale;
   }
   switch (sidebarModeForOpen(pendingOpenContext())) {
   case ControlCenterSidebarMode::Full:
@@ -96,7 +104,7 @@ float ControlCenterPanel::preferredWidth() const {
 }
 
 float ControlCenterPanel::preferredHeight() const {
-  return scaled(tabFromContext(pendingOpenContext()) == TabId::Home ? 600.0F : 520.0F);
+  return scaled(tabFromContext(pendingOpenContext()) == TabId::Home ? kHomeHeight : kTabHeight);
 }
 
 PanelPlacement ControlCenterPanel::panelPlacement() const noexcept {
@@ -273,7 +281,7 @@ void ControlCenterPanel::create() {
   header->addChild(
       ui::label({
           .out = &m_contentTitle,
-          .text = std::string{"┌─[ root :: "} + i18n::tr("control-center.tabs.home") + " ]",
+          .text = homeTitle(i18n::tr("control-center.tabs.home")),
           .fontSize = Style::fontSizeTitle * scale,
           .fontWeight = FontWeight::Bold,
           .color = colorSpecFromRole(ColorRole::Primary),
@@ -657,7 +665,7 @@ void ControlCenterPanel::updateTabChrome(TabId tab) {
     }
     if (meta.id == tab && m_contentTitle != nullptr) {
       const std::string title = i18n::tr(meta.titleKey);
-      m_contentTitle->setText(meta.id == TabId::Home ? std::string{"┌─[ root :: "} + title + " ]" : title);
+      m_contentTitle->setText(meta.id == TabId::Home ? homeTitle(title) : title);
       m_contentTitle->setColor(colorSpecFromRole(meta.id == TabId::Calendar ? ColorRole::OnSurface : ColorRole::Primary));
     }
     if (m_tabHeaderActions[idx] != nullptr) {

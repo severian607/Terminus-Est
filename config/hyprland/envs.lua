@@ -1,3 +1,5 @@
+-- # Environment: PATH, Gum theme variables and the Wayland session variables.
+
 local home = assert(os.getenv("HOME"), "HOME is required")
 local desktop_path = home .. "/Projects/Terminus-Est/modules/desktop"
 

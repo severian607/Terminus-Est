@@ -1,3 +1,6 @@
+// Control-center Tasks tab: browse, edit and trash CalDAV tasks held by TaskService.
+// synchronize() runs when the tab or the service snapshot changed; it diffs the row widgets against the snapshot.
+
 #include "shell/control_center/tabs/tasks_tab.h"
 
 #include "render/scene/input_dispatcher.h"
@@ -15,6 +18,20 @@
 #include <utility>
 
 namespace {
+
+  constexpr std::size_t NotesPreviewMaxCodePoints = 180;
+  constexpr int PreviewMaxLines = 2;
+  constexpr int TitleMaxLines = 2;
+  constexpr int UpcomingDays = 7; // matches the "Upcoming (next 7 days)" filter label
+  constexpr float NotesInputHeightPx = 88.0F;
+  constexpr float ViewPickerMinWidthPx = 132.0F;
+  constexpr float SortPickerMinWidthPx = 146.0F;
+  constexpr float NarrowContentWidthPx = 430.0F;
+
+  // Option order is the enum order of TasksTab::View / DateFilter; selection indices are cast directly.
+  const std::vector<std::string> ViewOptions{"Active", "Completed", "Trash", "History"};
+  const std::vector<std::string> DateOptions{"All dates", "Today", "Overdue", "Upcoming (next 7 days)", "No date"};
+  const std::vector<std::string> SortOptions{"Sort: Due", "Sort: Title"};
 
   ColorSpec taskAccent(float opacity = 1.0F) {
     return fixedColorSpec(rgba(248.0F / 255.0F, 205.0F / 255.0F, 1.0F / 255.0F, opacity));
@@ -62,6 +79,31 @@ namespace {
     });
   }
 
+  ui::ButtonProps compactButton(
+      std::string text, ButtonVariant variant, float scale, std::function<void()> onClick, Button** out = nullptr
+  ) {
+    return {
+        .out = out,
+        .text = std::move(text),
+        .fontSize = Style::fontSizeMini * scale,
+        .controlHeight = Style::controlHeightSm * scale,
+        .variant = variant,
+        .onClick = std::move(onClick),
+    };
+  }
+
+  // A column that starts hidden; the confirmation and password panels are shown on demand.
+  std::unique_ptr<Flex> hiddenColumn(Flex** out, float scale) {
+    return ui::column({
+        .out = out,
+        .align = FlexAlign::Stretch,
+        .gap = Style::spaceXs * scale,
+        .visible = false,
+        .participatesInLayout = false,
+    });
+  }
+
+  // YYYY-MM-DD of the local day `days` from `time`.
   std::string localDate(std::time_t time, int days = 0) {
     std::tm local{};
     localtime_r(&time, &local);
@@ -84,12 +126,13 @@ namespace {
     return formatted;
   }
 
+  // `query` is already lower-case.
   bool matchesSearch(const std::string& value, const std::string& query) {
     return query.empty() || StringUtils::toLower(value).find(query) != std::string::npos;
   }
 
   std::string notesPreview(const std::string& value) {
-    auto preview = StringUtils::truncateUtf8CodePoints(value, 180);
+    auto preview = StringUtils::truncateUtf8CodePoints(value, NotesPreviewMaxCodePoints);
     if (preview.size() < value.size())
       preview += "…";
     std::replace(preview.begin(), preview.end(), '\n', ' ');
@@ -97,9 +140,83 @@ namespace {
     return preview;
   }
 
+  bool isOverdue(const TaskItem& item, const std::string& today) {
+    return !item.completed && !item.dueDate.empty() && item.dueDate < today;
+  }
+
+  std::string taskDetail(const TaskItem& item, const std::string& today) {
+    std::string detail = item.dueDate.empty() ? "No due date"
+        : isOverdue(item, today)              ? "Overdue · " + item.dueDate
+        : item.dueDate == today               ? "Due today · " + item.dueDate
+                                              : "Due " + item.dueDate;
+    if (item.pending)
+      detail += " · Pending";
+    if (item.conflict)
+      detail += " · Conflict";
+    return detail;
+  }
+
+  std::string trashDetail(const TrashedTask& archived) {
+    const auto& item = archived.task;
+    std::string detail = "Deleted "
+        + localTimestamp(archived.deletedAt)
+        + " · "
+        + archived.source
+        + (item.completed ? " · Completed" : " · Active")
+        + (item.dueDate.empty() ? " · No due date" : " · Due " + item.dueDate);
+    if (archived.conflict)
+      detail += "\nDeletion conflict: resolve the original task before restoring or removing this copy.";
+    else if (archived.pending && !archived.restorable)
+      detail += "\nDeletion pending or uncertain: sync to resolve before restoring or removing this copy.";
+    else if (archived.pending)
+      detail += "\nUnsent deletion: Undo delete keeps the original task.";
+    else if (!archived.restorable)
+      detail += "\nRestore unavailable: unlock the local store and connect to a writable collection.";
+    return detail;
+  }
+
+  // Trash rows matching the search, newest deletion first.
+  std::vector<std::size_t> visibleTrash(const TaskSnapshot& snapshot, const std::string& query) {
+    std::vector<std::size_t> visible;
+    visible.reserve(snapshot.trash.size());
+    for (std::size_t index = 0; index < snapshot.trash.size(); ++index) {
+      const auto& item = snapshot.trash[index];
+      if (matchesSearch(item.task.title, query) || matchesSearch(item.task.description, query))
+        visible.push_back(index);
+    }
+    std::ranges::sort(visible, [&](std::size_t left, std::size_t right) {
+      const auto& a = snapshot.trash[left];
+      const auto& b = snapshot.trash[right];
+      return a.deletedAt != b.deletedAt ? a.deletedAt > b.deletedAt : a.id < b.id;
+    });
+    return visible;
+  }
+
+  // History rows matching the search, newest first.
+  std::vector<std::size_t> visibleHistory(const TaskSnapshot& snapshot, const std::string& query) {
+    std::vector<std::size_t> visible;
+    visible.reserve(snapshot.history.size());
+    for (std::size_t index = 0; index < snapshot.history.size(); ++index) {
+      const auto& entry = snapshot.history[index];
+      if (matchesSearch(entry.title, query)
+          || matchesSearch(entry.details, query)
+          || matchesSearch(entry.action, query)
+          || matchesSearch(entry.source, query))
+        visible.push_back(index);
+    }
+    std::ranges::sort(visible, [&](std::size_t left, std::size_t right) {
+      const auto& a = snapshot.history[left];
+      const auto& b = snapshot.history[right];
+      return a.occurredAt != b.occurredAt ? a.occurredAt > b.occurredAt : a.id < b.id;
+    });
+    return visible;
+  }
+
 } // namespace
 
 TasksTab::TasksTab(TaskService* tasks) : m_tasks(tasks) {}
+
+// ---- Widget tree --------------------------------------------------------------------------------------------------
 
 std::unique_ptr<Flex> TasksTab::create() {
   const float scale = contentScale();
@@ -112,16 +229,27 @@ std::unique_ptr<Flex> TasksTab::create() {
         card.setClipChildren(true);
       },
   });
+  root->addChild(buildHeader(scale));
+  root->addChild(taskLabel("", scale, &m_status));
+  root->addChild(buildBrowseToolbar(scale));
+  root->addChild(buildFilterToolbar(scale));
+  root->addChild(taskLabel("", scale, &m_counts));
+  root->addChild(buildBody(scale));
+  styleTaskButtons(*root);
+  m_viewPicker->setOptionIndicators(std::vector<ColorSpec>(ViewOptions.size(), taskAccent()));
+  m_viewPicker->setMinWidth(ViewPickerMinWidthPx * scale);
+  m_dateFilter->setOptionIndicators(std::vector<ColorSpec>(DateOptions.size(), taskAccent()));
+  m_sort->setOptionIndicators(std::vector<ColorSpec>(SortOptions.size(), taskAccent()));
+  m_sort->setMinWidth(SortPickerMinWidthPx * scale);
+  m_dirty = true;
+  scheduleDayRefresh();
+  return root;
+}
+
+std::unique_ptr<Flex> TasksTab::buildHeader(float scale) {
   auto header = control_center::makeCardHeaderRow("Tasks", scale, taskAccent());
   header->addChild(
-      ui::button({
-          .out = &m_new,
-          .text = "New",
-          .fontSize = Style::fontSizeMini * scale,
-          .controlHeight = Style::controlHeightSm * scale,
-          .variant = ButtonVariant::Primary,
-          .onClick = [this]() { openEditor(""); },
-      })
+      ui::button(compactButton("New", ButtonVariant::Primary, scale, [this]() { openEditor(""); }, &m_new))
   );
   header->addChild(
       ui::button({
@@ -140,97 +268,97 @@ std::unique_ptr<Flex> TasksTab::create() {
           },
       })
   );
-  root->addChild(std::move(header));
-  root->addChild(taskLabel("", scale, &m_status));
-  root->addChild(
-      ui::row(
-          {.out = &m_browseToolbar, .align = FlexAlign::Stretch, .gap = Style::spaceXs * scale},
-          ui::select({
-              .out = &m_viewPicker,
-              .options = std::vector<std::string>{"Active", "Completed", "Trash", "History"},
-              .selectedIndex = static_cast<std::size_t>(m_view),
-              .fontSize = Style::fontSizeMini * scale,
-              .controlHeight = Style::controlHeightSm * scale,
-              .surfaceOpacity = panelCardOpacity(),
-              .onSelectionChanged =
-                  [this](std::size_t index, std::string_view) {
-                    m_view = static_cast<View>(index);
-                    m_localAction = LocalConfirmation::None;
-                    m_resetScroll = true;
-                    requestUpdate();
-                  },
-          }),
-          ui::input({
-              .out = &m_search,
-              .value = m_query,
-              .placeholder = "Search title, notes, history…",
-              .fontSize = Style::fontSizeMini * scale,
-              .controlHeight = Style::controlHeightSm * scale,
-              .clearButtonEnabled = true,
-              .minLayoutWidth = 0.0F,
-              .surfaceOpacity = panelCardOpacity(),
-              .flexGrow = 1.0F,
-              .onChange = [this](const std::string& value) {
-                m_query = value;
+  return header;
+}
+
+std::unique_ptr<Flex> TasksTab::buildBrowseToolbar(float scale) {
+  return ui::row(
+      {.out = &m_browseToolbar, .align = FlexAlign::Stretch, .gap = Style::spaceXs * scale},
+      ui::select({
+          .out = &m_viewPicker,
+          .options = ViewOptions,
+          .selectedIndex = static_cast<std::size_t>(m_view),
+          .fontSize = Style::fontSizeMini * scale,
+          .controlHeight = Style::controlHeightSm * scale,
+          .surfaceOpacity = panelCardOpacity(),
+          .onSelectionChanged =
+              [this](std::size_t index, std::string_view) {
+                m_view = static_cast<View>(index);
+                m_localAction = LocalConfirmation::None;
                 m_resetScroll = true;
                 requestUpdate();
               },
-          })
-      )
+      }),
+      ui::input({
+          .out = &m_search,
+          .value = m_query,
+          .placeholder = "Search title, notes, history…",
+          .fontSize = Style::fontSizeMini * scale,
+          .controlHeight = Style::controlHeightSm * scale,
+          .clearButtonEnabled = true,
+          .minLayoutWidth = 0.0F,
+          .surfaceOpacity = panelCardOpacity(),
+          .flexGrow = 1.0F,
+          .onChange = [this](const std::string& value) {
+            m_query = value;
+            m_resetScroll = true;
+            requestUpdate();
+          },
+      })
   );
-  root->addChild(
-      ui::row(
-          {.out = &m_filterToolbar, .align = FlexAlign::Stretch, .gap = Style::spaceXs * scale},
-          ui::select({
-              .out = &m_dateFilter,
-              .options = std::vector<std::string>{"All dates", "Today", "Overdue", "Upcoming (next 7 days)", "No date"},
-              .selectedIndex = static_cast<std::size_t>(m_date),
-              .fontSize = Style::fontSizeMini * scale,
-              .controlHeight = Style::controlHeightSm * scale,
-              .surfaceOpacity = panelCardOpacity(),
-              .flexGrow = 1.0F,
-              .onSelectionChanged =
-                  [this](std::size_t index, std::string_view) {
-                    m_date = static_cast<DateFilter>(index);
-                    m_resetScroll = true;
-                    requestUpdate();
-                  },
-          }),
-          ui::select({
-              .out = &m_sort,
-              .options = std::vector<std::string>{"Sort: Due", "Sort: Title"},
-              .selectedIndex = m_sortByTitle ? 1U : 0U,
-              .fontSize = Style::fontSizeMini * scale,
-              .controlHeight = Style::controlHeightSm * scale,
-              .surfaceOpacity = panelCardOpacity(),
-              .onSelectionChanged =
-                  [this](std::size_t index, std::string_view) {
-                    m_sortByTitle = index == 1;
-                    m_resetScroll = true;
-                    requestUpdate();
-                  },
-          }),
-          ui::button({
-              .out = &m_clearHistory,
-              .text = "Clear local history…",
-              .fontSize = Style::fontSizeMini * scale,
-              .controlHeight = Style::controlHeightSm * scale,
-              .variant = ButtonVariant::Outline,
-              .onClick = [this]() {
-                if (m_tasks == nullptr)
-                  return;
-                const auto& history = m_tasks->snapshot().history;
-                m_confirmHistoryCount = history.size();
-                m_confirmHistoryNewest = history.empty() ? "" : history.front().id;
-                m_localAction = LocalConfirmation::ClearHistory;
-                m_focusLocalPending = true;
+}
+
+std::unique_ptr<Flex> TasksTab::buildFilterToolbar(float scale) {
+  return ui::row(
+      {.out = &m_filterToolbar, .align = FlexAlign::Stretch, .gap = Style::spaceXs * scale},
+      ui::select({
+          .out = &m_dateFilter,
+          .options = DateOptions,
+          .selectedIndex = static_cast<std::size_t>(m_date),
+          .fontSize = Style::fontSizeMini * scale,
+          .controlHeight = Style::controlHeightSm * scale,
+          .surfaceOpacity = panelCardOpacity(),
+          .flexGrow = 1.0F,
+          .onSelectionChanged =
+              [this](std::size_t index, std::string_view) {
+                m_date = static_cast<DateFilter>(index);
+                m_resetScroll = true;
                 requestUpdate();
               },
-          })
-      )
+      }),
+      ui::select({
+          .out = &m_sort,
+          .options = SortOptions,
+          .selectedIndex = m_sortByTitle ? 1U : 0U,
+          .fontSize = Style::fontSizeMini * scale,
+          .controlHeight = Style::controlHeightSm * scale,
+          .surfaceOpacity = panelCardOpacity(),
+          .onSelectionChanged =
+              [this](std::size_t index, std::string_view) {
+                m_sortByTitle = index == 1;
+                m_resetScroll = true;
+                requestUpdate();
+              },
+      }),
+      ui::button(compactButton(
+          "Clear local history…", ButtonVariant::Outline, scale,
+          [this]() {
+            if (m_tasks == nullptr)
+              return;
+            const auto& history = m_tasks->snapshot().history;
+            m_confirmHistoryCount = history.size();
+            m_confirmHistoryNewest = history.empty() ? "" : history.front().id;
+            m_localAction = LocalConfirmation::ClearHistory;
+            m_focusLocalPending = true;
+            requestUpdate();
+          },
+          &m_clearHistory
+      ))
   );
-  root->addChild(taskLabel("", scale, &m_counts));
+}
 
+// Scrolling body: password prompt, editor, local-record confirmation, scope note, empty note, then the row list.
+std::unique_ptr<ScrollView> TasksTab::buildBody(float scale) {
   auto scroll = ui::scrollView({
       .out = &m_scroll,
       .scrollbarVisible = true,
@@ -244,15 +372,26 @@ std::unique_ptr<Flex> TasksTab::create() {
         view.content()->setGap(Style::spaceMd * scale);
       },
   });
-  auto passwordCard = ui::column({
-      .out = &m_passwordCard,
-      .align = FlexAlign::Stretch,
-      .gap = Style::spaceXs * scale,
-      .visible = false,
-      .participatesInLayout = false,
-  });
-  passwordCard->addChild(taskLabel("Collection password", scale));
-  passwordCard->addChild(
+  auto* content = scroll->content();
+  content->addChild(buildPasswordCard(scale));
+  content->addChild(buildEditor(scale));
+  content->addChild(buildLocalConfirmation(scale));
+  content->addChild(taskLabel("", scale, &m_localScope));
+  content->addChild(taskLabel("", scale, &m_empty));
+  content->addChild(
+      ui::column({
+          .out = &m_list,
+          .align = FlexAlign::Stretch,
+          .gap = Style::spaceSm * scale,
+      })
+  );
+  return scroll;
+}
+
+std::unique_ptr<Flex> TasksTab::buildPasswordCard(float scale) {
+  auto card = hiddenColumn(&m_passwordCard, scale);
+  card->addChild(taskLabel("Collection password", scale));
+  card->addChild(
       ui::input({
           .out = &m_password,
           .placeholder = "Password",
@@ -263,17 +402,13 @@ std::unique_ptr<Flex> TasksTab::create() {
           .onSubmit = [this](const std::string&) { submitPassword(); },
       })
   );
-  passwordCard->addChild(
-      ui::button({
-          .text = "Save password",
-          .fontSize = Style::fontSizeMini * scale,
-          .controlHeight = Style::controlHeightSm * scale,
-          .variant = ButtonVariant::Secondary,
-          .onClick = [this]() { submitPassword(); },
-      })
-  );
-  scroll->content()->addChild(std::move(passwordCard));
+  card->addChild(ui::button(compactButton("Save password", ButtonVariant::Secondary, scale, [this]() {
+    submitPassword();
+  })));
+  return card;
+}
 
+std::unique_ptr<Flex> TasksTab::buildEditor(float scale) {
   auto editor = ui::column({
       .out = &m_editor,
       .align = FlexAlign::Stretch,
@@ -307,7 +442,7 @@ std::unique_ptr<Flex> TasksTab::create() {
           .placeholder = "Notes (optional)",
           .fontSize = Style::fontSizeBody * scale,
           .surfaceOpacity = panelCardOpacity(),
-          .height = 88.0F * scale,
+          .height = NotesInputHeightPx * scale,
           .onChange =
               [this](const std::string& value) {
                 m_draft.description = value;
@@ -346,30 +481,21 @@ std::unique_ptr<Flex> TasksTab::create() {
               .flexGrow = 1.0F,
               .onClick = [this]() { saveEditor(); },
           }),
-          ui::button({
-              .text = "Cancel",
-              .fontSize = Style::fontSizeMini * scale,
-              .controlHeight = Style::controlHeightSm * scale,
-              .variant = ButtonVariant::Ghost,
-              .onClick = [this]() { cancelEditor(); },
-          })
+          ui::button(compactButton("Cancel", ButtonVariant::Ghost, scale, [this]() { cancelEditor(); }))
       )
   );
   editor->addChild(
-      ui::button({
-          .out = &m_delete,
-          .text = "Delete task…",
-          .fontSize = Style::fontSizeMini * scale,
-          .controlHeight = Style::controlHeightSm * scale,
-          .variant = ButtonVariant::Outline,
-          .onClick = [this]() {
+      ui::button(compactButton(
+          "Delete task…", ButtonVariant::Outline, scale,
+          [this]() {
             if (const auto* item = selectedItem(); item != nullptr) {
               m_confirmingDelete = true;
               m_confirmingConflict = item->conflict;
               requestUpdate();
             }
           },
-      })
+          &m_delete
+      ))
   );
   editor->addChild(
       ui::button({
@@ -382,22 +508,17 @@ std::unique_ptr<Flex> TasksTab::create() {
           .onClick = [this]() { copyToNewTask(); },
       })
   );
-  auto confirmation = ui::column({
-      .out = &m_confirmation,
-      .align = FlexAlign::Stretch,
-      .gap = Style::spaceXs * scale,
-      .visible = false,
-      .participatesInLayout = false,
-  });
+  editor->addChild(buildDeleteConfirmation(scale));
+  return editor;
+}
+
+std::unique_ptr<Flex> TasksTab::buildDeleteConfirmation(float scale) {
+  auto confirmation = hiddenColumn(&m_confirmation, scale);
   confirmation->addChild(taskLabel("", scale, &m_confirmationTitle));
   confirmation->addChild(
-      ui::button({
-          .out = &m_confirmDelete,
-          .text = "Confirm delete",
-          .fontSize = Style::fontSizeMini * scale,
-          .controlHeight = Style::controlHeightSm * scale,
-          .variant = ButtonVariant::Destructive,
-          .onClick = [this]() {
+      ui::button(compactButton(
+          "Confirm delete", ButtonVariant::Destructive, scale,
+          [this]() {
             const auto* item = selectedItem();
             if (m_tasks == nullptr || !m_confirmingDelete || item == nullptr) {
               return;
@@ -411,73 +532,32 @@ std::unique_ptr<Flex> TasksTab::create() {
             }
             requestUpdate();
           },
-      })
+          &m_confirmDelete
+      ))
   );
-  confirmation->addChild(
-      ui::button({
-          .text = "Keep task",
-          .fontSize = Style::fontSizeMini * scale,
-          .controlHeight = Style::controlHeightSm * scale,
-          .variant = ButtonVariant::Ghost,
-          .onClick = [this]() {
-            m_confirmingDelete = false;
-            requestUpdate();
-          },
-      })
-  );
-  editor->addChild(std::move(confirmation));
-  scroll->content()->addChild(std::move(editor));
-  auto localConfirmation = ui::column({
-      .out = &m_localConfirmation,
-      .align = FlexAlign::Stretch,
-      .gap = Style::spaceXs * scale,
-      .visible = false,
-      .participatesInLayout = false,
-  });
-  localConfirmation->addChild(taskLabel("", scale, &m_localConfirmationTitle));
-  localConfirmation->addChild(
-      ui::button({
-          .out = &m_confirmLocal,
-          .text = "Remove local copy",
-          .fontSize = Style::fontSizeMini * scale,
-          .controlHeight = Style::controlHeightSm * scale,
-          .variant = ButtonVariant::Destructive,
-          .onClick = [this]() { confirmLocalAction(); },
-      })
-  );
-  localConfirmation->addChild(
-      ui::button({
-          .text = "Cancel",
-          .fontSize = Style::fontSizeMini * scale,
-          .controlHeight = Style::controlHeightSm * scale,
-          .variant = ButtonVariant::Ghost,
-          .onClick = [this]() {
-            m_localAction = LocalConfirmation::None;
-            requestUpdate();
-          },
-      })
-  );
-  scroll->content()->addChild(std::move(localConfirmation));
-  scroll->content()->addChild(taskLabel("", scale, &m_localScope));
-  scroll->content()->addChild(taskLabel("", scale, &m_empty));
-  scroll->content()->addChild(
-      ui::column({
-          .out = &m_list,
-          .align = FlexAlign::Stretch,
-          .gap = Style::spaceSm * scale,
-      })
-  );
-  root->addChild(std::move(scroll));
-  styleTaskButtons(*root);
-  m_viewPicker->setOptionIndicators(std::vector<ColorSpec>(4, taskAccent()));
-  m_viewPicker->setMinWidth(132.0F * scale);
-  m_dateFilter->setOptionIndicators(std::vector<ColorSpec>(5, taskAccent()));
-  m_sort->setOptionIndicators(std::vector<ColorSpec>(2, taskAccent()));
-  m_sort->setMinWidth(146.0F * scale);
-  m_dirty = true;
-  scheduleDayRefresh();
-  return root;
+  confirmation->addChild(ui::button(compactButton("Keep task", ButtonVariant::Ghost, scale, [this]() {
+    m_confirmingDelete = false;
+    requestUpdate();
+  })));
+  return confirmation;
 }
+
+std::unique_ptr<Flex> TasksTab::buildLocalConfirmation(float scale) {
+  auto confirmation = hiddenColumn(&m_localConfirmation, scale);
+  confirmation->addChild(taskLabel("", scale, &m_localConfirmationTitle));
+  confirmation->addChild(
+      ui::button(compactButton(
+          "Remove local copy", ButtonVariant::Destructive, scale, [this]() { confirmLocalAction(); }, &m_confirmLocal
+      ))
+  );
+  confirmation->addChild(ui::button(compactButton("Cancel", ButtonVariant::Ghost, scale, [this]() {
+    m_localAction = LocalConfirmation::None;
+    requestUpdate();
+  })));
+  return confirmation;
+}
+
+// ---- Actions ------------------------------------------------------------------------------------------------------
 
 void TasksTab::requestUpdate() {
   m_dirty = true;
@@ -572,6 +652,7 @@ void TasksTab::confirmLocalAction() {
   requestUpdate();
 }
 
+// Day filters (Today, Overdue, Upcoming) go stale at midnight.
 void TasksTab::scheduleDayRefresh() {
   const auto now = std::time(nullptr);
   std::tm midnight{};
@@ -612,91 +693,92 @@ void TasksTab::submitPassword() {
   requestUpdate();
 }
 
-// The indices of the rows the current view, search and filters show, in display order; `total` is how many the view
-// holds before the search and date filters.
-std::vector<std::size_t> TasksTab::visibleRows(const TaskSnapshot& snapshot, std::size_t& total) const {
-  const bool tasksView = m_view == View::Active || m_view == View::Completed;
-  const auto query = StringUtils::toLower(m_query);
-  std::vector<std::size_t> visible;
-  total = 0;
-  if (tasksView) {
-    visible.reserve(snapshot.items.size());
-    for (std::size_t index = 0; index < snapshot.items.size(); ++index) {
-      const auto& item = snapshot.items[index];
-      if (item.completed != (m_view == View::Completed))
-        continue;
-      ++total;
-      if (!matchesSearch(item.title, query) && !matchesSearch(item.description, query))
-        continue;
-      if (m_view == View::Active) {
-        const auto& due = item.dueDate;
-        if ((m_date == DateFilter::Today && due != m_today)
-            || (m_date == DateFilter::Overdue && (due.empty() || due >= m_today))
-            || (m_date == DateFilter::Upcoming && (due.empty() || due <= m_today || due > m_upcomingEnd))
-            || (m_date == DateFilter::None && !due.empty()))
-          continue;
-      }
-      visible.push_back(index);
-    }
-    std::ranges::sort(visible, [&](std::size_t left, std::size_t right) {
-      const auto& a = snapshot.items[left];
-      const auto& b = snapshot.items[right];
-      if (m_sortByTitle) {
-        if (a.title != b.title)
-          return a.title < b.title;
-      } else {
-        if (a.dueDate.empty() != b.dueDate.empty())
-          return !a.dueDate.empty();
-        if (a.dueDate != b.dueDate)
-          return a.dueDate < b.dueDate;
-      }
-      return a.id < b.id;
-    });
-  } else if (m_view == View::Trash) {
-    total = snapshot.trash.size();
-    visible.reserve(total);
-    for (std::size_t index = 0; index < total; ++index) {
-      const auto& item = snapshot.trash[index];
-      if (matchesSearch(item.task.title, query) || matchesSearch(item.task.description, query))
-        visible.push_back(index);
-    }
-    std::ranges::sort(visible, [&](std::size_t left, std::size_t right) {
-      const auto& a = snapshot.trash[left];
-      const auto& b = snapshot.trash[right];
-      return a.deletedAt != b.deletedAt ? a.deletedAt > b.deletedAt : a.id < b.id;
-    });
-  } else {
-    total = snapshot.history.size();
-    visible.reserve(total);
-    for (std::size_t index = 0; index < total; ++index) {
-      const auto& entry = snapshot.history[index];
-      if (matchesSearch(entry.title, query)
-          || matchesSearch(entry.details, query)
-          || matchesSearch(entry.action, query)
-          || matchesSearch(entry.source, query))
-        visible.push_back(index);
-    }
-    std::ranges::sort(visible, [&](std::size_t left, std::size_t right) {
-      const auto& a = snapshot.history[left];
-      const auto& b = snapshot.history[right];
-      return a.occurredAt != b.occurredAt ? a.occurredAt > b.occurredAt : a.id < b.id;
-    });
+// ---- Row selection ------------------------------------------------------------------------------------------------
+
+bool TasksTab::showsTasks() const { return m_view == View::Active || m_view == View::Completed; }
+
+bool TasksTab::passesDateFilter(const std::string& due) const {
+  switch (m_date) {
+  case DateFilter::Today:
+    return due == m_today;
+  case DateFilter::Overdue:
+    return !due.empty() && due < m_today;
+  case DateFilter::Upcoming:
+    return !due.empty() && due > m_today && due <= m_upcomingEnd;
+  case DateFilter::None:
+    return due.empty();
+  case DateFilter::All:
+    break;
   }
+  return true;
+}
+
+// Tasks of the current view matching search and (Active only) date filter, in the chosen sort order. `total` counts
+// the tasks in the view before search and date filters.
+std::vector<std::size_t>
+TasksTab::visibleTasks(const TaskSnapshot& snapshot, const std::string& query, std::size_t& total) const {
+  std::vector<std::size_t> visible;
+  visible.reserve(snapshot.items.size());
+  total = 0;
+  for (std::size_t index = 0; index < snapshot.items.size(); ++index) {
+    const auto& item = snapshot.items[index];
+    if (item.completed != (m_view == View::Completed))
+      continue;
+    ++total;
+    if (!matchesSearch(item.title, query) && !matchesSearch(item.description, query))
+      continue;
+    if (m_view == View::Active && !passesDateFilter(item.dueDate))
+      continue;
+    visible.push_back(index);
+  }
+  std::ranges::sort(visible, [&](std::size_t left, std::size_t right) {
+    const auto& a = snapshot.items[left];
+    const auto& b = snapshot.items[right];
+    if (m_sortByTitle) {
+      if (a.title != b.title)
+        return a.title < b.title;
+    } else {
+      if (a.dueDate.empty() != b.dueDate.empty())
+        return !a.dueDate.empty();
+      if (a.dueDate != b.dueDate)
+        return a.dueDate < b.dueDate;
+    }
+    return a.id < b.id;
+  });
   return visible;
 }
 
+// The indices of the rows the current view, search and filters show, in display order; `total` is how many the view
+// holds before the search and date filters.
+std::vector<std::size_t> TasksTab::visibleRows(const TaskSnapshot& snapshot, std::size_t& total) const {
+  const auto query = StringUtils::toLower(m_query);
+  if (showsTasks())
+    return visibleTasks(snapshot, query, total);
+  if (m_view == View::Trash) {
+    total = snapshot.trash.size();
+    return visibleTrash(snapshot, query);
+  }
+  total = snapshot.history.size();
+  return visibleHistory(snapshot, query);
+}
+
+const std::string& TasksTab::rowId(const TaskSnapshot& snapshot, std::size_t index) const {
+  if (showsTasks())
+    return snapshot.items[index].id;
+  return m_view == View::Trash ? snapshot.trash[index].id : snapshot.history[index].id;
+}
+
+// ---- Row synchronisation (runs on every snapshot change) ----------------------------------------------------------
+
+// Widgets are rebuilt only when the visible row identities change; otherwise rows are updated in place so focus,
+// hover and scroll position survive status-only snapshot changes.
 void TasksTab::synchronizeRows(const TaskSnapshot& snapshot) {
-  const bool tasksView = m_view == View::Active || m_view == View::Completed;
   std::size_t total = 0;
   const std::vector<std::size_t> visible = visibleRows(snapshot, total);
-  const auto idAt = [&](std::size_t index) -> const std::string& {
-    if (tasksView)
-      return snapshot.items[index].id;
-    return m_view == View::Trash ? snapshot.trash[index].id : snapshot.history[index].id;
-  };
   const bool sameRows = visible.size() == m_rows.size()
-      && std::equal(visible.begin(), visible.end(), m_rows.begin(),
-                    [&](std::size_t index, const Row& row) { return row.view == m_view && row.id == idAt(index); });
+      && std::equal(visible.begin(), visible.end(), m_rows.begin(), [&](std::size_t index, const Row& row) {
+                          return row.view == m_view && row.id == rowId(snapshot, index);
+                        });
   std::optional<InputDispatcher::TabFocusSnapshot> focus;
   auto* dispatcher = inputDispatcher();
   if (!sameRows) {
@@ -704,181 +786,16 @@ void TasksTab::synchronizeRows(const TaskSnapshot& snapshot) {
       focus = dispatcher->captureTabFocus();
       dispatcher->setFocus(nullptr);
     }
-    m_lastFocus = nullptr;
-    while (!m_list->children().empty())
-      m_list->removeChild(m_list->children().front().get());
-    m_rows.clear();
-    const float scale = contentScale();
-    for (const auto index : visible) {
-      Row row{.id = idAt(index), .view = m_view};
-      auto card = ui::column({
-          .align = FlexAlign::Stretch,
-          .gap = Style::spaceXs * scale,
-          .padding = Style::spaceXs * scale,
-          .fill = colorSpecFromRole(ColorRole::SurfaceVariant, panelCardOpacity()),
-          .radius = Style::radiusSm * scale,
-      });
-      if (tasksView) {
-        auto line = ui::row({.align = FlexAlign::Center, .gap = Style::spaceXs * scale});
-        line->addChild(
-            ui::button({
-                .out = &row.complete,
-                .text = "[ ]",
-                .fontSize = Style::fontSizeMini * scale,
-                .controlHeight = Style::controlHeightSm * scale,
-                .variant = ButtonVariant::Secondary,
-                .onClick = [this, id = row.id]() {
-                  if (m_tasks == nullptr)
-                    return;
-                  const auto& items = m_tasks->snapshot().items;
-                  const auto found = std::ranges::find(items, id, &TaskItem::id);
-                  if (found != items.end()) {
-                    m_notice.clear();
-                    m_tasks->setCompleted(id, !found->completed);
-                    requestUpdate();
-                  }
-                },
-            })
-        );
-        row.complete->inputArea()->setTabFocusKey("tasks.complete." + row.id);
-        line->addChild(
-            ui::button({
-                .out = &row.open,
-                .text = snapshot.items[index].title,
-                .fontSize = Style::fontSizeBody * scale,
-                .contentAlign = ButtonContentAlign::Start,
-                .variant = ButtonVariant::Ghost,
-                .padding = Style::spaceXs * scale,
-                .flexGrow = 1.0F,
-                .onClick = [this, id = row.id]() { openEditor(id); },
-                .configure = [](Button& button) { button.label()->setMaxLines(2); },
-            })
-        );
-        row.open->inputArea()->setTabFocusKey("tasks.open." + row.id);
-        card->addChild(std::move(line));
-      } else {
-        card->addChild(taskLabel("", scale, &row.title));
-      }
-      card->addChild(taskLabel("", scale, &row.detail));
-      card->addChild(taskLabel("", scale, &row.preview));
-      if (tasksView)
-        row.preview->setMaxLines(2);
-      if (m_view == View::Trash) {
-        auto actions = ui::row({.align = FlexAlign::Stretch, .wrap = true, .gap = Style::spaceXs * scale});
-        actions->addChild(
-            ui::button({
-                .out = &row.complete,
-                .text = "Restore copy",
-                .fontSize = Style::fontSizeMini * scale,
-                .controlHeight = Style::controlHeightSm * scale,
-                .variant = ButtonVariant::Secondary,
-                .onClick = [this, id = row.id]() {
-                  if (m_tasks == nullptr)
-                    return;
-                  m_notice.clear();
-                  const auto& trash = m_tasks->snapshot().trash;
-                  const auto archived = std::ranges::find(trash, id, &TrashedTask::id);
-                  const auto rendered = std::ranges::find(m_rows, id, &Row::id);
-                  if (archived == trash.end()
-                      || rendered == m_rows.end()
-                      || archived->pending != rendered->undoDelete) {
-                    m_notice = "Deletion state changed. Review Trash before restoring.";
-                  } else {
-                    m_tasks->restoreTask(id);
-                  }
-                  requestUpdate();
-                },
-            })
-        );
-        row.complete->inputArea()->setTabFocusKey("tasks.restore." + row.id);
-        actions->addChild(
-            ui::button({
-                .out = &row.open,
-                .text = "Remove local copy…",
-                .fontSize = Style::fontSizeMini * scale,
-                .controlHeight = Style::controlHeightSm * scale,
-                .variant = ButtonVariant::Ghost,
-                .onClick = [this, id = row.id]() {
-                  m_confirmTrashId = id;
-                  m_localAction = LocalConfirmation::Purge;
-                  m_focusLocalPending = true;
-                  requestUpdate();
-                },
-            })
-        );
-        row.open->inputArea()->setTabFocusKey("tasks.purge." + row.id);
-        card->addChild(std::move(actions));
-      }
-      m_list->addChild(std::move(card));
-      styleTaskButtons(*m_list->children().back());
-      m_rows.push_back(std::move(row));
-    }
+    rebuildRows(snapshot, visible);
   }
   for (std::size_t index = 0; index < visible.size(); ++index) {
     auto& row = m_rows[index];
-    if (tasksView) {
-      const auto& item = snapshot.items[visible[index]];
-      row.complete->setText(item.completed ? "[x]" : "[ ]");
-      row.complete->setSelected(item.completed);
-      row.complete->setEnabled(snapshot.writable);
-      row.complete->setTooltip(item.completed ? "Mark active" : "Mark complete");
-      row.open->setText(item.title);
-      row.open->setTooltip(item.title);
-      row.open->setSelected(m_editing && m_selectedId == item.id);
-      std::string detail = item.dueDate.empty()
-          ? "No due date"
-          : (!item.completed && item.dueDate < m_today ? "Overdue · " + item.dueDate
-                 : item.dueDate == m_today             ? "Due today · " + item.dueDate
-                                                       : "Due " + item.dueDate);
-      if (item.pending)
-        detail += " · Pending";
-      if (item.conflict)
-        detail += " · Conflict";
-      row.detail->setText(detail);
-      row.detail->setColor(
-          item.conflict || (!item.completed && !item.dueDate.empty() && item.dueDate < m_today)
-              ? taskAccent()
-              : colorSpecFromRole(ColorRole::OnSurfaceVariant)
-      );
-      row.preview->setText(notesPreview(item.description));
-      show(row.preview, !item.description.empty());
-    } else if (m_view == View::Trash) {
-      const auto& archived = snapshot.trash[visible[index]];
-      const auto& item = archived.task;
-      row.title->setText(item.title);
-      std::string detail = "Deleted "
-          + localTimestamp(archived.deletedAt)
-          + " · "
-          + archived.source
-          + (item.completed ? " · Completed" : " · Active")
-          + (item.dueDate.empty() ? " · No due date" : " · Due " + item.dueDate);
-      if (archived.conflict)
-        detail += "\nDeletion conflict: resolve the original task before restoring or removing this copy.";
-      else if (archived.pending && !archived.restorable)
-        detail += "\nDeletion pending or uncertain: sync to resolve before restoring or removing this copy.";
-      else if (archived.pending)
-        detail += "\nUnsent deletion: Undo delete keeps the original task.";
-      else if (!archived.restorable)
-        detail += "\nRestore unavailable: unlock the local store and connect to a writable collection.";
-      row.detail->setText(detail);
-      row.preview->setText(item.description);
-      show(row.preview, !item.description.empty());
-      row.undoDelete = archived.pending;
-      row.complete->setText(archived.pending ? "Undo delete" : "Restore copy");
-      row.complete->setEnabled(snapshot.writable && archived.restorable);
-      row.complete->setTooltip(
-          archived.pending ? "Cancel a safely unsent deletion"
-                           : "Create a new synced task with the saved metadata and completion state"
-      );
-      row.open->setEnabled(snapshot.writable && !archived.pending && !archived.conflict);
-      row.open->setTooltip("Permanently remove only this desktop's saved copy; never delete a server task");
-    } else {
-      const auto& entry = snapshot.history[visible[index]];
-      row.title->setText(entry.action + " · " + entry.title);
-      row.detail->setText(localTimestamp(entry.occurredAt) + " · " + entry.source);
-      row.preview->setText(entry.details);
-      show(row.preview, !entry.details.empty());
-    }
+    if (showsTasks())
+      updateTaskRow(row, snapshot.items[visible[index]], snapshot.writable);
+    else if (m_view == View::Trash)
+      updateTrashRow(row, snapshot.trash[visible[index]], snapshot.writable);
+    else
+      updateHistoryRow(row, snapshot.history[visible[index]]);
   }
   if (focus.has_value()) {
     dispatcher->restoreTabFocus(std::move(*focus));
@@ -889,6 +806,168 @@ void TasksTab::synchronizeRows(const TaskSnapshot& snapshot) {
     m_scroll->setScrollOffset(0.0F);
     m_resetScroll = false;
   }
+  updateCounts(snapshot, visible.size(), total);
+  show(m_empty, visible.empty());
+  m_empty->setText(
+      total != 0                      ? "No matches. Clear search or change the date filter."
+          : m_view == View::Trash     ? "No saved deletions yet."
+          : m_view == View::History   ? "No local activity yet."
+          : m_view == View::Completed ? "No completed tasks."
+          : snapshot.writable         ? "No active tasks. Add one with New."
+                                      : "No cached active tasks. Connect and refresh."
+  );
+}
+
+void TasksTab::rebuildRows(const TaskSnapshot& snapshot, const std::vector<std::size_t>& visible) {
+  m_lastFocus = nullptr;
+  while (!m_list->children().empty())
+    m_list->removeChild(m_list->children().front().get());
+  m_rows.clear();
+  const float scale = contentScale();
+  for (const auto index : visible) {
+    Row row{.id = rowId(snapshot, index), .view = m_view};
+    auto card = ui::column({
+        .align = FlexAlign::Stretch,
+        .gap = Style::spaceXs * scale,
+        .padding = Style::spaceXs * scale,
+        .fill = colorSpecFromRole(ColorRole::SurfaceVariant, panelCardOpacity()),
+        .radius = Style::radiusSm * scale,
+    });
+    if (showsTasks())
+      card->addChild(buildTaskLine(row, snapshot.items[index].title, scale));
+    else
+      card->addChild(taskLabel("", scale, &row.title));
+    card->addChild(taskLabel("", scale, &row.detail));
+    card->addChild(taskLabel("", scale, &row.preview));
+    if (showsTasks())
+      row.preview->setMaxLines(PreviewMaxLines);
+    if (m_view == View::Trash)
+      card->addChild(buildTrashActions(row, scale));
+    m_list->addChild(std::move(card));
+    styleTaskButtons(*m_list->children().back());
+    m_rows.push_back(std::move(row));
+  }
+}
+
+// Completion toggle plus the title button that opens the editor.
+std::unique_ptr<Flex> TasksTab::buildTaskLine(Row& row, const std::string& title, float scale) {
+  auto line = ui::row({.align = FlexAlign::Center, .gap = Style::spaceXs * scale});
+  line->addChild(
+      ui::button(compactButton(
+          "[ ]", ButtonVariant::Secondary, scale,
+          [this, id = row.id]() {
+            if (m_tasks == nullptr)
+              return;
+            const auto& items = m_tasks->snapshot().items;
+            const auto found = std::ranges::find(items, id, &TaskItem::id);
+            if (found != items.end()) {
+              m_notice.clear();
+              m_tasks->setCompleted(id, !found->completed);
+              requestUpdate();
+            }
+          },
+          &row.complete
+      ))
+  );
+  row.complete->inputArea()->setTabFocusKey("tasks.complete." + row.id);
+  line->addChild(
+      ui::button({
+          .out = &row.open,
+          .text = title,
+          .fontSize = Style::fontSizeBody * scale,
+          .contentAlign = ButtonContentAlign::Start,
+          .variant = ButtonVariant::Ghost,
+          .padding = Style::spaceXs * scale,
+          .flexGrow = 1.0F,
+          .onClick = [this, id = row.id]() { openEditor(id); },
+          .configure = [](Button& button) { button.label()->setMaxLines(TitleMaxLines); },
+      })
+  );
+  row.open->inputArea()->setTabFocusKey("tasks.open." + row.id);
+  return line;
+}
+
+// Restore (`row.complete`) and permanent removal of the local copy (`row.open`).
+std::unique_ptr<Flex> TasksTab::buildTrashActions(Row& row, float scale) {
+  auto actions = ui::row({.align = FlexAlign::Stretch, .wrap = true, .gap = Style::spaceXs * scale});
+  actions->addChild(
+      ui::button(compactButton(
+          "Restore copy", ButtonVariant::Secondary, scale,
+          [this, id = row.id]() {
+            if (m_tasks == nullptr)
+              return;
+            m_notice.clear();
+            const auto& trash = m_tasks->snapshot().trash;
+            const auto archived = std::ranges::find(trash, id, &TrashedTask::id);
+            const auto rendered = std::ranges::find(m_rows, id, &Row::id);
+            if (archived == trash.end() || rendered == m_rows.end() || archived->pending != rendered->undoDelete) {
+              m_notice = "Deletion state changed. Review Trash before restoring.";
+            } else {
+              m_tasks->restoreTask(id);
+            }
+            requestUpdate();
+          },
+          &row.complete
+      ))
+  );
+  row.complete->inputArea()->setTabFocusKey("tasks.restore." + row.id);
+  actions->addChild(
+      ui::button(compactButton(
+          "Remove local copy…", ButtonVariant::Ghost, scale,
+          [this, id = row.id]() {
+            m_confirmTrashId = id;
+            m_localAction = LocalConfirmation::Purge;
+            m_focusLocalPending = true;
+            requestUpdate();
+          },
+          &row.open
+      ))
+  );
+  row.open->inputArea()->setTabFocusKey("tasks.purge." + row.id);
+  return actions;
+}
+
+void TasksTab::updateTaskRow(Row& row, const TaskItem& item, bool writable) {
+  row.complete->setText(item.completed ? "[x]" : "[ ]");
+  row.complete->setSelected(item.completed);
+  row.complete->setEnabled(writable);
+  row.complete->setTooltip(item.completed ? "Mark active" : "Mark complete");
+  row.open->setText(item.title);
+  row.open->setTooltip(item.title);
+  row.open->setSelected(m_editing && m_selectedId == item.id);
+  row.detail->setText(taskDetail(item, m_today));
+  row.detail->setColor(
+      item.conflict || isOverdue(item, m_today) ? taskAccent() : colorSpecFromRole(ColorRole::OnSurfaceVariant)
+  );
+  row.preview->setText(notesPreview(item.description));
+  show(row.preview, !item.description.empty());
+}
+
+void TasksTab::updateTrashRow(Row& row, const TrashedTask& archived, bool writable) {
+  const auto& item = archived.task;
+  row.title->setText(item.title);
+  row.detail->setText(trashDetail(archived));
+  row.preview->setText(item.description);
+  show(row.preview, !item.description.empty());
+  row.undoDelete = archived.pending;
+  row.complete->setText(archived.pending ? "Undo delete" : "Restore copy");
+  row.complete->setEnabled(writable && archived.restorable);
+  row.complete->setTooltip(
+      archived.pending ? "Cancel a safely unsent deletion"
+                       : "Create a new synced task with the saved metadata and completion state"
+  );
+  row.open->setEnabled(writable && !archived.pending && !archived.conflict);
+  row.open->setTooltip("Permanently remove only this desktop's saved copy; never delete a server task");
+}
+
+void TasksTab::updateHistoryRow(Row& row, const TaskHistoryEntry& entry) {
+  row.title->setText(entry.action + " · " + entry.title);
+  row.detail->setText(localTimestamp(entry.occurredAt) + " · " + entry.source);
+  row.preview->setText(entry.details);
+  show(row.preview, !entry.details.empty());
+}
+
+void TasksTab::updateCounts(const TaskSnapshot& snapshot, std::size_t shown, std::size_t total) {
   const auto completed = static_cast<std::size_t>(std::ranges::count_if(snapshot.items, [](const TaskItem& item) {
     return item.completed;
   }));
@@ -906,23 +985,16 @@ void TasksTab::synchronizeRows(const TaskSnapshot& snapshot) {
       + " · History "
       + std::to_string(snapshot.history.size())
       + "\nShowing "
-      + std::to_string(visible.size())
+      + std::to_string(shown)
       + " of "
       + std::to_string(total)
       + " "
       + viewName
       + " (totals before filters)"
   );
-  show(m_empty, visible.empty());
-  m_empty->setText(
-      total != 0                      ? "No matches. Clear search or change the date filter."
-          : m_view == View::Trash     ? "No saved deletions yet."
-          : m_view == View::History   ? "No local activity yet."
-          : m_view == View::Completed ? "No completed tasks."
-          : snapshot.writable         ? "No active tasks. Add one with New."
-                                      : "No cached active tasks. Connect and refresh."
-  );
 }
+
+// ---- Synchronisation of the rest of the tab -----------------------------------------------------------------------
 
 void TasksTab::synchronize() {
   if (m_root == nullptr)
@@ -938,48 +1010,62 @@ void TasksTab::synchronize() {
   m_revision = snapshot.revision;
   const auto now = std::time(nullptr);
   m_today = localDate(now);
-  m_upcomingEnd = localDate(now, 7);
-  m_refresh->setEnabled(m_tasks != nullptr);
-  m_new->setEnabled(snapshot.writable);
-  const bool tasksView = m_view == View::Active || m_view == View::Completed;
-  show(m_filterToolbar, m_view != View::Trash);
-  show(m_dateFilter, m_view == View::Active);
-  show(m_sort, tasksView);
-  show(m_clearHistory, m_view == View::History);
-  m_clearHistory->setEnabled(snapshot.writable && !snapshot.history.empty());
-  show(m_localScope, !tasksView);
-  m_localScope->setText(
-      "Trash and history start with this update and stay encrypted on this desktop for this account. "
-      "Other CalDAV clients do not share them."
-      + std::string(
-          m_view == View::History ? " History keeps the latest 500 entries; Discovered means first seen here, not the "
-                                    "original creation date."
-                                  : " Saved deletions stay until you remove them. Restore copy creates a new task and "
-                                    "keeps its saved metadata."
-      )
-  );
+  m_upcomingEnd = localDate(now, UpcomingDays);
+  synchronizeToolbars(snapshot);
   std::string status = snapshot.syncing ? "Syncing · " : "";
   status += snapshot.status;
   if (!m_notice.empty())
     status += "\n" + m_notice;
   m_status->setText(status);
 
-  auto* dispatcher = inputDispatcher();
-  if (dispatcher != nullptr) {
-    auto* focused = dispatcher->focusedArea();
-    if ((!m_editing && isNodeInSubtree(focused, m_editor))
-        || (!snapshot.needsPassword && isNodeInSubtree(focused, m_passwordCard))
-        || (!m_confirmingDelete && isNodeInSubtree(focused, m_confirmation))
-        || (m_localAction == LocalConfirmation::None && isNodeInSubtree(focused, m_localConfirmation))
-        || (m_view != View::Active && isNodeInSubtree(focused, m_dateFilter))
-        || (!tasksView && isNodeInSubtree(focused, m_sort))
-        || (m_view != View::History && isNodeInSubtree(focused, m_clearHistory))) {
-      dispatcher->setFocus(m_search->inputArea());
-    }
-  }
+  moveFocusOutOfHiddenPanels(snapshot);
   show(m_passwordCard, snapshot.needsPassword);
   if (!snapshot.needsPassword && !m_password->value().empty())
     m_password->setValue("");
+  synchronizeEditor(snapshot);
+  synchronizeLocalConfirmation(snapshot);
+  synchronizeRows(snapshot);
+}
+
+void TasksTab::synchronizeToolbars(const TaskSnapshot& snapshot) {
+  m_refresh->setEnabled(m_tasks != nullptr);
+  m_new->setEnabled(snapshot.writable);
+  show(m_filterToolbar, m_view != View::Trash);
+  show(m_dateFilter, m_view == View::Active);
+  show(m_sort, showsTasks());
+  show(m_clearHistory, m_view == View::History);
+  m_clearHistory->setEnabled(snapshot.writable && !snapshot.history.empty());
+  show(m_localScope, !showsTasks());
+  const std::string viewNote = m_view == View::History
+      ? " History keeps the latest "
+          + std::to_string(TaskHistoryLimit)
+          + " entries; Discovered means first seen here, not the original creation date."
+      : " Saved deletions stay until you remove them. Restore copy creates a new task and keeps its saved metadata.";
+  m_localScope->setText(
+      "Trash and history start with this update and stay encrypted on this desktop for this account. "
+      "Other CalDAV clients do not share them."
+      + viewNote
+  );
+}
+
+// Focus must not stay inside a panel this update is about to hide.
+void TasksTab::moveFocusOutOfHiddenPanels(const TaskSnapshot& snapshot) {
+  auto* dispatcher = inputDispatcher();
+  if (dispatcher == nullptr)
+    return;
+  auto* focused = dispatcher->focusedArea();
+  if ((!m_editing && isNodeInSubtree(focused, m_editor))
+      || (!snapshot.needsPassword && isNodeInSubtree(focused, m_passwordCard))
+      || (!m_confirmingDelete && isNodeInSubtree(focused, m_confirmation))
+      || (m_localAction == LocalConfirmation::None && isNodeInSubtree(focused, m_localConfirmation))
+      || (m_view != View::Active && isNodeInSubtree(focused, m_dateFilter))
+      || (!showsTasks() && isNodeInSubtree(focused, m_sort))
+      || (m_view != View::History && isNodeInSubtree(focused, m_clearHistory))) {
+    dispatcher->setFocus(m_search->inputArea());
+  }
+}
+
+void TasksTab::synchronizeEditor(const TaskSnapshot& snapshot) {
   show(m_editor, m_editing);
   const auto* selected = selectedItem();
   const bool conflict = selected != nullptr && selected->conflict;
@@ -1003,6 +1089,9 @@ void TasksTab::synchronize() {
         + (m_confirmingConflict ? "”? The server task is kept." : "” from the synced collection?")
     );
   }
+}
+
+void TasksTab::synchronizeLocalConfirmation(const TaskSnapshot& snapshot) {
   show(m_localConfirmation, m_localAction != LocalConfirmation::None);
   if (m_localAction == LocalConfirmation::Purge) {
     const auto found = std::ranges::find(snapshot.trash, m_confirmTrashId, &TrashedTask::id);
@@ -1030,7 +1119,6 @@ void TasksTab::synchronize() {
           "This cannot be undone. Tasks, Trash and the CalDAV server are unchanged."
     );
   }
-  synchronizeRows(snapshot);
 }
 
 void TasksTab::focusEditor() {
@@ -1059,10 +1147,12 @@ void TasksTab::focusEditor() {
   }
 }
 
+// ---- Tab hooks ----------------------------------------------------------------------------------------------------
+
 void TasksTab::doLayout(Renderer& renderer, float contentWidth, float bodyHeight) {
   if (m_root != nullptr) {
     synchronize();
-    const bool narrow = contentWidth < 430.0F * contentScale();
+    const bool narrow = contentWidth < NarrowContentWidthPx * contentScale();
     m_browseToolbar->setDirection(narrow ? FlexDirection::Vertical : FlexDirection::Horizontal);
     m_search->setFlexGrow(narrow ? 0.0F : 1.0F);
     m_filterToolbar->setDirection(narrow ? FlexDirection::Vertical : FlexDirection::Horizontal);

@@ -61,6 +61,19 @@ impl Gpu {
         })
     }
 
+    /// A card that reads nothing, for rendering tests.
+    #[cfg(test)]
+    pub fn fixture() -> Gpu {
+        Gpu {
+            dir: PathBuf::new(),
+            hwmon: None,
+            name: "Fixture GPU 9000".to_string(),
+            power_cap: 200.0,
+            temp_crit: 100.0,
+            fan_max: 4000.0,
+        }
+    }
+
     pub fn sample(&self) -> GpuSample {
         let dev = |file: &str| num::<u64>(self.dir.join(file));
         let hw = |file: &str| self.hwmon.as_ref().and_then(|h| num::<u64>(h.join(file)));
@@ -74,7 +87,10 @@ impl Gpu {
             mem_mhz: hw("freq2_input").map(|f| (f / 1_000_000) as u32),
             // amdgpu refuses the tachometer read while the fan stands still.
             fan_rpm: hw("fan1_input").map(|rpm| rpm as u32),
-            fan_pct: hw("pwm1").zip(hw("pwm1_max")).filter(|p| p.1 > 0).map(|(pwm, max)| pwm as f32 * 100.0 / max as f32),
+            fan_pct: hw("pwm1")
+                .zip(hw("pwm1_max"))
+                .filter(|p| p.1 > 0)
+                .map(|(pwm, max)| pwm as f32 * 100.0 / max as f32),
             gtt_used: dev("mem_info_gtt_used"),
             gtt_total: dev("mem_info_gtt_total"),
         }

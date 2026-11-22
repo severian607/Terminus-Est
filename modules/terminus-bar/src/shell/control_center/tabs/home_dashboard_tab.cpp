@@ -1,3 +1,5 @@
+// Home dashboard tab: the home tiles beside the embedded task manager, with section focus, paging and hotkeys.
+
 #include "shell/control_center/tabs/home_dashboard_tab.h"
 
 #include "core/input/key_symbols.h"
@@ -19,7 +21,7 @@ namespace {
 
   constexpr float kDashboardControlsWidth = 640.0F;
   constexpr float kDashboardBtopGrow = 4.0F;
-  // The accent line under the focused tile spans the tile (minus a one-cell inset each side), 2 px thick.
+  // The accent line under the focused tile spans the tile (minus a one-cell inset each side).
   constexpr float kDashboardFocusThickness = 2.0F;
 
   std::unique_ptr<Flex> dashboardSection(float flexGrow, std::unique_ptr<Flex> content) {
@@ -86,8 +88,8 @@ std::unique_ptr<Flex> HomeDashboardTab::create() {
           .out = &m_focusIndicator,
           .fill = colorSpecFromRole(ColorRole::Primary),
           .radius = 0.0F,
-          .width = 76.0F * scale,
-          .height = Style::borderWidth * 1.5F * scale,
+          .width = 1.0F, // sized by syncFocusIndicator() before it shows
+          .height = kDashboardFocusThickness * scale,
           .visible = false,
           .participatesInLayout = false,
           .configure = [](Box& line) {
@@ -305,8 +307,10 @@ bool HomeDashboardTab::handleSectionPaging(
 
   const std::size_t focused = focusedSectionIndex(dispatcher);
   const std::size_t current = focused < kSectionCount ? focused : m_focusedSection;
-  std::size_t target = current >= kSectionCount ? (backwards ? kSectionCount - 1 : 0)
-                                                : (current + (backwards ? kSectionCount - 1 : 1)) % kSectionCount;
+  // Stepping backwards is stepping forwards by all but one, modulo the count.
+  const std::size_t step = backwards ? kSectionCount - 1 : 1;
+  std::size_t target =
+      current >= kSectionCount ? (backwards ? kSectionCount - 1 : 0) : (current + step) % kSectionCount;
 
   for (std::size_t attempt = 0; attempt < kSectionCount; ++attempt) {
     if (auto* focus = dispatcher.firstTabFocusUnder(sectionRoot(target)); focus != nullptr) {
@@ -315,7 +319,7 @@ bool HomeDashboardTab::handleSectionPaging(
       syncFocusIndicator();
       return true;
     }
-    target = (target + (backwards ? kSectionCount - 1 : 1)) % kSectionCount;
+    target = (target + step) % kSectionCount;
   }
   return true;
 }

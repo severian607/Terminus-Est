@@ -19,7 +19,8 @@ class WeatherService;
 class ConfigService;
 struct WeatherSnapshot;
 
-// Compact terminal-style weather report: ¹now, ²hours (next 12) and ³days (7) boxes; the update info goes in the host footer hints.
+// Compact terminal-style weather report: ¹now, ²hours (next 12) and ³days (7) boxes; the update info goes in the host
+// footer hints.
 class WeatherTab : public Tab {
 public:
   WeatherTab(WeatherService* weather, ConfigService* config);
@@ -62,8 +63,27 @@ private:
     float rangeEnd = 0.0F;
   };
 
+  // What the report's row layout depends on; a change means the body must be measured again.
+  struct ShapeKey {
+    bool reportVisible = false;
+    bool dryLabelVisible = false;
+    bool stateBodyVisible = false;
+    std::size_t hourCount = 0;
+    std::size_t dayCount = 0;
+
+    [[nodiscard]] bool operator==(const ShapeKey&) const = default;
+  };
+
   void doLayout(Renderer& renderer, float contentWidth, float bodyHeight) override;
   void doUpdate(Renderer& renderer) override;
+  void addEffectLayer();
+  [[nodiscard]] std::unique_ptr<Flex> buildStateBox(float scale);
+  [[nodiscard]] std::unique_ptr<Flex> buildNowBox(float scale);
+  [[nodiscard]] std::unique_ptr<Flex> buildHoursBox(float scale);
+  [[nodiscard]] std::unique_ptr<Flex> buildDaysBox(float scale);
+  void layoutNow(float inner, float scale);
+  void layoutHours(float inner, float scale);
+  void layoutDays(float inner, float scale);
   void sync();
   void showState(const std::string& title, const std::string& body);
   void syncNow(const WeatherSnapshot& snapshot);
@@ -76,7 +96,9 @@ private:
   void syncEffect(const WeatherSnapshot& snapshot);
   [[nodiscard]] static EffectType effectForWeatherCode(std::int32_t code, bool isDay);
   [[nodiscard]] std::string temperatureText(double celsius) const;
-  [[nodiscard]] std::string hourLabel(const std::string& isoTime) const;
+  [[nodiscard]] std::string feelsText(const WeatherSnapshot& snapshot) const;
+  [[nodiscard]] std::string windText(const WeatherSnapshot& snapshot) const;
+  [[nodiscard]] static std::string hourLabel(const std::string& isoTime, bool twelveHour);
   [[nodiscard]] static std::string todayIso(std::int32_t utcOffsetSeconds);
   [[nodiscard]] static std::string weekdayLabel(const std::string& isoDate);
 
@@ -114,7 +136,7 @@ private:
 
   float m_contentHeight = 0.0F; // logical px; kept across reopen
   float m_laidOutWidth = 0.0F;
-  std::size_t m_shapeKey = 0;
+  ShapeKey m_shape;
   bool m_resizePending = false;
   std::size_t m_hourCount = 0;
   std::size_t m_dayCount = 0;

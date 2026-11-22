@@ -38,6 +38,15 @@ pub fn putn(buf: &mut Buffer, x: u16, y: u16, s: &str, max: u16, style: Style) -
     buf.set_stringn(x, y, s, max.min(a.right() - x) as usize, style).0
 }
 
+/// One single-width character, skipping cells outside the buffer. The
+/// cheap path for graphs, rules and meters, which draw thousands a frame
+/// and need no grapheme segmentation.
+fn glyph(buf: &mut Buffer, x: u16, y: u16, c: char, style: Style) {
+    if let Some(cell) = buf.cell_mut((x, y)) {
+        cell.set_char(c).set_style(style);
+    }
+}
+
 pub fn put(buf: &mut Buffer, x: u16, y: u16, s: &str, style: Style) -> u16 {
     putn(buf, x, y, s, u16::MAX, style)
 }
@@ -49,13 +58,13 @@ pub fn put_right(buf: &mut Buffer, end: u16, y: u16, s: &str, style: Style) {
 
 pub fn hline(buf: &mut Buffer, x: u16, y: u16, w: u16, c: Color) {
     for i in 0..w {
-        put(buf, x + i, y, "─", fg(c));
+        glyph(buf, x + i, y, '─', fg(c));
     }
 }
 
 pub fn vline(buf: &mut Buffer, x: u16, y: u16, h: u16, c: Color) {
     for i in 0..h {
-        put(buf, x, y + i, "│", fg(c));
+        glyph(buf, x, y + i, '│', fg(c));
     }
 }
 
@@ -69,7 +78,8 @@ pub fn frame(buf: &mut Buffer, r: Rect, c: Color) {
     hline(buf, r.x + 1, bottom, r.width - 2, c);
     vline(buf, r.x, r.y + 1, r.height - 2, c);
     vline(buf, right, r.y + 1, r.height - 2, c);
-    let corners = if SQUARE.load(Ordering::Relaxed) { ["┌", "┐", "└", "┘"] } else { ["╭", "╮", "╰", "╯"] };
+    let corners =
+        if SQUARE.load(Ordering::Relaxed) { ["┌", "┐", "└", "┘"] } else { ["╭", "╮", "╰", "╯"] };
     put(buf, r.x, r.y, corners[0], fg(c));
     put(buf, right, r.y, corners[1], fg(c));
     put(buf, r.x, bottom, corners[2], fg(c));
@@ -144,7 +154,7 @@ pub fn meter(buf: &mut Buffer, x: u16, y: u16, w: u16, pct: f32, g: &Gradient, e
     let filled = g.at(pct);
     for i in 0..w {
         let step = ((i + 1) as f32 * 100.0 / w as f32).round();
-        put(buf, x + i, y, "■", fg(if pct >= step { filled } else { empty }));
+        glyph(buf, x + i, y, '■', fg(if pct >= step { filled } else { empty }));
     }
 }
 
@@ -155,10 +165,10 @@ pub fn gauge(buf: &mut Buffer, x: u16, y: u16, w: u16, pct: f32, g: &Gradient, e
     let filled = fg(g.at(pct));
     for i in 0..w {
         match halves.saturating_sub(2 * i) {
-            0 => put(buf, x + i, y, "⣀", fg(empty)),
-            1 => put(buf, x + i, y, "⡇", filled),
-            _ => put(buf, x + i, y, "⣿", filled),
-        };
+            0 => glyph(buf, x + i, y, '⣀', fg(empty)),
+            1 => glyph(buf, x + i, y, '⡇', filled),
+            _ => glyph(buf, x + i, y, '⣿', filled),
+        }
     }
 }
 
@@ -221,8 +231,7 @@ pub fn graph(buf: &mut Buffer, r: Rect, data: &[f32], max: f32, g: &Gradient, id
             // reading that ends inside it. Bold thickens the dots where
             // the terminal draws braille from a font.
             let color = bold(if peak < 1.0 { idle } else { g.at(peak.min((low + high) / 2.0)) });
-            let mut utf8 = [0u8; 4];
-            put(buf, r.x + col as u16, r.y + row as u16, braille(l, rr, invert).encode_utf8(&mut utf8), color);
+            glyph(buf, r.x + col as u16, r.y + row as u16, braille(l, rr, invert), color);
         }
     }
 }
@@ -236,10 +245,9 @@ pub fn half_line(buf: &mut Buffer, r: Rect, invert: bool, c: Color) -> u16 {
     let reached = (2 * r.height).saturating_sub(1);
     let (cell, dot) = (reached / 4, (reached % 4) as usize);
     let (y, bits) = if invert { (r.y + cell, DOT[3 - dot]) } else { (r.bottom().saturating_sub(1 + cell), DOT[dot]) };
-    let mut utf8 = [0u8; 4];
-    let mark = char::from_u32(0x2800 | bits).unwrap_or(' ').encode_utf8(&mut utf8);
+    let mark = char::from_u32(0x2800 | bits).unwrap_or(' ');
     for x in r.x..r.right() {
-        put(buf, x, y, mark, fg(c));
+        glyph(buf, x, y, mark, fg(c));
     }
     y
 }

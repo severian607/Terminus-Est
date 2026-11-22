@@ -40,35 +40,8 @@ Provider {
         "fd -F -i --color never --max-results 200 --hidden --exclude .git -- \"$1\" \"$HOME/.config\" 2>/dev/null; " +
         "fd -F -i --color never --max-results 200 --exclude Projects -- \"$1\" \"$HOME\" 2>/dev/null"
 
-    property var proc: null
-
-    Component {
-        id: fdComponent
-
-        Process {
-            id: p
-            property int token: 0
-            property string q: ""
-            stdout: StdioCollector {
-                onStreamFinished: {
-                    if (p.token !== 0)
-                        root.answer(p.token, p.q, text)
-                }
-            }
-            onExited: {
-                if (root.proc === p)
-                    root.proc = null
-                Qt.callLater(p.destroy)
-            }
-        }
-    }
-
     function cancel() {
-        if (root.proc) {
-            root.proc.token = 0
-            root.proc.running = false
-            root.proc = null
-        }
+        root.cancelLane("fd")
     }
 
     function query(text, token, prefixed) {
@@ -78,8 +51,7 @@ Provider {
             root.results(token, [Schema.notice("archivum:empty", "type part of a file name", "searches ~/Projects, ~/.config, then the rest of home")])
             return
         }
-        root.proc = fdComponent.createObject(root, { token: token, q: q, command: ["sh", "-c", root.search, "sh", q] })
-        root.proc.running = true
+        root.launch("fd", ["sh", "-c", root.search, "sh", q], out => root.answer(token, q, out))
     }
 
     function tilde(path) {
@@ -110,53 +82,22 @@ Provider {
         root.results(token, items.length > 0 ? items : [Schema.notice("archivum:none", "no file named like " + q, "fd found nothing under ~/Projects, ~/.config or ~")])
     }
 
-    // One probe process at a time; a newer one silences the older.
-    property var probeProc: null
-
-    Component {
-        id: probeComponent
-
-        Process {
-            id: pp
-            property var done: null
-            stdout: StdioCollector {
-                onStreamFinished: {
-                    if (pp.done)
-                        pp.done(text)
-                    pp.done = null
-                }
-            }
-            onExited: {
-                if (root.probeProc === pp)
-                    root.probeProc = null
-                Qt.callLater(pp.destroy)
-            }
-        }
-    }
-
     function probe(path, info) {
         return done => {
-            if (root.probeProc) {
-                root.probeProc.done = null
-                root.probeProc.running = false
-            }
-            root.probeProc = probeComponent.createObject(root, {
-                done: text => {
-                    const lines = text.split("\n")
-                    const sep = lines.indexOf("---")
-                    info.mime = lines[0] || "unknown"
-                    info.apps = (lines[1] || "").split(" ").filter(s => s !== "")
-                    const preview = sep >= 0 ? lines.slice(sep + 1).filter((l, i, a) => i < a.length - 1 || l !== "") : []
-                    const rows = [{ label: "type", text: info.mime }]
-                    if (preview.length > 0)
-                        rows.push({ label: "", text: "" })
-                    for (const l of preview)
-                        rows.push({ label: "", text: l === "" ? " " : l })
-                    done(rows)
-                },
-                command: ["sh", Directories.script("probe/file.sh"), path]
+            // One probe at a time; a newer one silences the older.
+            root.launch("probe", ["sh", Directories.script("probe/file.sh"), path], text => {
+                const lines = text.split("\n")
+                const sep = lines.indexOf("---")
+                info.mime = lines[0] || "unknown"
+                info.apps = (lines[1] || "").split(" ").filter(s => s !== "")
+                const preview = sep >= 0 ? lines.slice(sep + 1).filter((l, i, a) => i < a.length - 1 || l !== "") : []
+                const rows = [{ label: "type", text: info.mime }]
+                if (preview.length > 0)
+                    rows.push({ label: "", text: "" })
+                for (const l of preview)
+                    rows.push({ label: "", text: l === "" ? " " : l })
+                done(rows)
             })
-            root.probeProc.running = true
         }
     }
 

@@ -70,10 +70,7 @@ public:
   // ---- Hosting in a QuickPanel (a small bar-attached panel) ----
   // Height in logical px (unscaled) the tab wants inside a QuickPanel whose body is `width` logical px wide;
   // `fallback` is the registered height. Read when the panel opens and after requestQuickPanelResize().
-  [[nodiscard]] virtual float quickPanelHeight(float width, float fallback) const {
-    (void)width;
-    return fallback;
-  }
+  [[nodiscard]] virtual float quickPanelHeight(float /*width*/, float fallback) const { return fallback; }
   // The tab's own key hints for the footer, `key label` pairs two spaces apart ("←→ seek  o player"); the host
   // appends its own keys in the same style.
   [[nodiscard]] virtual std::string quickPanelHints() const { return {}; }
@@ -81,11 +78,9 @@ public:
   [[nodiscard]] virtual std::string quickPanelStatus() const { return {}; }
   // Keys while hosted in a QuickPanel (xkb keysym, modifiers as in Panel::handleGlobalKey). Return true when
   // consumed. Escape and the host's own keys never reach the tab.
-  [[nodiscard]] virtual bool handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) {
-    (void)sym;
-    (void)modifiers;
-    (void)pressed;
-    (void)preedit;
+  [[nodiscard]] virtual bool handleQuickPanelKey(
+      std::uint32_t /*sym*/, std::uint32_t /*modifiers*/, bool /*pressed*/, bool /*preedit*/
+  ) {
     return false;
   }
   void setQuickPanelResizeRequest(std::function<void()> request) { m_quickPanelResizeRequest = std::move(request); }

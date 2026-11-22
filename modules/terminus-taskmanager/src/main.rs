@@ -1,3 +1,5 @@
+//! Terminus-TaskManager: terminal setup, the sample-and-redraw loop, and what keys and the mouse do.
+
 mod app;
 mod draw;
 mod gpu;
@@ -5,7 +7,7 @@ mod sys;
 mod theme;
 mod ui;
 
-use app::{App, Ask, Hit, Sort, SIGNAL_ROWS};
+use app::{App, Ask, Hit, Sort, INTERVAL_STEP_MS, SIGNAL_ROWS};
 use ratatui::{
     crossterm::{
         event::{
@@ -96,52 +98,85 @@ fn on_key(app: &mut App, key: KeyEvent) -> bool {
         // No other chord means anything; none may act as its letter.
         return key.code == KeyCode::Char('c');
     }
-    if let Some(dialog) = &app.dialog {
-        let picking = matches!(dialog.ask, Ask::Pick(_));
-        match key.code {
-            // A failed send is only acknowledged.
-            _ if dialog.error.is_some() => app.dialog = None,
-            KeyCode::Enter => app.confirm(),
-            KeyCode::Char('y') if !picking => app.confirm(),
-            KeyCode::Up if picking => app.pick_move(-1),
-            KeyCode::Down if picking => app.pick_move(1),
-            KeyCode::Left if picking => app.pick_move(-(SIGNAL_ROWS as isize)),
-            KeyCode::Right if picking => app.pick_move(SIGNAL_ROWS as isize),
-            _ => app.dialog = None,
-        }
+    if app.dialog.is_some() {
+        on_dialog_key(app, key.code);
         return false;
     }
     if app.filtering {
-        match key.code {
-            KeyCode::Enter => app.filtering = false,
-            KeyCode::Esc => {
-                app.filtering = false;
-                app.filter.clear();
-            }
-            KeyCode::Backspace => {
-                app.filter.pop();
-            }
-            KeyCode::Char(c) => app.filter.push(c),
-            _ => return false,
-        }
-        app.rebuild_view();
+        on_filter_key(app, key.code);
         return false;
     }
+    let quit = on_list_key(app, key.code);
+    app.refollow();
+    quit
+}
+
+/// Keys while a dialog is open: confirm, move through the signal list, or
+/// any other key to dismiss it.
+fn on_dialog_key(app: &mut App, code: KeyCode) {
+    let Some(dialog) = &app.dialog else {
+        return;
+    };
+    let picking = matches!(dialog.ask, Ask::Pick(_));
+    let column = SIGNAL_ROWS as isize;
+    match code {
+        // A failed send is only acknowledged.
+        _ if dialog.error.is_some() => app.dialog = None,
+        KeyCode::Enter => app.confirm(),
+        KeyCode::Char('y') if !picking => app.confirm(),
+        KeyCode::Up if picking => app.pick_move(-1),
+        KeyCode::Down if picking => app.pick_move(1),
+        KeyCode::Left if picking => app.pick_move(-column),
+        KeyCode::Right if picking => app.pick_move(column),
+        _ => app.dialog = None,
+    }
+}
+
+/// Keys while the filter is being typed.
+fn on_filter_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Enter => app.filtering = false,
+        KeyCode::Esc => {
+            app.filtering = false;
+            app.filter.clear();
+        }
+        KeyCode::Backspace => {
+            app.filter.pop();
+        }
+        KeyCode::Char(c) => app.filter.push(c),
+        _ => return,
+    }
+    app.rebuild_view();
+}
+
+/// `+` and `-`: in the tree they open and close the selected branch, as in
+/// btop; elsewhere they change the update interval.
+fn open_or_step(app: &mut App, open: bool) {
+    match app.selected.filter(|_| app.tree) {
+        Some(row) => app.fold(row, Some(!open)),
+        None => app.adjust_interval(if open { INTERVAL_STEP_MS } else { -INTERVAL_STEP_MS }),
+    }
+}
+
+/// Escape backs out one step: the info pane, then the selection, then the
+/// filter.
+fn back_out(app: &mut App) {
+    if app.info.take().is_some() || app.selected.take().is_some() || app.filter.is_empty() {
+        return;
+    }
+    app.filter.clear();
+    app.rebuild_view();
+}
+
+/// Keys of the process list; true means quit.
+fn on_list_key(app: &mut App, code: KeyCode) -> bool {
     let page = app.page_rows.max(1) as isize;
-    // In the tree, + and - open and close the selected branch, as in btop.
-    let branch = app.selected.filter(|_| app.tree);
-    match key.code {
+    match code {
         KeyCode::Char('q') => return true,
-        KeyCode::Char('+' | '=') => match branch {
-            Some(row) => app.fold(row, Some(false)),
-            None => app.adjust_interval(100),
-        },
-        KeyCode::Char('-') => match branch {
-            Some(row) => app.fold(row, Some(true)),
-            None => app.adjust_interval(-100),
-        },
+        KeyCode::Char('+' | '=') => open_or_step(app, true),
+        KeyCode::Char('-') => open_or_step(app, false),
         KeyCode::Char(' ') => {
-            if let Some(row) = branch {
+            if let Some(row) = app.selected.filter(|_| app.tree) {
                 app.fold(row, None);
             }
         }
@@ -157,10 +192,8 @@ fn on_key(app: &mut App, key: KeyEvent) -> bool {
             app.reverse = !app.reverse;
             app.rebuild_view();
         }
-        KeyCode::Left | KeyCode::Right => {
-            app.sort = app.sort.step(if key.code == KeyCode::Left { -1 } else { 1 });
-            app.rebuild_view();
-        }
+        KeyCode::Left => app.set_sort(app.sort.step(-1)),
+        KeyCode::Right => app.set_sort(app.sort.step(1)),
         KeyCode::Up => app.select(-1),
         KeyCode::Down => app.select(1),
         KeyCode::PageUp => app.select(-page),
@@ -178,14 +211,9 @@ fn on_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Enter => app.toggle_info(),
         // btop's key; f is the filter.
         KeyCode::Char('F') => app.toggle_follow(),
-        // Escape backs out one step: the info pane, the selection, the filter.
-        KeyCode::Esc if app.info.take().is_none() && app.selected.take().is_none() && !app.filter.is_empty() => {
-            app.filter.clear();
-            app.rebuild_view();
-        }
+        KeyCode::Esc => back_out(app),
         _ => {}
     }
-    app.refollow();
     false
 }
 
@@ -219,4 +247,95 @@ fn on_mouse(app: &mut App, mouse: MouseEvent) -> bool {
     }
     app.refollow();
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::Dialog;
+
+    fn press(app: &mut App, code: KeyCode) -> bool {
+        on_key(app, KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn escape_backs_out_one_step_at_a_time() {
+        let mut app = App::fixture();
+        app.filter = "work".to_string();
+        app.rebuild_view();
+        app.selected = Some(2);
+        app.fixture_info(app.view[2].pid);
+
+        press(&mut app, KeyCode::Esc);
+        assert!(app.info.is_none() && app.selected.is_some() && !app.filter.is_empty());
+        press(&mut app, KeyCode::Esc);
+        assert!(app.selected.is_none() && !app.filter.is_empty());
+        press(&mut app, KeyCode::Esc);
+        assert!(app.filter.is_empty());
+    }
+
+    #[test]
+    fn plus_and_minus_step_the_interval_in_the_list_and_fold_in_the_tree() {
+        let mut app = App::fixture();
+        press(&mut app, KeyCode::Char('+'));
+        assert_eq!(app.interval_ms, 2100);
+        press(&mut app, KeyCode::Char('-'));
+        press(&mut app, KeyCode::Char('-'));
+        assert_eq!(app.interval_ms, 1900);
+
+        app.tree = true;
+        app.rebuild_view();
+        app.selected = app.view.iter().position(|row| row.kids);
+        let rows = app.view.len();
+        press(&mut app, KeyCode::Char('-'));
+        assert!(app.view.len() < rows, "the branch closes");
+        assert_eq!(app.interval_ms, 1900);
+        press(&mut app, KeyCode::Char('+'));
+        assert_eq!(app.view.len(), rows, "and opens again");
+    }
+
+    #[test]
+    fn typing_edits_the_filter_until_enter() {
+        let mut app = App::fixture();
+        press(&mut app, KeyCode::Char('f'));
+        assert!(app.filtering);
+        for c in "fire".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.filter, "fir");
+        let names: Vec<_> = app.view.iter().filter_map(|row| app.proc(row.pid)).map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["firefox", "Web Content", "Web Content"], "by cpu, firefox first");
+        press(&mut app, KeyCode::Enter);
+        assert!(!app.filtering && app.filter == "fir");
+        // Back in the list, the same letters are commands again.
+        press(&mut app, KeyCode::Char('p'));
+        assert!(app.paused);
+    }
+
+    #[test]
+    fn dialog_keys_move_the_cursor_and_any_other_key_dismisses() {
+        let mut app = App::fixture();
+        app.selected = Some(0);
+        app.pick();
+        let Some(Dialog { ask: Ask::Pick(start), .. }) = app.dialog else {
+            panic!("the signal list opens");
+        };
+        press(&mut app, KeyCode::Down);
+        assert!(matches!(app.dialog, Some(Dialog { ask: Ask::Pick(at), .. }) if at == start + 1));
+        press(&mut app, KeyCode::Right);
+        assert!(matches!(app.dialog, Some(Dialog { ask: Ask::Pick(at), .. }) if at == start + 1 + SIGNAL_ROWS));
+        press(&mut app, KeyCode::Char('x'));
+        assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn control_chords_never_act_as_their_letter() {
+        let mut app = App::fixture();
+        let chord = |code| KeyEvent::new(code, KeyModifiers::CONTROL);
+        assert!(!on_key(&mut app, chord(KeyCode::Char('p'))));
+        assert!(!app.paused);
+        assert!(on_key(&mut app, chord(KeyCode::Char('c'))));
+        assert!(press(&mut app, KeyCode::Char('q')));
+    }
 }

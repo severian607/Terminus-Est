@@ -125,8 +125,8 @@ fn bar_theme() -> Option<Palette> {
 /// The same roles from `settings.toml` `[appearance]` (lib/tokens.py's values
 /// when the file or a key is missing, its LIGHT palette in light mode).
 fn settings_theme() -> Palette {
-    let light = fs::read_to_string(home().join(".local/state/terminus-est/theme-mode"))
-        .is_ok_and(|s| s.trim() == "light");
+    let light =
+        fs::read_to_string(home().join(".local/state/terminus-est/theme-mode")).is_ok_and(|s| s.trim() == "light");
     let [mut bg, mut fg, mut muted, mut accent, mut alert] = if light {
         ["#fbf7f0", "#000000", "#595959", "#0031a9", "#a60000"]
     } else {
@@ -180,7 +180,10 @@ impl Theme {
     }
 
     pub fn load() -> Theme {
-        let p = bar_theme().unwrap_or_else(settings_theme);
+        Theme::from_palette(&bar_theme().unwrap_or_else(settings_theme))
+    }
+
+    fn from_palette(p: &Palette) -> Theme {
         let get = |key: &str| p.get(key).copied();
         let fg = get("main_fg").unwrap_or((0xec, 0xec, 0xec));
         let title = get("title").unwrap_or(fg);
@@ -190,12 +193,10 @@ impl Theme {
         let outline = |name: &str| color(get(name).unwrap_or(div));
         // Amber and red that stand out from the background either way.
         let (r, g, b) = get("main_bg").unwrap_or_default();
-        let light = r as u32 * 299 + g as u32 * 587 + b as u32 * 114 > 128_000;
-        let (warn, danger) = if light {
-            ((0xa8, 0x5a, 0x00), (0xc4, 0x1c, 0x1c))
-        } else {
-            ((0xff, 0xc1, 0x4d), (0xff, 0x45, 0x45))
-        };
+        // Rec. 601 luma, in thousandths, against mid grey.
+        let light = u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114 > 128_000;
+        let (warn, danger) =
+            if light { ((0xa8, 0x5a, 0x00), (0xc4, 0x1c, 0x1c)) } else { ((0xff, 0xc1, 0x4d), (0xff, 0x45, 0x45)) };
         Theme {
             fg: color(fg),
             title: color(title),
@@ -221,5 +222,31 @@ impl Theme {
             download: Gradient::flat(hi),
             upload: Gradient::flat(title),
         }
+    }
+
+    /// A fixed palette, for rendering tests.
+    #[cfg(test)]
+    pub fn fixture() -> Theme {
+        let palette: Palette = [
+            ("main_bg", (0x0b, 0x0b, 0x0b)),
+            ("main_fg", (0xec, 0xec, 0xec)),
+            ("title", (0xff, 0xb3, 0xb0)),
+            ("hi_fg", (0xe8, 0xa0, 0x7a)),
+            ("selected_bg", (0x40, 0x30, 0x30)),
+            ("selected_fg", (0xff, 0xff, 0xff)),
+            ("inactive_fg", (0x8c, 0x8c, 0x8c)),
+            ("graph_text", (0x9a, 0x9a, 0xaa)),
+            ("meter_bg", (0x30, 0x30, 0x30)),
+            ("div_line", (0x40, 0x40, 0x44)),
+            ("cpu_box", (0x50, 0x60, 0x70)),
+            ("mem_box", (0x60, 0x70, 0x50)),
+            ("net_box", (0x70, 0x50, 0x60)),
+            ("proc_box", (0x50, 0x70, 0x70)),
+            ("proc_misc", (0x80, 0x90, 0xd0)),
+        ]
+        .into_iter()
+        .map(|(key, rgb)| (key.to_string(), rgb))
+        .collect();
+        Theme::from_palette(&palette)
     }
 }

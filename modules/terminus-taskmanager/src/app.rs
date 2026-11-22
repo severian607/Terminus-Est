@@ -2,7 +2,7 @@
 //! percentages need the sample before it, so the first tick only primes them.
 
 use crate::gpu::{Gpu, GpuSample};
-use crate::sys::{self, Battery, CpuTimes, DiskIo, Mem, ProcReader, SIGNALS};
+use crate::sys::{self, Battery, CpuTimes, DiskIo, Mem, ProcReader, State, SIGNALS};
 use ratatui::{crossterm::event::KeyCode, layout::Rect};
 use std::{
     cmp::Ordering,
@@ -21,6 +21,14 @@ pub const PROC_HISTORY: usize = 10;
 const MAX_DEPTH: u8 = 60;
 /// Rows of the signal list; it fills column by column.
 pub const SIGNAL_ROWS: usize = 8;
+/// What `+` and `-`, or a click on them, change the update interval by.
+pub const INTERVAL_STEP_MS: i64 = 100;
+const MIN_INTERVAL_MS: u64 = 100;
+const MAX_INTERVAL_MS: u64 = 60_000;
+const DEFAULT_INTERVAL_MS: u64 = 2000;
+
+#[cfg(test)]
+mod fixture;
 
 #[derive(Default)]
 pub struct Hist(Vec<f32>);
@@ -85,8 +93,7 @@ pub struct Proc {
     pub name: String,
     pub cmd: String,
     pub user: String,
-    /// The kernel's state letter: R running, S sleeping, T stopped, ...
-    pub state: char,
+    pub state: State,
     pub nice: i32,
     pub load: Load,
     /// Bytes of video memory held; 0 without a DRM client.
@@ -108,10 +115,12 @@ impl Proc {
     }
 
     fn matches(&self, needle: &str) -> bool {
-        let has = |hay: &str| {
-            hay.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
-        };
-        needle.is_empty() || has(&self.name) || has(&self.cmd) || has(&self.user) || self.pid.to_string().contains(needle)
+        let has = |hay: &str| hay.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()));
+        needle.is_empty()
+            || has(&self.name)
+            || has(&self.cmd)
+            || has(&self.user)
+            || self.pid.to_string().contains(needle)
     }
 }
 
@@ -366,7 +375,8 @@ pub struct App {
     boot: u64,
 }
 
-fn pct(part: u64, whole: u64) -> f32 {
+/// What percent `part` is of `whole`; 0 when there is no whole.
+pub fn pct(part: u64, whole: u64) -> f32 {
     if whole == 0 {
         0.0
     } else {
@@ -443,7 +453,7 @@ impl App {
             .unwrap_or_default();
         let mut app = App {
             last: Instant::now(),
-            interval_ms: 2000,
+            interval_ms: DEFAULT_INTERVAL_MS,
             shown: Shown { cpu: true, mem: true, net: true, proc: true, gpu: gpu.is_some() },
             dialog: None,
             hits: Hits::new(),
@@ -541,7 +551,7 @@ impl App {
     }
 
     pub fn adjust_interval(&mut self, by: i64) {
-        self.interval_ms = self.interval_ms.saturating_add_signed(by).clamp(100, 60_000);
+        self.interval_ms = self.interval_ms.saturating_add_signed(by).clamp(MIN_INTERVAL_MS, MAX_INTERVAL_MS);
     }
 
     /// Returns the jiffies all cores spent since the last sample: the
@@ -569,11 +579,8 @@ impl App {
         if let Some(t) = self.cpu_temp {
             self.cpu_temp_hist.push(t);
         }
-        let (sum, n) = self
-            .freq_files
-            .iter()
-            .filter_map(sys::num::<f32>)
-            .fold((0.0, 0u32), |(sum, n), khz| (sum + khz, n + 1));
+        let (sum, n) =
+            self.freq_files.iter().filter_map(sys::num::<f32>).fold((0.0, 0u32), |(sum, n), khz| (sum + khz, n + 1));
         self.cpu_mhz = (n > 0).then(|| sum / n as f32 / 1000.0);
         if let Some((counter, wrap)) = &self.energy {
             if let Some(now) = sys::num::<u64>(counter) {
@@ -590,10 +597,8 @@ impl App {
                 slot.push_str(v);
             }
         }
-        self.uptime = fs::read_to_string("/proc/uptime")
-            .ok()
-            .and_then(|u| u.split(['.', ' ']).next()?.parse().ok())
-            .unwrap_or(0);
+        self.uptime =
+            fs::read_to_string("/proc/uptime").ok().and_then(|u| u.split(['.', ' ']).next()?.parse().ok()).unwrap_or(0);
         jiffies
     }
 
@@ -741,70 +746,69 @@ impl App {
 
     fn tick_procs(&mut self, jiffies: u64) {
         self.scan += 1;
-        let cores = self.cores.len().max(1) as f32;
         let Ok(dir) = fs::read_dir("/proc") else {
             return;
         };
         for entry in dir.flatten() {
-            let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
-                continue;
-            };
-            let Some(stat) = self.reader.stat(pid) else {
-                continue;
-            };
-            let (ppid, ticks, start) = (stat.ppid, stat.ticks, stat.start);
-            let (state, nice) = (stat.state, stat.nice);
-            let (threads, mem) = (stat.threads, stat.rss_pages * self.page);
-            // A pid with another start time is a new process.
-            if self.table.get(&pid).is_none_or(|p| p.start != start) {
-                let name = stat.comm.to_string();
-                let cmd = Some(self.reader.cmdline(pid)).filter(|c| !c.is_empty()).unwrap_or_else(|| name.clone());
-                // Users outside /etc/passwd (systemd DynamicUser) show as their uid.
-                let user = self.reader.uid(pid).map_or_else(String::new, |uid| {
-                    self.users.get(&uid).cloned().unwrap_or_else(|| uid.to_string())
-                });
-                self.table.insert(
-                    pid,
-                    Proc {
-                        pid,
-                        ppid,
-                        name,
-                        cmd,
-                        user,
-                        state,
-                        nice,
-                        load: Load { cpu: 0.0, gpu: 0.0, mem, threads },
-                        vram: 0,
-                        drm: false,
-                        gpu_time: 0,
-                        hist: [0.0; PROC_HISTORY],
-                        hist_len: 0,
-                        start,
-                        ticks,
-                        seen: self.scan,
-                    },
-                );
-                continue;
+            if let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) {
+                self.scan_proc(pid, jiffies);
             }
-            let Some(p) = self.table.get_mut(&pid) else {
-                continue;
-            };
-            // The parent changes when a process is adopted.
-            (p.ppid, p.state, p.nice, p.seen) = (ppid, state, nice, self.scan);
-            (p.load.threads, p.load.mem) = (threads, mem);
-            if jiffies > 0 {
-                p.load.cpu = pct(ticks.saturating_sub(p.ticks), jiffies);
-                p.hist.rotate_left(1);
-                p.hist[PROC_HISTORY - 1] = (p.load.cpu * cores).min(100.0);
-                p.hist_len = (p.hist_len + 1).min(PROC_HISTORY);
-            }
-            p.ticks = ticks;
         }
         let scan = self.scan;
         self.table.retain(|_, p| p.seen == scan);
         let table = &self.table;
         self.folded.retain(|pid| table.contains_key(pid));
         self.rebuild_view();
+    }
+
+    /// Reads process `pid` into the table: updates its entry, or adds one.
+    fn scan_proc(&mut self, pid: u32, jiffies: u64) {
+        let Some(stat) = self.reader.stat(pid) else {
+            return;
+        };
+        let (ppid, state, nice) = (stat.ppid, stat.state, stat.nice);
+        let (ticks, start) = (stat.ticks, stat.start);
+        let load = Load { cpu: 0.0, gpu: 0.0, mem: stat.rss_pages * self.page, threads: stat.threads };
+        // A pid with another start time is a new process.
+        if let Some(p) = self.table.get_mut(&pid).filter(|p| p.start == start) {
+            // The parent changes when a process is adopted.
+            (p.ppid, p.state, p.nice, p.seen) = (ppid, state, nice, self.scan);
+            (p.load.threads, p.load.mem) = (load.threads, load.mem);
+            if jiffies > 0 {
+                p.load.cpu = pct(ticks.saturating_sub(p.ticks), jiffies);
+                p.hist.rotate_left(1);
+                p.hist[PROC_HISTORY - 1] = (p.load.cpu * self.cores.len().max(1) as f32).min(100.0);
+                p.hist_len = (p.hist_len + 1).min(PROC_HISTORY);
+            }
+            p.ticks = ticks;
+            return;
+        }
+        let name = stat.comm.to_string();
+        let cmd = Some(self.reader.cmdline(pid)).filter(|c| !c.is_empty()).unwrap_or_else(|| name.clone());
+        // Users outside /etc/passwd (systemd DynamicUser) show as their uid.
+        let user = self
+            .reader
+            .uid(pid)
+            .map_or_else(String::new, |uid| self.users.get(&uid).cloned().unwrap_or_else(|| uid.to_string()));
+        let proc = Proc {
+            pid,
+            ppid,
+            name,
+            cmd,
+            user,
+            state,
+            nice,
+            load,
+            vram: 0,
+            drm: false,
+            gpu_time: 0,
+            hist: [0.0; PROC_HISTORY],
+            hist_len: 0,
+            start,
+            ticks,
+            seen: self.scan,
+        };
+        self.table.insert(pid, proc);
     }
 
     pub fn proc(&self, pid: u32) -> Option<&Proc> {
@@ -827,7 +831,8 @@ impl App {
             }
             // Siblings in the list's order, by what their subtrees use.
             edges.sort_unstable_by(|a, b| {
-                a.0.cmp(&b.0).then_with(|| sort.order(reverse, &table[&a.1], &table[&b.1], &sums[&a.1].0, &sums[&b.1].0))
+                a.0.cmp(&b.0)
+                    .then_with(|| sort.order(reverse, &table[&a.1], &table[&b.1], &sums[&a.1].0, &sums[&b.1].0))
             });
             let tree = Tree { table, edges, sums, folded: &self.folded };
             for &(_, root) in children(edges, 0) {

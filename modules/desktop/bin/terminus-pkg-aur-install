@@ -20,10 +20,11 @@ fzf_args=(
 pkg_names=$(yay -Slqa | fzf "${fzf_args[@]}")
 
 if [[ -n $pkg_names ]]; then
-  # Add aur/ prefix to each package name and convert to space-separated for yay
+  # shellcheck source=/dev/null  # resolved through PATH at run time
   source terminus-sudo-keepalive || exit 1
 
-  echo "$pkg_names" | sed 's/^/aur\//' | tr '\n' ' ' | xargs yay -S --noconfirm
+  # The aur/ prefix keeps yay from resolving a name against the repositories.
+  sed 's/^/aur\//' <<<"$pkg_names" | xargs -d '\n' yay -S --noconfirm
   sudo updatedb
   terminus-show-done
 fi

@@ -1,3 +1,4 @@
+# Preloaded picker panel: bin/terminus-motion only activates this D-Bus service, so the key press starts no Python or GTK.
 [Unit]
 Description=Standalone motion picker (window animations, window effects, cursors)
 After=graphical-session.target

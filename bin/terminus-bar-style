@@ -8,10 +8,10 @@ tables. `set` swaps those two tables into the bar's live override file
 """
 
 import os
-from pathlib import Path
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 import tomlkit
 

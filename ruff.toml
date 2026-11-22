@@ -1,0 +1,48 @@
+# Python style for Terminus-Est's own code: `uvx ruff format` and `uvx ruff check` from the repository root.
+# The forks (modules/terminus-bar, modules/desktop, modules/hyprland-plugins) keep their upstream style.
+line-length = 120
+target-version = "py312"
+
+# Scripts without a .py suffix are listed by name; everything else is found by extension.
+extend-include = [
+  "bin/terminus",
+  "bin/terminus-audiofx",
+  "bin/terminus-bar-style",
+  "bin/terminus-funmode",
+  "bin/terminus-lock",
+  "bin/terminus-login",
+  "bin/terminus-mechvibes",
+  "bin/terminus-motionfx",
+  "bin/terminus-screenfx",
+  "bin/terminus-settings",
+  "tools/oo7-wait-ready",
+  "tools/terminus-bar-ready",
+  "tools/terminus-light-mode-install",
+  "tools/terminus-login-apply",
+  "tools/terminus-motion-demo-windows",
+  "tools/terminus-motion-previews",
+  "tools/terminus-publish",
+  "tools/terminus-screenfx-previews",
+  "tools/terminus-skwd-palette",
+  "tools/terminus-theme-toggle",
+  "tools/zed-copy-path",
+  "modules/terminus-bar-plugins/vitals/bin/vitals-log",
+  "modules/terminus-bar-plugins/vitals/bin/vitals-query",
+  "modules/terminus-cursor/terminus-cursor",
+  "modules/terminus-eclipse-cursor/terminus-eclipse-cursor",
+]
+extend-exclude = ["modules/terminus-bar", "modules/desktop", "modules/hyprland-plugins"]
+
+[lint]
+# pycodestyle, pyflakes, import order, likely bugs, modern syntax, simplifications, comprehensions, returns, performance.
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4", "PIE", "RET", "PERF"]
+ignore = [
+  "E402", # scripts put lib/ on sys.path before importing from it
+  "B905", # zip() over lists built together; strict= adds nothing
+]
+
+[lint.isort]
+known-first-party = [
+  "appearance", "audiofx", "motion", "motion_sandbox", "picker_style", "screenfx", "session", "settings",
+  "shader_panel", "skin_gtk", "skin_launcher", "skin_notify", "skin_strata", "skin_zed", "symbol_panel", "tokens",
+]

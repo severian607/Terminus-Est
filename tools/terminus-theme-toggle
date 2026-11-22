@@ -11,82 +11,104 @@ import time
 from pathlib import Path
 
 HOME = Path.home()
-BAR = Path(__file__).resolve().parents[1] / 'bin/terminus-bar'
-ZED = HOME / '.config/zed/settings.json'
-BTOP_THEME = HOME / '.config/btop/themes/terminusbar.theme'
-PALETTE = HOME / '.config/terminus-est/terminus-bar/palettes/Skwd Wall.json'
-GHOSTTY_MODE = HOME / '.config/terminus-est/generated/ghostty-mode.conf'
-LIGHT_WALLPAPERS = HOME / 'Pictures/Wallpapers/Light mode'
-DARK_WALLPAPER = HOME / '.local/state/terminus-est/dark-wallpaper.txt'
-WALLPAPER_SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.mp4'}
-MODE_FILE = HOME / '.local/state/terminus-est/theme-mode'
-STRATA_SKIN = Path(__file__).resolve().parents[1] / 'lib/skin_strata.py'
-OBSIDIAN_VAULTS = HOME / '.config/obsidian/obsidian.json'
+BAR = Path(__file__).resolve().parents[1] / "bin/terminus-bar"
+ZED = HOME / ".config/zed/settings.json"
+BTOP_THEME = HOME / ".config/btop/themes/terminusbar.theme"
+PALETTE = HOME / ".config/terminus-est/terminus-bar/palettes/Skwd Wall.json"
+GHOSTTY_MODE = HOME / ".config/terminus-est/generated/ghostty-mode.conf"
+LIGHT_WALLPAPERS = HOME / "Pictures/Wallpapers/Light mode"
+DARK_WALLPAPER = HOME / ".local/state/terminus-est/dark-wallpaper.txt"
+WALLPAPER_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4"}
+MODE_FILE = HOME / ".local/state/terminus-est/theme-mode"
+STRATA_SKIN = Path(__file__).resolve().parents[1] / "lib/skin_strata.py"
+OBSIDIAN_VAULTS = HOME / ".config/obsidian/obsidian.json"
+COMMAND_TIMEOUT_S = 15
+BTOP_THEME_WAIT_S = 5
+POLL_INTERVAL_S = 0.05
+ANSI_ORDER = ("black", "red", "green", "yellow", "blue", "magenta", "cyan", "white")
+# Ghostty option -> key in the palette's light terminal block.
+GHOSTTY_COLOUR_KEYS = (
+    ("foreground", "foreground"),
+    ("cursor-color", "cursor"),
+    ("cursor-text", "cursorText"),
+    ("selection-background", "selectionBg"),
+    ("selection-foreground", "selectionFg"),
+)
 
 
 def obsidian_appearance() -> Path | None:
     """appearance.json of the vault Obsidian has open, from its vault list."""
     try:
-        vaults = json.loads(OBSIDIAN_VAULTS.read_text())['vaults'].values()
+        vaults = json.loads(OBSIDIAN_VAULTS.read_text())["vaults"].values()
     except (OSError, ValueError, KeyError, AttributeError):
         return None
-    vault = next((v for v in vaults if v.get('open')), None)
-    return Path(vault['path']) / '.obsidian/appearance.json' if vault and 'path' in vault else None
+    vault = next((v for v in vaults if v.get("open")), None)
+    return Path(vault["path"]) / ".obsidian/appearance.json" if vault and "path" in vault else None
 
 
 def run(*command: str) -> str:
-    return subprocess.run(command, capture_output=True, text=True, timeout=15).stdout.strip()
+    return subprocess.run(command, capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S).stdout.strip()
 
 
-def reload_btop(previous: int) -> None:
-    # The bar renders the btop theme from the palette; the embedded btop only rereads it on SIGUSR2.
-    deadline = time.monotonic() + 5
-    while (BTOP_THEME.stat().st_mtime_ns if BTOP_THEME.exists() else 0) == previous and time.monotonic() < deadline:
-        time.sleep(.05)
-    for pid in run('pgrep', '-f', r'^btop --config .*/btop/terminusbar\.conf( |$)').split():
+def spawn(*command: str) -> subprocess.Popen:
+    """Start a command in the background, silent."""
+    return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def signal_processes(*pgrep_command: str) -> None:
+    """SIGUSR2 every process `pgrep_command` finds: the apps reread their theme on it."""
+    for pid in run(*pgrep_command).split():
         os.kill(int(pid), signal.SIGUSR2)
+
+
+def mtime_ns(path: Path) -> int:
+    return path.stat().st_mtime_ns if path.exists() else 0
+
+
+def reload_btop(previous_mtime_ns: int) -> None:
+    # The bar renders the btop theme from the palette; the embedded btop only rereads it on SIGUSR2.
+    deadline = time.monotonic() + BTOP_THEME_WAIT_S
+    while mtime_ns(BTOP_THEME) == previous_mtime_ns and time.monotonic() < deadline:
+        time.sleep(POLL_INTERVAL_S)
+    signal_processes("pgrep", "-f", r"^btop --config .*/btop/terminusbar\.conf( |$)")
 
 
 def write_ghostty(mode: str) -> None:
     """Dark leaves Ghostty on its normal theme; light overrides it with the bar's light terminal colours."""
-    lines = ['# Written by terminus-theme-toggle; empty in dark mode.']
+    lines = ["# Written by terminus-theme-toggle; empty in dark mode."]
     # The palette appears with the first wallpaper change; until then light mode leaves Ghostty as it is.
-    if mode == 'light' and PALETTE.is_file():
-        term = json.loads(PALETTE.read_text())['light']['terminal']
-        order = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white']
-        lines += ['background = %s' % term['background'], 'background-opacity = 1',
-                  'foreground = %s' % term['foreground'],
-                  'cursor-color = %s' % term['cursor'], 'cursor-text = %s' % term['cursorText'],
-                  'selection-background = %s' % term['selectionBg'],
-                  'selection-foreground = %s' % term['selectionFg']]
+    if mode == "light" and PALETTE.is_file():
+        term = json.loads(PALETTE.read_text())["light"]["terminal"]
+        lines += [f"background = {term['background']}", "background-opacity = 1"]
+        lines += [f"{option} = {term[key]}" for option, key in GHOSTTY_COLOUR_KEYS]
         # Programs use ANSI white/bright black for dim or default text; keep those near-black, not mid-grey.
-        normal = {**term['normal'], 'white': '#303030'}
-        bright = {**term['bright'], 'black': '#404040'}
-        for i, name in enumerate(order):
-            lines.append('palette = %d=%s' % (i, normal[name]))
-        for i, name in enumerate(order):
-            lines.append('palette = %d=%s' % (i + 8, bright[name]))
+        normal = {**term["normal"], "white": "#303030"}
+        bright = {**term["bright"], "black": "#404040"}
+        for first_index, shades in ((0, normal), (len(ANSI_ORDER), bright)):
+            lines += [f"palette = {first_index + i}={shades[name]}" for i, name in enumerate(ANSI_ORDER)]
         # Dim (SGR faint) text is drawn at half alpha, which is grey on cream; and no text may fall below AAA.
-        lines += ['faint-opacity = 0.8', 'minimum-contrast = 7']
+        lines += ["faint-opacity = 0.8", "minimum-contrast = 7"]
     GHOSTTY_MODE.parent.mkdir(parents=True, exist_ok=True)
-    GHOSTTY_MODE.write_text('\n'.join(lines) + '\n')
-    for pid in run('pgrep', '-x', 'ghostty').split():
-        os.kill(int(pid), signal.SIGUSR2)
+    GHOSTTY_MODE.write_text("\n".join(lines) + "\n")
+    signal_processes("pgrep", "-x", "ghostty")
 
 
 def current_wallpaper() -> Path | None:
     try:
-        outputs = json.loads(run('skwd-helm', 'current', '--json'))['outputs']
-        return Path(next(o['path'] for o in outputs if o.get('path')))
+        outputs = json.loads(run("skwd-helm", "current", "--json"))["outputs"]
+        return Path(next(o["path"] for o in outputs if o.get("path")))
     except (ValueError, KeyError, StopIteration, OSError):
         return None
 
 
 def switch_wallpaper(mode: str) -> None:
     """Light: a random wallpaper from the Light mode folder. Dark: the dark wallpaper that was active before."""
-    if mode == 'light':
-        choices = [p for p in LIGHT_WALLPAPERS.iterdir() if p.suffix.lower() in WALLPAPER_SUFFIXES] \
-            if LIGHT_WALLPAPERS.is_dir() else []
+    if mode == "light":
+        choices = (
+            [p for p in LIGHT_WALLPAPERS.iterdir() if p.suffix.lower() in WALLPAPER_SUFFIXES]
+            if LIGHT_WALLPAPERS.is_dir()
+            else []
+        )
         if not choices:
             return
         current = current_wallpaper()
@@ -95,51 +117,57 @@ def switch_wallpaper(mode: str) -> None:
             DARK_WALLPAPER.parent.mkdir(parents=True, exist_ok=True)
             DARK_WALLPAPER.write_text(str(current))
         others = [p for p in choices if p != current] or choices
-        subprocess.Popen(['skwd-helm', 'apply', str(random.choice(others))],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        spawn("skwd-helm", "apply", str(random.choice(others)))
     elif DARK_WALLPAPER.is_file():
         saved = Path(DARK_WALLPAPER.read_text().strip())
         current = current_wallpaper()
         if saved.is_file() and current != saved:
-            subprocess.Popen(['skwd-helm', 'apply', str(saved)],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            spawn("skwd-helm", "apply", str(saved))
+
+
+def toggle_obsidian(mode: str) -> subprocess.Popen | None:
+    """Start Obsidian's own light/dark toggle when its open vault is not in `mode` yet."""
+    appearance = obsidian_appearance()
+    if not (appearance and appearance.is_file() and run("pgrep", "-f", "electron.*[Oo]bsidian")):
+        return None
+    is_dark = json.loads(appearance.read_text()).get("theme") != "moonstone"
+    if is_dark == (mode == "dark"):
+        return None
+    return spawn("obsidian", "command", "id=theme:toggle-light-dark")
+
+
+def set_zed_mode(mode: str) -> None:
+    if not ZED.is_file():
+        return
+    text = ZED.read_text()
+    updated = re.sub(r'("theme":\s*\{\s*"mode":\s*)"(?:dark|light)"', rf'\1"{mode}"', text, count=1)
+    if updated != text:
+        ZED.write_text(updated)
 
 
 def main() -> None:
-    current = run(str(BAR), 'msg', 'theme-mode-get')
-    if current not in ('dark', 'light'):
-        raise SystemExit('unexpected bar theme mode: %r' % current)
-    mode = 'light' if current == 'dark' else 'dark'
+    current = run(str(BAR), "msg", "theme-mode-get")
+    if current not in ("dark", "light"):
+        raise SystemExit(f"unexpected bar theme mode: {current!r}")
+    mode = "light" if current == "dark" else "dark"
 
     # Obsidian's CLI takes ~0.5 s, so start it first and let it run beside the other two.
-    obsidian = None
-    appearance = obsidian_appearance()
-    if appearance and appearance.is_file() and run('pgrep', '-f', 'electron.*[Oo]bsidian'):
-        is_dark = json.loads(appearance.read_text()).get('theme') != 'moonstone'
-        if is_dark != (mode == 'dark'):
-            obsidian = subprocess.Popen(['obsidian', 'command', 'id=theme:toggle-light-dark'],
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    if ZED.is_file():
-        text = ZED.read_text()
-        updated = re.sub(r'("theme":\s*\{\s*"mode":\s*)"(?:dark|light)"', r'\1"%s"' % mode, text, count=1)
-        if updated != text:
-            ZED.write_text(updated)
+    obsidian = toggle_obsidian(mode)
+    set_zed_mode(mode)
 
     MODE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    MODE_FILE.write_text(mode + '\n')
-    strata = subprocess.Popen([sys.executable, str(STRATA_SKIN), 'refresh'],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    MODE_FILE.write_text(mode + "\n")
+    strata = spawn(sys.executable, str(STRATA_SKIN), "refresh")
     write_ghostty(mode)
     switch_wallpaper(mode)
 
-    before = BTOP_THEME.stat().st_mtime_ns if BTOP_THEME.exists() else 0
-    run(str(BAR), 'msg', 'theme-mode-set', mode)
+    before = mtime_ns(BTOP_THEME)
+    run(str(BAR), "msg", "theme-mode-set", mode)
     reload_btop(before)
-    strata.wait(timeout=15)
+    strata.wait(timeout=COMMAND_TIMEOUT_S)
     if obsidian:
-        obsidian.wait(timeout=15)
+        obsidian.wait(timeout=COMMAND_TIMEOUT_S)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -12,6 +12,7 @@ class TaskService;
 class ConfigService;
 class Flex;
 class Renderer;
+struct CalendarFrame;
 
 // Compact btop-style calendar for the bar clock QuickPanel: hero clock, month grid and an agenda.
 class CalendarQuickTab : public Tab {
@@ -26,17 +27,22 @@ public:
   [[nodiscard]] float quickPanelHeight(float width, float fallback) const override;
   [[nodiscard]] std::string quickPanelHints() const override;
   [[nodiscard]] std::string quickPanelStatus() const override;
-  [[nodiscard]] bool handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
+  [[nodiscard]] bool
+  handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
 
 private:
   void doLayout(Renderer& renderer, float contentWidth, float bodyHeight) override;
   void doUpdate(Renderer& renderer) override;
+  [[nodiscard]] CalendarFrame makeFrame() const;
   void rebuild();
+  [[nodiscard]] std::unique_ptr<Flex> buildMonthBox(const CalendarFrame& frame);
+  [[nodiscard]] std::unique_ptr<Flex> buildMonthNav(const CalendarFrame& frame);
+  [[nodiscard]] std::unique_ptr<Flex> buildWeekRow(const CalendarFrame& frame, std::chrono::sys_days weekStart);
+  [[nodiscard]] std::unique_ptr<Flex> buildAgendaBox(const CalendarFrame& frame) const;
   void select(std::chrono::year_month_day date);
   void shiftDays(int days);
   void shiftMonths(int months);
   void markDirty();
-  [[nodiscard]] std::string minuteKey() const;
 
   ConfigService* m_config = nullptr;
   TaskService* m_tasks = nullptr;
@@ -51,5 +57,5 @@ private:
   bool m_active = false;
   float m_bodyWidth = 0.0F;
   float m_bodyHeight = 0.0F;
-  std::string m_lastMinuteKey;
+  std::int64_t m_lastMinute = 0; // minutes since the epoch at the last rebuild
 };

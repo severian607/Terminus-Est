@@ -1,3 +1,4 @@
+# Secure laptop lock started by bin/terminus-lock; the compositor must acknowledge it before it counts as locked
 [Unit]
 Description=Terminus-Est compositor-acknowledged secure laptop lock
 Documentation=man:hyprlock(1)

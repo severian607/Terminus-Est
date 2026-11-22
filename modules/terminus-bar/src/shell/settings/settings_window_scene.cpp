@@ -98,16 +98,6 @@ namespace {
     return palettePreviewFromMetadata(palette.preview.dark);
   }
 
-  std::unique_ptr<Label>
-  makeLabel(std::string_view text, float fontSize, const ColorSpec& color, FontWeight fontWeight = FontWeight::Normal) {
-    return ui::label({
-        .text = std::string(text),
-        .fontSize = fontSize,
-        .fontWeight = fontWeight,
-        .color = color,
-    });
-  }
-
   std::unique_ptr<Flex> centeredRow(std::unique_ptr<Flex> child) {
     child->setFlexGrow(1.0F);
     return ui::row(

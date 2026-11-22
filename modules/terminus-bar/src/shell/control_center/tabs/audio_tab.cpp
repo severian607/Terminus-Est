@@ -41,8 +41,25 @@ using namespace control_center;
 namespace {
 
   constexpr float kValueLabelWidth = Style::controlHeightLg + Style::spaceLg;
-  // Home dashboard rows: meter line and device chip line.
-  constexpr float kCompactRowHeight = 26.0F;
+  // Home dashboard (compact) sizes, in px at scale 1.
+  constexpr float kCompactRowHeight = 26.0F; // meter line and device chip line
+  constexpr float kCompactProgramRowHeight = 40.0F;
+  constexpr float kCompactProgramIconSize = 24.0F;
+  constexpr float kCompactProgramSliderHeight = 22.0F;
+  constexpr float kCompactValueLabelWidth = 36.0F;
+  constexpr float kCompactMuteButtonSize = 28.0F;
+  // Fill and border opacity of the audio cards.
+  constexpr float kCardFillOpacity = 0.92F;
+  constexpr float kCardBorderOpacity = 0.75F;
+  // Layout breakpoints, in px at scale 1: below them a row stacks its parts or tightens its padding.
+  constexpr float kNarrowProgramRowWidth = 120.0F;
+  constexpr float kStackedProgramRowWidth = 260.0F;
+  constexpr float kNarrowPanelWidth = 160.0F;
+  constexpr float kStackedDevicesWidth = 320.0F;
+  constexpr float kNarrowCardWidth = 160.0F;
+  constexpr float kStackedControlsWidth = 220.0F;
+  constexpr float kCompactSliderMinWidth = 70.0F;
+  constexpr float kEffectsProfileMinWidth = 80.0F; // unscaled
   constexpr Logger kLogProgramUi{"audio_tab"};
   constexpr float kVolumeSyncEpsilon = 0.005F; // 0.5%
   constexpr auto kVolumeCommitInterval = std::chrono::milliseconds(16);
@@ -1010,7 +1027,7 @@ namespace {
       setAlign(FlexAlign::Center);
       setGap((compact ? Style::spaceXs : Style::spaceSm) * scale);
       setPadding((compact ? Style::spaceXs : Style::spaceSm) * scale);
-      setMinHeight((compact ? 40.0F : Style::controlHeightLg + Style::spaceSm) * scale);
+      setMinHeight((compact ? kCompactProgramRowHeight : Style::controlHeightLg + Style::spaceSm) * scale);
       if (compact) {
         // Home dashboard rows are bare lines inside the audio box, not cards.
         setRadius(0.0F);
@@ -1018,15 +1035,15 @@ namespace {
         clearBorder();
       } else {
         setRadius(Style::scaledRadiusMd(scale));
-        setFill(colorSpecFromRole(ColorRole::Surface, 0.92F));
-        setBorder(colorSpecFromRole(ColorRole::Outline, 0.75F), Style::borderWidth);
+        setFill(colorSpecFromRole(ColorRole::Surface, kCardFillOpacity));
+        setBorder(colorSpecFromRole(ColorRole::Outline, kCardBorderOpacity), Style::borderWidth);
       }
 
       constexpr float kIconSizeSm = 28.0F;
       constexpr float kCompactSliderControlHeight = 20.0F;
-      m_iconSize = (compact ? 24.0F : kIconSizeSm) * scale;
+      m_iconSize = (compact ? kCompactProgramIconSize : kIconSizeSm) * scale;
       m_iconContentGap = (compact ? Style::spaceXs : Style::spaceSm) * scale;
-      m_valueLabelMinWidth = (compact ? 36.0F : kValueLabelWidth) * scale;
+      m_valueLabelMinWidth = (compact ? kCompactValueLabelWidth : kValueLabelWidth) * scale;
 
       addChild(
           ui::row(
@@ -1098,7 +1115,7 @@ namespace {
                       .step = 0.01F,
                       .trackHeight = Style::sliderTrackHeight * scale,
                       .thumbSize = Style::sliderThumbSize * scale,
-                      .controlHeight = (compact ? 22.0F : kCompactSliderControlHeight) * scale,
+                      .controlHeight = (compact ? kCompactProgramSliderHeight : kCompactSliderControlHeight) * scale,
                       .wheelAdjustEnabled = true,
                       .flexGrow = 1.0F,
                       .onValueChanged =
@@ -1156,10 +1173,10 @@ namespace {
               .out = &m_muteButton,
               .glyph = "volume-high",
               .glyphSize = Style::fontSizeBody * scale,
-              .controlHeight = (compact ? 28.0F : Style::controlHeightSm) * scale,
+              .controlHeight = (compact ? kCompactMuteButtonSize : Style::controlHeightSm) * scale,
               .variant = compact ? ButtonVariant::Ghost : ButtonVariant::Default,
-              .minWidth = (compact ? 28.0F : Style::controlHeightSm) * scale,
-              .minHeight = (compact ? 28.0F : Style::controlHeightSm) * scale,
+              .minWidth = (compact ? kCompactMuteButtonSize : Style::controlHeightSm) * scale,
+              .minHeight = (compact ? kCompactMuteButtonSize : Style::controlHeightSm) * scale,
               .padding = Style::spaceXs * scale,
               .radius = compact ? 0.0F : Style::scaledRadiusMd(scale),
               .onClick = [this]() {
@@ -1209,10 +1226,10 @@ namespace {
       // Give narrow streams independent identity, value, slider and mute rows. Do not
       // reserve icon/mute width beside text once that would squeeze the identity.
       const float horizontalPadding =
-          (m_compact || rowWidth < 120.0F * m_scale ? Style::spaceXs : Style::spaceSm) * m_scale;
+          (m_compact || rowWidth < kNarrowProgramRowWidth * m_scale ? Style::spaceXs : Style::spaceSm) * m_scale;
       setPadding((m_compact ? Style::spaceXs : Style::spaceSm) * m_scale, horizontalPadding);
       const float innerWidth = std::max(1.0F, rowWidth - paddingLeft() - paddingRight());
-      const bool compact = innerWidth < 260.0F * m_scale;
+      const bool compact = innerWidth < kStackedProgramRowWidth * m_scale;
       setDirection(compact ? FlexDirection::Vertical : FlexDirection::Horizontal);
       setAlign(compact ? FlexAlign::Stretch : FlexAlign::Center);
       m_contentRow->setFlexGrow(compact ? 0.0F : 1.0F);
@@ -1227,7 +1244,7 @@ namespace {
                                           1.0F,
                                           innerWidth
                                               - iconWidth
-                                              - (m_compact ? 28.0F : Style::controlHeightSm) * m_scale
+                                              - (m_compact ? kCompactMuteButtonSize : Style::controlHeightSm) * m_scale
                                               - gap()
                                               - m_valueLabelMinWidth
                                               - Style::spaceSm * m_scale
@@ -1467,8 +1484,8 @@ namespace {
                 .configure =
                     [scale](Flex& card) {
                       card.setRadius(Style::scaledRadiusMd(scale));
-                      card.setFill(colorSpecFromRole(ColorRole::Surface, 0.92F));
-                      card.setBorder(colorSpecFromRole(ColorRole::Outline, 0.75F), Style::borderWidth);
+                      card.setFill(colorSpecFromRole(ColorRole::Surface, kCardFillOpacity));
+                      card.setBorder(colorSpecFromRole(ColorRole::Outline, kCardBorderOpacity), Style::borderWidth);
                     },
             },
             ui::label({
@@ -1736,199 +1753,210 @@ std::unique_ptr<Flex> AudioTab::createDeviceVolumeCard(DeviceVolumeCardSpec card
   const float sliderMax = sliderMaxPercent() / 100.0F;
   const float buttonHeight = (m_compact ? kCompactRowHeight : Style::controlHeightSm) * scale;
 
-  auto cardNode = ui::
-      column(
-          {
-              .out = &card.state.card,
-              .flexGrow = 1.0F,
-              .configure =
-                  [this, scale, opacity = panelCardOpacity()](Flex& column) {
-                    applyAudioCardStyle(column, scale, opacity);
-                    column.setGap(Style::spaceXs * scale);
-                    if (m_compact) {
-                      // Home dashboard: the audio box supplies the frame, so the card is bare content.
-                      column.clearFill();
-                      column.clearBorder();
-                      column.setRadius(0.0F);
-                      column.setPadding(0.0F);
-                    }
-                  },
-          },
-          // The title and full device tooltip remain available even when the card is compact.
-          ui::row(
-              {
-                  .out = &card.state.menuAnchor,
-                  .align = FlexAlign::Center,
-                  .justify = FlexJustify::SpaceBetween,
-                  .gap = Style::spaceXs * scale,
-              },
-              ui::glyph({
-                  .out = &card.state.deviceGlyph,
-                  .glyph = std::string(card.muteGlyph),
-                  .glyphSize = (m_compact ? Style::fontSizeBody : Style::fontSizeTitle) * scale,
-                  .color = colorSpecFromRole(ColorRole::OnSurface),
-              }),
-              ui::column(
+  auto
+      cardNode =
+          ui::
+              column(
                   {
-                      .out = &card.state.titleColumn,
-                      .align = FlexAlign::Stretch,
-                      .justify = FlexJustify::Center,
-                      .gap = 0.0F,
+                      .out = &card.state.card,
                       .flexGrow = 1.0F,
+                      .configure =
+                          [this, scale, opacity = panelCardOpacity()](Flex& column) {
+                            applyAudioCardStyle(column, scale, opacity);
+                            column.setGap(Style::spaceXs * scale);
+                            if (m_compact) {
+                              // Home dashboard: the audio box supplies the frame, so the card is bare content.
+                              column.clearFill();
+                              column.clearBorder();
+                              column.setRadius(0.0F);
+                              column.setPadding(0.0F);
+                            }
+                          },
                   },
-                  ui::label({
-                      .out = &card.state.titleLabel,
-                      .text = i18n::tr(card.devicePrefixKey),
-                      .fontSize = (m_compact ? Style::fontSizeCaption : Style::fontSizeTitle) * scale,
-                      .fontWeight = FontWeight::Bold,
-                      .color = colorSpecFromRole(ColorRole::OnSurface),
-                      .maxLines = 1,
-                      .ellipsize = TextEllipsize::End,
-                      .configure = [](Label& label) { label.setTooltip(label.text()); },
-                  }),
-                  ui::label({
-                      .out = &card.state.deviceLabel,
-                      .text = i18n::tr(card.noDeviceKey),
-                      .fontSize = Style::fontSizeCaption * scale,
-                      .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
-                      .maxLines = 1,
-                      .ellipsize = m_compact ? TextEllipsize::End : TextEllipsize::Middle,
-                      .flexGrow = 1.0F,
-                  })
-              ),
-              ui::button({
-                  .out = &card.state.menuButton,
-                  .glyph = "more-vertical",
-                  .glyphSize = Style::fontSizeCaption * scale,
-                  .controlHeight = buttonHeight,
-                  .enabled = false,
-                  .variant = ButtonVariant::Ghost,
-                  .minWidth = buttonHeight,
-                  .minHeight = buttonHeight,
-                  .padding = Style::spaceXs * scale,
-                  .radius = m_compact ? 0.0F : Style::scaledRadiusMd(scale),
-                  .onClick =
-                      [this, state = &card.state, menu = card.deviceMenu]() {
-                        const bool wasOpen = m_deviceMenuPopup != nullptr && m_deviceMenuPopup->isOpen();
-                        const bool wasOpenForThisCard = wasOpen && m_openDeviceMenuCard == state;
-                        if (wasOpen) {
-                          m_deviceMenuPopup->close();
-                          PanelManager::instance().clearActivePopup();
-                          m_openDeviceMenuCard = nullptr;
-                        }
-                        if (!wasOpenForThisCard) {
-                          openDeviceMenu(*state, menu);
-                        }
-                      },
-              })
-          ),
-          ui::row(
-              {
-                  .out = &card.state.controlsRow,
-                  .align = FlexAlign::Center,
-                  .gap = Style::spaceXs * scale,
-              },
-              ui::slider({
-                  .out = &card.state.slider,
-                  .minValue = 0.0F,
-                  .maxValue = sliderMax,
-                  .step = 0.01F,
-                  .trackHeight = Style::sliderTrackHeight * scale,
-                  .thumbSize = Style::sliderThumbSize * scale,
-                  .controlHeight = (m_compact ? kCompactRowHeight : Style::controlHeight) * scale,
-                  .wheelAdjustEnabled = true,
-                  .flexGrow = 1.0F,
-                  .onValueChanged =
-                      [this, state = &card.state, queueVolume = card.queueVolume](double value) {
-                        if (state->syncing || m_audio == nullptr) {
-                          return;
-                        }
-                        state->volumeDebounceTimer.stop();
-                        queueVolume(static_cast<float>(value));
-                        flushPendingVolumes();
-                        if (state->valueLabel != nullptr) {
-                          state->valueLabel->setText(std::format("{:.0F}%", value * 100.0F));
-                        }
-                      },
-                  .onDragEnd =
-                      [this, state = &card.state]() {
-                        state->volumeDebounceTimer.stop();
-                        flushPendingVolumes();
-                      },
-                  .configure = [](Slider& slider) { slider.setAccentColor(colorSpecFromRole(ColorRole::Primary)); },
-              }),
-              ui::row(
-                  {
-                      .out = &card.state.valueRow,
-                      .align = FlexAlign::Center,
-                      .gap = (m_compact ? Style::spaceXs : Style::spaceSm) * scale,
-                  },
-                  ui::label({
-                      .out = &card.state.valueLabel,
-                      .text = "0%",
-                      .fontSize = (m_compact ? Style::fontSizeCaption : Style::fontSizeBody) * scale,
-                      .fontWeight = FontWeight::Bold,
-                      .color = colorSpecFromRole(ColorRole::OnSurface),
-                      .minWidth = (m_compact ? 36.0F : kValueLabelWidth) * scale,
-                      .textAlign = TextAlign::End,
-                  }),
-                  ui::button(
+                  // The title and full device tooltip remain available even when the card is compact.
+                  ui::row(
                       {
-                          .out = &card.state.muteButton,
+                          .out = &card.state.menuAnchor,
+                          .align = FlexAlign::Center,
+                          .justify = FlexJustify::SpaceBetween,
+                          .gap = Style::spaceXs * scale,
+                      },
+                      ui::glyph({
+                          .out = &card.state.deviceGlyph,
                           .glyph = std::string(card.muteGlyph),
-                          .glyphSize = Style::fontSizeBody * scale,
-                          .controlHeight = buttonHeight,
-                          .variant = m_compact ? ButtonVariant::Ghost : ButtonVariant::Default,
-                          .minWidth = buttonHeight,
-                          .minHeight = buttonHeight,
-                          .padding = Style::spaceXs * scale,
-                          .radius = m_compact ? 0.0F : Style::scaledRadiusMd(scale),
-                          .onClick =
-                              [this, toggleMute = card.toggleMute]() {
-                                if (m_audio == nullptr || !toggleMute) {
-                                  return;
-                                }
+                          .glyphSize = (m_compact ? Style::fontSizeBody : Style::fontSizeTitle) * scale,
+                          .color = colorSpecFromRole(ColorRole::OnSurface),
+                      }),
+                      ui::column(
+                          {
+                              .out = &card.state.titleColumn,
+                              .align = FlexAlign::Stretch,
+                              .justify = FlexJustify::Center,
+                              .gap = 0.0F,
+                              .flexGrow = 1.0F,
+                          },
+                          ui::label({
+                              .out = &card.state.titleLabel,
+                              .text = i18n::tr(card.devicePrefixKey),
+                              .fontSize = (m_compact ? Style::fontSizeCaption : Style::fontSizeTitle) * scale,
+                              .fontWeight = FontWeight::Bold,
+                              .color = colorSpecFromRole(ColorRole::OnSurface),
+                              .maxLines = 1,
+                              .ellipsize = TextEllipsize::End,
+                              .configure = [](Label& label) { label.setTooltip(label.text()); },
+                          }),
+                          ui::label(
+                              {
+                                  .out = &card.state.deviceLabel,
+                                  .text = i18n::tr(card.noDeviceKey),
+                                  .fontSize = Style::fontSizeCaption * scale,
+                                  .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+                                  .maxLines = 1,
+                                  .ellipsize = m_compact ? TextEllipsize::End : TextEllipsize::Middle,
+                                  .flexGrow = 1.0F,
+                              }
+                          )
+                      ),
+                      ui::button(
+                          {
+                              .out = &card.state.menuButton,
+                              .glyph = "more-vertical",
+                              .glyphSize = Style::fontSizeCaption * scale,
+                              .controlHeight = buttonHeight,
+                              .enabled = false,
+                              .variant = ButtonVariant::Ghost,
+                              .minWidth = buttonHeight,
+                              .minHeight = buttonHeight,
+                              .padding = Style::spaceXs * scale,
+                              .radius = m_compact ? 0.0F : Style::scaledRadiusMd(scale),
+                              .onClick =
+                                  [this, state = &card.state, menu = card.deviceMenu]() {
+                                    const bool wasOpen = m_deviceMenuPopup != nullptr && m_deviceMenuPopup->isOpen();
+                                    const bool wasOpenForThisCard = wasOpen && m_openDeviceMenuCard == state;
+                                    if (wasOpen) {
+                                      m_deviceMenuPopup->close();
+                                      PanelManager::instance().clearActivePopup();
+                                      m_openDeviceMenuCard = nullptr;
+                                    }
+                                    if (!wasOpenForThisCard) {
+                                      openDeviceMenu(*state, menu);
+                                    }
+                                  },
+                          }
+                      )
+                  ),
+                  ui::row(
+                      {
+                          .out = &card.state.controlsRow,
+                          .align = FlexAlign::Center,
+                          .gap = Style::spaceXs * scale,
+                      },
+                      ui::slider(
+                          {
+                              .out = &card.state.slider,
+                              .minValue = 0.0F,
+                              .maxValue = sliderMax,
+                              .step = 0.01F,
+                              .trackHeight = Style::sliderTrackHeight * scale,
+                              .thumbSize = Style::sliderThumbSize * scale,
+                              .controlHeight = (m_compact ? kCompactRowHeight : Style::controlHeight) * scale,
+                              .wheelAdjustEnabled = true,
+                              .flexGrow = 1.0F,
+                              .onValueChanged =
+                                  [this, state = &card.state, queueVolume = card.queueVolume](double value) {
+                                    if (state->syncing || m_audio == nullptr) {
+                                      return;
+                                    }
+                                    state->volumeDebounceTimer.stop();
+                                    queueVolume(static_cast<float>(value));
+                                    flushPendingVolumes();
+                                    if (state->valueLabel != nullptr) {
+                                      state->valueLabel->setText(std::format("{:.0F}%", value * 100.0F));
+                                    }
+                                  },
+                              .onDragEnd =
+                                  [this, state = &card.state]() {
+                                    state->volumeDebounceTimer.stop();
+                                    flushPendingVolumes();
+                                  },
+                              .configure =
+                                  [](Slider& slider) { slider.setAccentColor(colorSpecFromRole(ColorRole::Primary)); },
+                          }
+                      ),
+                      ui::row(
+                          {
+                              .out = &card.state.valueRow,
+                              .align = FlexAlign::Center,
+                              .gap = (m_compact ? Style::spaceXs : Style::spaceSm) * scale,
+                          },
+                          ui::label(
+                              {
+                                  .out = &card.state.valueLabel,
+                                  .text = "0%",
+                                  .fontSize = (m_compact ? Style::fontSizeCaption : Style::fontSizeBody) * scale,
+                                  .fontWeight = FontWeight::Bold,
+                                  .color = colorSpecFromRole(ColorRole::OnSurface),
+                                  .minWidth = (m_compact ? kCompactValueLabelWidth : kValueLabelWidth) * scale,
+                                  .textAlign = TextAlign::End,
+                              }
+                          ),
+                          ui::button(
+                              {
+                                  .out = &card.state.muteButton,
+                                  .glyph = std::string(card.muteGlyph),
+                                  .glyphSize = Style::fontSizeBody * scale,
+                                  .controlHeight = buttonHeight,
+                                  .variant = m_compact ? ButtonVariant::Ghost : ButtonVariant::Default,
+                                  .minWidth = buttonHeight,
+                                  .minHeight = buttonHeight,
+                                  .padding = Style::spaceXs * scale,
+                                  .radius = m_compact ? 0.0F : Style::scaledRadiusMd(scale),
+                                  .onClick =
+                                      [this, toggleMute = card.toggleMute]() {
+                                        if (m_audio == nullptr || !toggleMute) {
+                                          return;
+                                        }
 
-                                toggleMute();
-                              },
-                      }
+                                        toggleMute();
+                                      },
+                              }
+                          )
+                      )
+                  ),
+                  ui::row(
+                      {
+                          .out = &card.state.effectsProfileRow,
+                          .align = FlexAlign::Center,
+                          .gap = Style::spaceSm * scale,
+                          .visible = false,
+                          .participatesInLayout = false,
+                      },
+                      ui::label({
+                          .out = &card.state.effectsProfileLabel,
+                          .text = i18n::tr("control-center.audio.effects-profile") + ":",
+                          .fontSize = Style::fontSizeCaption * scale,
+                          .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+                          .maxLines = 1,
+                          .ellipsize = TextEllipsize::End,
+                          .visible = !m_compact,
+                          .participatesInLayout = !m_compact,
+                          .configure = [](Label& label) { label.setTooltip(label.text()); },
+                      }),
+                      ui::select({
+                          .out = &card.state.effectsProfileSelect,
+                          .placeholder = i18n::tr("control-center.audio.choose-effects-profile"),
+                          .fontSize = Style::fontSizeCaption * scale,
+                          .controlHeight = buttonHeight,
+                          .horizontalPadding = Style::spaceSm * scale,
+                          .glyphSize = Style::fontSizeBody * scale,
+                          .notifyOnReselect = true,
+                          .enabled = false,
+                          .surfaceOpacity = panelCardOpacity(),
+                          .height = buttonHeight,
+                          .flexGrow = 1.0F,
+                      })
                   )
-              )
-          ),
-          ui::row(
-              {
-                  .out = &card.state.effectsProfileRow,
-                  .align = FlexAlign::Center,
-                  .gap = Style::spaceSm * scale,
-                  .visible = false,
-                  .participatesInLayout = false,
-              },
-              ui::label({
-                  .out = &card.state.effectsProfileLabel,
-                  .text = i18n::tr("control-center.audio.effects-profile") + ":",
-                  .fontSize = Style::fontSizeCaption * scale,
-                  .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
-                  .maxLines = 1,
-                  .ellipsize = TextEllipsize::End,
-                  .visible = !m_compact,
-                  .participatesInLayout = !m_compact,
-                  .configure = [](Label& label) { label.setTooltip(label.text()); },
-              }),
-              ui::select({
-                  .out = &card.state.effectsProfileSelect,
-                  .placeholder = i18n::tr("control-center.audio.choose-effects-profile"),
-                  .fontSize = Style::fontSizeCaption * scale,
-                  .controlHeight = buttonHeight,
-                  .horizontalPadding = Style::spaceSm * scale,
-                  .glyphSize = Style::fontSizeBody * scale,
-                  .notifyOnReselect = true,
-                  .enabled = false,
-                  .surfaceOpacity = panelCardOpacity(),
-                  .height = buttonHeight,
-                  .flexGrow = 1.0F,
-              })
-          )
-      );
+              );
   if (m_compact) {
     // Home dashboard: one TUI grid shared with ³display. Row 1 is `tag | meter | value | mute`, row 2 is
     // an empty tag column, the `[ device ]` chip and the device-menu button.
@@ -2111,39 +2139,36 @@ void AudioTab::doLayout(Renderer& renderer, float contentWidth, float bodyHeight
   const float scale = contentScale();
   if (!m_compact) {
     m_programCard->setPadding(
-        Style::spaceMd * scale, (contentWidth < 160.0F * scale ? Style::spaceXs : Style::spaceMd) * scale
+        Style::spaceMd * scale, (contentWidth < kNarrowPanelWidth * scale ? Style::spaceXs : Style::spaceMd) * scale
     );
   }
-  const bool stackedDevices = m_compact || contentWidth < 320.0F * scale;
+  const bool stackedDevices = m_compact || contentWidth < kStackedDevicesWidth * scale;
   const float buttonHeight = (m_compact ? kCompactRowHeight : Style::controlHeightSm) * scale;
   m_deviceColumn->setDirection(stackedDevices ? FlexDirection::Vertical : FlexDirection::Horizontal);
   const float cardWidth = stackedDevices ? contentWidth : std::max(0.0F, (contentWidth - m_deviceColumn->gap()) * 0.5F);
   for (auto* state : {&m_outputDeviceVolume, &m_inputDeviceVolume}) {
     state->card->setFlexGrow(stackedDevices ? 0.0F : 1.0F);
     const float innerWidth = std::max(1.0F, cardWidth - state->card->paddingLeft() - state->card->paddingRight());
-    const bool narrowHeader = !m_compact && cardWidth < 160.0F * scale;
+    const bool narrowHeader = !m_compact && cardWidth < kNarrowCardWidth * scale;
     state->deviceGlyph->setVisible(!m_compact && !narrowHeader);
     state->menuAnchor->setDirection(narrowHeader ? FlexDirection::Vertical : FlexDirection::Horizontal);
     state->menuAnchor->setAlign(narrowHeader ? FlexAlign::Stretch : FlexAlign::Center);
     state->titleColumn->setFlexGrow(narrowHeader ? 0.0F : 1.0F);
     const float titleWidth = m_compact ? std::max(1.0F, innerWidth - buttonHeight - state->menuAnchor->gap())
-        : narrowHeader                 ? innerWidth
-                                       : std::max(
-                                             1.0F,
-                                             innerWidth - Style::fontSizeTitle * scale - buttonHeight
-                                                 - 2.0F * state->menuAnchor->gap()
-                                         );
+        : narrowHeader
+        ? innerWidth
+        : std::max(1.0F, innerWidth - Style::fontSizeTitle * scale - buttonHeight - 2.0F * state->menuAnchor->gap());
     state->titleLabel->setMaxWidth(titleWidth);
     state->deviceLabel->setMaxWidth(titleWidth);
     const bool narrowValues = innerWidth < m_syncedPercentLabelMinWidth + buttonHeight + state->valueRow->gap();
     state->valueRow->setDirection(narrowValues ? FlexDirection::Vertical : FlexDirection::Horizontal);
     state->valueRow->setAlign(narrowValues ? FlexAlign::Stretch : FlexAlign::Center);
-    const bool stackedControls = m_compact ? innerWidth < 70.0F * scale
+    const bool stackedControls = m_compact ? innerWidth < kCompactSliderMinWidth * scale
                 + m_syncedPercentLabelMinWidth
                 + buttonHeight
                 + state->valueRow->gap()
                 + state->controlsRow->gap()
-                                           : cardWidth < 220.0F * scale;
+                                           : cardWidth < kStackedControlsWidth * scale;
     state->controlsRow->setDirection(stackedControls ? FlexDirection::Vertical : FlexDirection::Horizontal);
     state->controlsRow->setAlign(stackedControls ? FlexAlign::Stretch : FlexAlign::Center);
     state->slider->setFlexGrow(stackedControls ? 0.0F : 1.0F);
@@ -2151,7 +2176,7 @@ void AudioTab::doLayout(Renderer& renderer, float contentWidth, float bodyHeight
     state->effectsProfileRow->setDirection(FlexDirection::Vertical);
     state->effectsProfileRow->setAlign(FlexAlign::Stretch);
     state->effectsProfileSelect->setFlexGrow(0.0F);
-    state->effectsProfileSelect->setMinWidth(std::min(80.0F, innerWidth));
+    state->effectsProfileSelect->setMinWidth(std::min(kEffectsProfileMinWidth, innerWidth));
     state->effectsProfileLabel->setMaxWidth(innerWidth);
   }
 

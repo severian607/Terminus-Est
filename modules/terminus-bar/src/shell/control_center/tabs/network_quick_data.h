@@ -331,6 +331,7 @@ namespace netq {
   struct Probe {
     bool known = false;               // a probe has completed
     bool inFlight = false;
+    std::uint32_t generation = 0;     // bumped when the target changes; a reply from an older one is dropped
     std::optional<double> ms;         // nullopt after a completed probe = no reply
   };
 

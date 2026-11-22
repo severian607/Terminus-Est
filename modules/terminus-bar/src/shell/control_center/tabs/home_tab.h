@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -41,12 +42,16 @@ struct ShortcutPad {
   term_frame::ToggleRow row;
 };
 
-// Output of a shell command run on a worker thread. Shared so the completion callback outlives the tab.
+// Output of a shell command run on a worker thread, parsed once into its `key=value` lines. Shared so the completion
+// callback outlives the tab.
 struct ScriptJob {
   std::string out;
+  std::map<std::string, std::string, std::less<>> values; // first line wins for a repeated key
   bool loaded = false;
   bool running = false;
   std::chrono::steady_clock::time_point startedAt{};
+
+  void setOutput(std::string text);
 };
 
 // The outcome of an action that ran in a terminal, handed from the worker thread to the main loop.
@@ -93,9 +98,12 @@ private:
 
   // Sections.
   [[nodiscard]] std::unique_ptr<Flex> createHostBox(float scale);
+  [[nodiscard]] std::unique_ptr<InputArea> createAvatarPicker(float scale);
+  [[nodiscard]] std::unique_ptr<Flex> createHostIdentity(float scale);
   [[nodiscard]] std::unique_ptr<Flex> createUpkeepBox(float scale);
   [[nodiscard]] std::unique_ptr<Flex> createInboxBox(float scale);
   [[nodiscard]] std::unique_ptr<Flex> createTogglesBox(float scale);
+  void addShortcutRow(Flex& list, std::unique_ptr<Shortcut> shortcut, float scale);
   void addTimerRows(Flex& box, float scale);
   [[nodiscard]] int detailLines(const Label* label) const;
   [[nodiscard]] std::unique_ptr<Flex> createTodayBox(float scale);
@@ -103,6 +111,8 @@ private:
   [[nodiscard]] std::unique_ptr<Flex> createSystemBox(float scale);
   void syncHost();
   void syncUpkeep();
+  void syncUpkeepHousekeeping();
+  void layoutHostHeader(float inner, float rowHeight, float rowGap, float scale);
   void syncInbox();
   void syncToday();
   void updateTodayHeader();
@@ -197,8 +207,8 @@ private:
   Label* m_avatarHint = nullptr;
   // Set while the external file chooser runs; shared so its worker-thread callback never touches `this`.
   std::shared_ptr<std::atomic<bool>> m_avatarPickerBusy = std::make_shared<std::atomic<bool>>(false);
-  static constexpr std::size_t kHostLiveRows = 3;  // uptime, kernel, session
-  static constexpr std::size_t kHostInfoRows = 6;  // os, shell, wm, pkgs, gpu, display
+  static constexpr std::size_t kHostLiveRows = 3; // uptime, kernel, session
+  static constexpr std::size_t kHostInfoRows = 6; // os, shell, wm, pkgs, gpu, display
   std::array<term_frame::InfoRow, kHostLiveRows> m_hostLive{};
   std::array<term_frame::InfoRow, kHostInfoRows> m_hostInfoRows{};
   Flex* m_hostLiveBox = nullptr;
@@ -252,7 +262,7 @@ private:
   std::string m_squaresText; // the session squares, shown when there is no such event
 
   // 6 fleet: whether the machines and services this one depends on are up; polled at most once a minute.
-  static constexpr std::size_t kFleetRows = 4; // server, syncthing, radicale, tailscale
+  enum FleetRow : std::size_t { FleetServer, FleetSyncthing, FleetRadicale, FleetTailscale, kFleetRows };
   static constexpr std::array<const char*, kFleetRows> kFleetNames{"server", "syncthing", "radicale", "tailscale"};
   term_frame::BtopFrame* m_fleetFrame = nullptr;
   std::array<term_frame::ToggleRow, kFleetRows> m_fleetRows{};

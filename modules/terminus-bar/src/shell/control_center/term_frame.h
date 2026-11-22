@@ -3,18 +3,18 @@
 #include "ui/builders.h"
 #include "ui/controls/button.h"
 #include "ui/controls/flex.h"
+#include "ui/controls/grid_view.h"
 #include "ui/controls/label.h"
 #include "ui/controls/separator.h"
 #include "ui/controls/slider.h"
 #include "ui/palette.h"
 #include "ui/style.h"
-#include "ui/controls/grid_view.h"
 
 #include <algorithm>
-#include <functional>
 #include <array>
 #include <cmath>
 #include <format>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -37,6 +37,21 @@ namespace term_frame {
 
   // Border + padding a box adds on each side; callers subtract twice from the outer width.
   [[nodiscard]] inline float boxInset(float scale) { return Style::spaceSm * scale + Style::borderWidth; }
+
+  // Height a labelled box adds around its body: border and padding on both sides, the title row and the gap
+  // under it. Unscaled, like kSectionGap, the vertical gap between two boxes of a panel.
+  inline constexpr float kBoxChrome = 2.0F * (Style::spaceSm + Style::borderWidth) + 20.0F + Style::spaceXs;
+  inline constexpr float kSectionGap = Style::spaceSm;
+
+  // Shows or hides a node together with its place in the layout; true when that changed anything.
+  inline bool setShown(Node* node, bool shown) {
+    if (node == nullptr || (node->visible() == shown && node->participatesInLayout() == shown)) {
+      return false;
+    }
+    node->setVisible(shown);
+    node->setParticipatesInLayout(shown);
+    return true;
+  }
 
   // Width of `chars` monospace cells at `fontSize` (JetBrains Mono advances 0.6em).
   [[nodiscard]] inline float monoWidth(std::size_t chars, float fontSize) {
@@ -114,9 +129,8 @@ namespace term_frame {
   }
 
   // A frame whose first child is the title row; callers append content.
-  [[nodiscard]] inline std::unique_ptr<Flex> box(
-      std::string_view numeral, std::string_view title, float scale, Flex** out = nullptr, Label** chipOut = nullptr
-  ) {
+  [[nodiscard]] inline std::unique_ptr<Flex>
+  box(std::string_view numeral, std::string_view title, float scale, Flex** out = nullptr, Label** chipOut = nullptr) {
     auto container = frame(scale, Style::spaceSm * scale, out);
     container->addChild(titleRow(numeral, title, scale, chipOut));
     return container;
@@ -148,12 +162,11 @@ namespace term_frame {
                 .border = colorSpecFromRole(ColorRole::Outline, 0.3F),
                 .label = colorSpecFromRole(ColorRole::OnSurfaceVariant, 0.5F),
             },
-        .selected =
-            State{
-                .bg = colorSpecFromRole(ColorRole::Primary, 0.12F),
-                .border = colorSpecFromRole(ColorRole::Primary, 0.7F),
-                .label = colorSpecFromRole(ColorRole::Primary),
-            },
+        .selected = State{
+            .bg = colorSpecFromRole(ColorRole::Primary, 0.12F),
+            .border = colorSpecFromRole(ColorRole::Primary, 0.7F),
+            .label = colorSpecFromRole(ColorRole::Primary),
+        },
     };
   }
 
@@ -198,17 +211,16 @@ namespace term_frame {
         .radius = 0.0F,
         .onClick = std::move(spec.onClick),
         .onRightClick = std::move(spec.onRightClick),
-        .configure =
-            [](Button& control) {
-              control.setDirection(FlexDirection::Horizontal);
-              control.setAlign(FlexAlign::Center);
-              if (control.label() != nullptr) {
-                control.label()->setFontFamily(kFont);
-                control.label()->setMaxLines(1);
-                control.label()->setEllipsize(TextEllipsize::End);
-                control.label()->setFlexGrow(1.0F);
-              }
-            },
+        .configure = [](Button& control) {
+          control.setDirection(FlexDirection::Horizontal);
+          control.setAlign(FlexAlign::Center);
+          if (control.label() != nullptr) {
+            control.label()->setFontFamily(kFont);
+            control.label()->setMaxLines(1);
+            control.label()->setEllipsize(TextEllipsize::End);
+            control.label()->setFlexGrow(1.0F);
+          }
+        },
     });
     if (spec.marker != nullptr) {
       auto marker = ui::label({
@@ -324,9 +336,8 @@ namespace term_frame {
   }
 
   // Pins the key column and caps the value to the rest of `width`; the row is `rowHeight` tall.
-  inline void layoutKeyValueRowH(
-      KeyValueRow& kv, float width, float rowHeight, float scale, std::size_t keyChars = kKeyChars
-  ) {
+  inline void
+  layoutKeyValueRowH(KeyValueRow& kv, float width, float rowHeight, float scale, std::size_t keyChars = kKeyChars) {
     const float font = Style::fontSizeCaption * scale;
     const float keyWidth = monoWidth(keyChars, font);
     const float gap = Style::spaceSm * scale;
@@ -343,8 +354,8 @@ namespace term_frame {
   // Sizes a tag | meter | value [| trail] row to `width` x kRowHeight on explicit column widths and returns the
   // height. `trailWidth` 0 omits the trailing column from the arithmetic (the label may be null).
   inline float layoutMeterCells(
-      Flex& row, Label& tag, Slider& slider, Label& value, Label* trail, float width, float tagWidth,
-      float valueWidth, float trailWidth, float scale
+      Flex& row, Label& tag, Slider& slider, Label& value, Label* trail, float width, float tagWidth, float valueWidth,
+      float trailWidth, float scale
   ) {
     const float height = kRowHeight * scale;
     const float font = Style::fontSizeCaption * scale;
@@ -405,6 +416,28 @@ namespace term_frame {
 
   [[nodiscard]] inline std::string paletteHex(ColorRole role) { return colorHex(colorForRole(role)); }
 
+  // `text` with the characters Pango markup reserves escaped.
+  [[nodiscard]] inline std::string escapeMarkup(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (const char c : text) {
+      switch (c) {
+      case '&':
+        out += "&amp;";
+        break;
+      case '<':
+        out += "&lt;";
+        break;
+      case '>':
+        out += "&gt;";
+        break;
+      default:
+        out += c;
+      }
+    }
+    return out;
+  }
+
   // Padding a btop frame adds around its content: half the title above the top border plus the box inset on both
   // sides.
   [[nodiscard]] inline float btopChrome(float scale) {
@@ -459,8 +492,8 @@ namespace term_frame {
       if (m_info->visible() != show) {
         m_info->setVisible(show);
       }
-      if (show && m_info->text() != text) {
-        m_info->setText(std::string(text));
+      if (show) {
+        m_info->setText(text);
       }
     }
 
@@ -553,9 +586,8 @@ namespace term_frame {
     Label* m_info = nullptr;
   };
 
-  [[nodiscard]] inline std::unique_ptr<BtopFrame> btopBox(
-      std::string_view numeral, std::string_view title, float scale, BtopFrame** out = nullptr
-  ) {
+  [[nodiscard]] inline std::unique_ptr<BtopFrame>
+  btopBox(std::string_view numeral, std::string_view title, float scale, BtopFrame** out = nullptr) {
     auto frame = std::make_unique<BtopFrame>(numeral, title, scale);
     if (out != nullptr) {
       *out = frame.get();
@@ -575,6 +607,11 @@ namespace term_frame {
     bool warning = false;           // drawn in the warning role (reboot, shutdown)
   };
 
+  inline constexpr float kKeywordPaddingH = 3.0F;
+  inline constexpr float kKeywordRestAlpha = 0.6F;
+  inline constexpr float kActionKeyPaddingH = 1.5F;
+  inline constexpr float kActionKeyRestAlpha = 0.85F;
+
   inline void refreshKeyword(Keyword& keyword) {
     if (keyword.button == nullptr) {
       return;
@@ -587,7 +624,8 @@ namespace term_frame {
       markup = keyword.word;
     } else {
       markup = keyword.word.substr(0, keyword.hot);
-      markup += "<span foreground=\"" + paletteHex(keyword.warning ? ColorRole::Warning : ColorRole::Tertiary)
+      markup += "<span foreground=\""
+          + paletteHex(keyword.warning ? ColorRole::Warning : ColorRole::Tertiary)
           + "\" font_weight=\"bold\">";
       markup += keyword.word.substr(keyword.hot, 1);
       markup += "</span>";
@@ -597,15 +635,17 @@ namespace term_frame {
     keyword.button->setSelected(keyword.block);
   }
 
-  // `restAlpha` is how bright a keyword rests: 0.6 for the action rows, a step higher for the panels list, whose
-  // words sit next to the bright names of the other tiles.
-  [[nodiscard]] inline Button::ButtonPalette keywordPalette(float restAlpha = 0.6F, bool warning = false) {
+  // `restAlpha` is how bright a keyword rests; the action rows sit next to the bright names of the other tiles and
+  // rest a step higher than the inline keywords.
+  [[nodiscard]] inline Button::ButtonPalette keywordPalette(float restAlpha = kKeywordRestAlpha, bool warning = false) {
     using State = Button::ButtonStateColors;
     if (warning) {
       const State rest{
-          .bg = clearColorSpec(), .border = clearColorSpec(), .label = colorSpecFromRole(ColorRole::Warning, 0.8F)};
+          .bg = clearColorSpec(), .border = clearColorSpec(), .label = colorSpecFromRole(ColorRole::Warning, 0.8F)
+      };
       const State lit{
-          .bg = clearColorSpec(), .border = clearColorSpec(), .label = colorSpecFromRole(ColorRole::Warning)};
+          .bg = clearColorSpec(), .border = clearColorSpec(), .label = colorSpecFromRole(ColorRole::Warning)
+      };
       const State block{
           .bg = colorSpecFromRole(ColorRole::Warning),
           .border = colorSpecFromRole(ColorRole::Warning),
@@ -614,9 +654,11 @@ namespace term_frame {
       return {.borderWidth = 0.0F, .normal = rest, .hover = lit, .pressed = lit, .disabled = rest, .selected = block};
     }
     const State rest{
-        .bg = clearColorSpec(), .border = clearColorSpec(), .label = colorSpecFromRole(ColorRole::OnSurfaceVariant, restAlpha)};
-    const State lit{
-        .bg = clearColorSpec(), .border = clearColorSpec(), .label = colorSpecFromRole(ColorRole::Primary)};
+        .bg = clearColorSpec(),
+        .border = clearColorSpec(),
+        .label = colorSpecFromRole(ColorRole::OnSurfaceVariant, restAlpha)
+    };
+    const State lit{.bg = clearColorSpec(), .border = clearColorSpec(), .label = colorSpecFromRole(ColorRole::Primary)};
     const State block{
         .bg = colorSpecFromRole(ColorRole::Primary),
         .border = colorSpecFromRole(ColorRole::Primary),
@@ -627,7 +669,8 @@ namespace term_frame {
 
   [[nodiscard]] inline std::unique_ptr<Button> makeKeyword(
       Keyword& keyword, std::string word, std::size_t hot, float scale, std::function<void()> onClick,
-      std::function<void()> onLeave = nullptr, float paddingH = 3.0F, float restAlpha = 0.6F, bool warning = false
+      std::function<void()> onLeave = nullptr, float paddingH = kKeywordPaddingH, float restAlpha = kKeywordRestAlpha,
+      bool warning = false
   ) {
     keyword.warning = warning;
     keyword.activate = onClick;
@@ -647,14 +690,13 @@ namespace term_frame {
         .radius = 0.0F,
         .onClick = std::move(onClick),
         .onLeave = std::move(onLeave),
-        .configure =
-            [](Button& control) {
-              if (control.label() != nullptr) {
-                control.label()->setFontFamily(kFont);
-                control.label()->setUseMarkup(true);
-                control.label()->setMaxLines(1);
-              }
-            },
+        .configure = [](Button& control) {
+          if (control.label() != nullptr) {
+            control.label()->setFontFamily(kFont);
+            control.label()->setUseMarkup(true);
+            control.label()->setMaxLines(1);
+          }
+        },
     });
     refreshKeyword(keyword);
     return button;
@@ -719,7 +761,8 @@ namespace term_frame {
     const Color primary = colorForRole(ColorRole::Primary);
     const std::array<Color, 3> stops{
         primary, solid ? primary : colorForRole(ColorRole::Secondary),
-        solid ? primary : colorForRole(ColorRole::Tertiary)};
+        solid ? primary : colorForRole(ColorRole::Tertiary)
+    };
     const std::size_t filled = std::min(
         cells, static_cast<std::size_t>(std::lround(std::clamp(fraction, 0.0, 1.0) * static_cast<double>(cells)))
     );
@@ -730,7 +773,8 @@ namespace term_frame {
       const float t = position - static_cast<float>(from);
       const Color& a = stops[from];
       const Color& b = stops[from + 1];
-      out += "<span foreground=\"" + colorHex(rgba(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t))
+      out += "<span foreground=\""
+          + colorHex(rgba(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t))
           + "\">■</span>";
     }
     if (filled < cells) {
@@ -809,8 +853,8 @@ namespace term_frame {
   // widths differ from the estimate.
   inline void layoutDottedMeterRow(DottedMeterRow& row, float width, float scale) {
     const float font = kBtopFontSize * scale;
-    const float meterWidth = width - monoWidth(kMeterTagChars + kMeterValueChars, font)
-        - 2.0F * Style::spaceSm * scale - monoWidth(1, font);
+    const float meterWidth =
+        width - monoWidth(kMeterTagChars + kMeterValueChars, font) - 2.0F * Style::spaceSm * scale - monoWidth(1, font);
     row.meter.cells = dottedMeterCells(meterWidth, scale);
     refreshDottedMeter(row.meter);
   }
@@ -840,9 +884,9 @@ namespace term_frame {
   [[nodiscard]] inline Button::ButtonPalette toggleRowPalette() {
     using State = Button::ButtonStateColors;
     const State rest{
-        .bg = clearColorSpec(), .border = clearColorSpec(), .label = colorSpecFromRole(ColorRole::OnSurface)};
-    const State lit{
-        .bg = clearColorSpec(), .border = clearColorSpec(), .label = colorSpecFromRole(ColorRole::Primary)};
+        .bg = clearColorSpec(), .border = clearColorSpec(), .label = colorSpecFromRole(ColorRole::OnSurface)
+    };
+    const State lit{.bg = clearColorSpec(), .border = clearColorSpec(), .label = colorSpecFromRole(ColorRole::Primary)};
     const State off{
         .bg = clearColorSpec(),
         .border = clearColorSpec(),
@@ -870,17 +914,16 @@ namespace term_frame {
         .radius = 0.0F,
         .onClick = std::move(onClick),
         .onRightClick = std::move(onRightClick),
-        .configure =
-            [](Button& control) {
-              control.setDirection(FlexDirection::Horizontal);
-              control.setAlign(FlexAlign::Center);
-              if (control.label() != nullptr) {
-                control.label()->setFontFamily(kFont);
-                control.label()->setMaxLines(1);
-                control.label()->setEllipsize(TextEllipsize::End);
-                control.label()->setFlexGrow(1.0F);
-              }
-            },
+        .configure = [](Button& control) {
+          control.setDirection(FlexDirection::Horizontal);
+          control.setAlign(FlexAlign::Center);
+          if (control.label() != nullptr) {
+            control.label()->setFontFamily(kFont);
+            control.label()->setMaxLines(1);
+            control.label()->setEllipsize(TextEllipsize::End);
+            control.label()->setFlexGrow(1.0F);
+          }
+        },
     });
     button->addChild(
         ui::row(
@@ -907,19 +950,16 @@ namespace term_frame {
   }
 
   // `detail` is a short dim note after the state ("· on at 21:00"); empty hides it.
-  inline void setToggleRow(ToggleRow& row, bool enabled, bool lit, std::string_view text, std::string_view detail = {}) {
+  inline void
+  setToggleRow(ToggleRow& row, bool enabled, bool lit, std::string_view text, std::string_view detail = {}) {
     if (row.button == nullptr || row.state == nullptr) {
       return;
     }
     row.button->setEnabled(enabled);
-    if (row.state->text() != text) {
-      row.state->setText(std::string(text));
-    }
+    row.state->setText(text);
     if (row.detail != nullptr) {
       const bool show = !detail.empty();
-      if (row.detail->text() != detail) {
-        row.detail->setText(std::string(detail));
-      }
+      row.detail->setText(detail);
       if (row.detail->visible() != show) {
         row.detail->setVisible(show);
         row.detail->setParticipatesInLayout(show);
@@ -961,9 +1001,7 @@ namespace term_frame {
     if (label == nullptr) {
       return;
     }
-    if (label->text() != text) {
-      label->setText(std::string(text));
-    }
+    label->setText(text);
     label->setColor(toneColor(tone));
   }
 
@@ -980,7 +1018,10 @@ namespace term_frame {
       std::function<void()> onLeave = nullptr, bool warning = false
   ) {
     auto row = ui::row({.out = &out.row, .align = FlexAlign::Center, .gap = Style::spaceSm * scale});
-    row->addChild(makeKeyword(out.key, std::move(word), hot, scale, std::move(onClick), std::move(onLeave), 1.5F, 0.85F, warning));
+    row->addChild(makeKeyword(
+        out.key, std::move(word), hot, scale, std::move(onClick), std::move(onLeave), kActionKeyPaddingH,
+        kActionKeyRestAlpha, warning
+    ));
     row->addChild(
         ui::label({
             .out = &out.value,

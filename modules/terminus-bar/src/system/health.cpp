@@ -1,9 +1,13 @@
 #include "system/health.h"
 
+#include <charconv>
 #include <chrono>
 #include <fstream>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <unordered_map>
+#include <utility>
 
 namespace health {
 
@@ -46,25 +50,36 @@ namespace health {
       return map;
     }
 
-    // The number after `field` (e.g. "avg10=") on the "some" or "full" line of /proc/pressure/memory.
-    std::optional<double> pressure(std::string_view line, std::string_view field) {
+    struct MemoryPressure {
+      double someAvg60 = 0.0;
+      double fullAvg10 = 0.0;
+    };
+
+    // The number after `field` (e.g. "avg10=") in a PSI line, or 0 when absent or malformed.
+    double psiField(std::string_view text, std::string_view field) {
+      const auto at = text.find(field);
+      if (at == std::string_view::npos) {
+        return 0.0;
+      }
+      const std::string_view number = text.substr(at + field.size());
+      double value = 0.0;
+      const auto result = std::from_chars(number.data(), number.data() + number.size(), value);
+      return result.ec == std::errc{} ? value : 0.0;
+    }
+
+    // One read of /proc/pressure/memory; both averages are 0 when PSI is unavailable.
+    MemoryPressure readMemoryPressure() {
+      MemoryPressure pressure;
       std::ifstream in("/proc/pressure/memory");
       std::string text;
       while (std::getline(in, text)) {
-        if (text.rfind(line, 0) != 0) {
-          continue;
-        }
-        const auto at = text.find(field);
-        if (at == std::string::npos) {
-          return std::nullopt;
-        }
-        try {
-          return std::stod(text.substr(at + field.size()));
-        } catch (...) {
-          return std::nullopt;
+        if (text.rfind("some", 0) == 0) {
+          pressure.someAvg60 = psiField(text, "avg60=");
+        } else if (text.rfind("full", 0) == 0) {
+          pressure.fullAvg10 = psiField(text, "avg10=");
         }
       }
-      return std::nullopt;
+      return pressure;
     }
 
   } // namespace
@@ -95,12 +110,11 @@ namespace health {
 
   Level memory(double swapPercent, double availablePercent) {
     State& s = state();
-    const auto full = pressure("full", "avg10=");
-    const auto some = pressure("some", "avg60=");
-    if (s.memStall.update(true, full.value_or(0.0), 5.0, 2.0) || s.memLow.update(false, availablePercent, 5.0, 8.0)) {
+    const MemoryPressure psi = readMemoryPressure();
+    if (s.memStall.update(true, psi.fullAvg10, 5.0, 2.0) || s.memLow.update(false, availablePercent, 5.0, 8.0)) {
       return Level::Error;
     }
-    const bool pressureOn = s.memPressure.update(true, some.value_or(0.0), 10.0, 5.0);
+    const bool pressureOn = s.memPressure.update(true, psi.someAvg60, 10.0, 5.0);
     // Swap alone is not a signal (half full with RAM to spare is routine): it only counts with RAM running short.
     const bool swapOn = s.memSwap.active ? (swapPercent >= 45.0 && availablePercent < 20.0)
                                          : (swapPercent >= 50.0 && availablePercent < 15.0);

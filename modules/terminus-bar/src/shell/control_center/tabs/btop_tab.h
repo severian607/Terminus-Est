@@ -44,11 +44,15 @@ private:
 
   [[nodiscard]] PtyDrainResult drainPty();
   [[nodiscard]] bool drainAndRefresh();
+  void drainAndArm();
+  void cancelResponseDrain();
+  void reportFocus(bool focused);
   void armResponseDrain();
   void scheduleFallbackDrain();
   void resizeTerminal(int rows, int cols);
   void writePty(const char* data, std::size_t size);
   void writeMarkup();
+  void appendRowMarkup(std::string& markup, int row, bool drawCursor) const;
   void setStatus(std::string message);
   void sendPointerMotion(float localX, float localY, std::uint32_t modifiers = 0);
   void sendPointerButton(const InputArea::PointerData& data);

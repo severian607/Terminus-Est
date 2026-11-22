@@ -73,6 +73,8 @@ function o.apply_colors()
   })
 end
 
+local solid = "1 1"
+local solid_override = "1 override 1 override" -- absolute: not multiplied by the global opacity
 local preserved_opacity = tostring(appearance.active_opacity) .. " " .. tostring(appearance.inactive_opacity)
 local default_opacity = tostring(appearance.default_active_opacity) .. " " .. tostring(appearance.default_inactive_opacity)
 
@@ -154,22 +156,22 @@ o.apply_colors()
 -- # Browser and terminal native colors stay application-owned; these only affect composition.
 o.window({ tag = "chromium-based-browser" }, { opacity = preserved_opacity })
 o.window({ tag = "firefox-based-browser" }, { opacity = preserved_opacity })
-o.window("(chrome-youtube\\.com__-Default|chrome-app\\.zoom\\.us__wc_home-Default)", { opacity = preserved_opacity })
-o.window({ tag = "pip" }, { opacity = "1 1" })
-o.window("qemu", { opacity = "1 1" })
-o.window("com.libretro.RetroArch", { opacity = "1 1" })
-o.window("steam.*", { opacity = "1 1" })
-o.window("^(zoom|vlc|mpv|org.kde.kdenlive|com.obsproject.Studio|com.github.PintaProject.Pinta|imv|org.gnome.NautilusPreviewer)$", { opacity = "1 1" })
+o.window(o.classes.web_calls, { opacity = preserved_opacity })
+o.window({ tag = "pip" }, { opacity = solid })
+o.window("qemu", { opacity = solid })
+o.window("com.libretro.RetroArch", { opacity = solid })
+o.window("steam.*", { opacity = solid })
+o.window(o.classes.opaque_media, { opacity = solid })
 -- # Obsidian themes own background alpha; keep text and note planes fully solid.
-o.window({ class = "^md\\.obsidian\\.Obsidian$" }, { opacity = "1 override 1 override" })
+o.window({ class = o.classes.obsidian }, { opacity = solid_override })
 -- # Zed's theme owns its backgrounds (solid hex); compositor opacity would let the wallpaper tint the editor.
-o.window({ class = "^dev\\.zed\\.Zed$" }, { opacity = "1 override 1 override" })
+o.window({ class = o.classes.zed }, { opacity = solid_override })
 -- # Strata's generated skin owns its background alpha; keep the window itself at 1.
-o.window({ class = "^io\\.github\\.lgse\\.Strata$" }, { opacity = "1 override 1 override" })
+o.window({ class = o.classes.strata }, { opacity = solid_override })
 o.window({ tag = "default-opacity" }, { opacity = default_opacity })
 o.window({ tag = "terminal" }, { tag = "-default-opacity", opacity = preserved_opacity })
 -- # Rnote paints its own page colours; the default-opacity tag would let the wallpaper tint the canvas. Must come after the tag rules.
-o.window({ class = "^com\\.github\\.flxzt\\.rnote$" }, { opacity = "1 override 1 override" })
+o.window({ class = "^com\\.github\\.flxzt\\.rnote$" }, { opacity = solid_override })
 
 -- # Floating frames follow Super+T; tiled windows are rounded, fullscreen stays sharp.
 o.window({ float = true }, { border_size = 1, rounding = 12 })
@@ -199,7 +201,7 @@ hl.layer_rule({
 
 -- # hl.plugin.load declares desired plugins, not an immediate load operation.
 -- # Register on every reload: Hyprland deduplicates paths and unloads omitted ones.
-do
+local function register_menu_blur_plugin()
   local module = home .. "/Projects/Terminus-Est/modules/terminus-bar-menu-blur"
   local plugin_path = module .. "/build/terminus-bar-menu-blur.so"
   local loaded = false
@@ -223,3 +225,5 @@ do
     hl.notification.create({ text = warning, timeout = 10000, icon = "warning" })
   end
 end
+
+register_menu_blur_plugin()

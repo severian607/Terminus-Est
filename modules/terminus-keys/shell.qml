@@ -66,8 +66,14 @@ ShellRoot {
         }
     }
 
+    // Modifier bits: a layer is the OR of the modifiers it holds besides SUPER (always on).
+    readonly property int shiftBit: 1
+    readonly property int ctrlBit: 4
+    readonly property int altBit: 8
+    readonly property int superBit: 64      // a cap's `mod` only; never part of a layer
+
     function layerOf(b) {
-        return (b.mods.indexOf("SHIFT") >= 0 ? 1 : 0) | (b.mods.indexOf("CTRL") >= 0 ? 4 : 0) | (b.mods.indexOf("ALT") >= 0 ? 8 : 0)
+        return (b.mods.indexOf("SHIFT") >= 0 ? root.shiftBit : 0) | (b.mods.indexOf("CTRL") >= 0 ? root.ctrlBit : 0) | (b.mods.indexOf("ALT") >= 0 ? root.altBit : 0)
     }
 
     // key id -> [{layer, desc}] sorted by layer
@@ -84,19 +90,19 @@ ShellRoot {
     }
 
     // ===== layer =====
-    property int clicked: 0                // modifiers toggled with the mouse (1 shift, 4 ctrl, 8 alt)
+    property int clicked: 0                // modifiers toggled with the mouse (shiftBit | ctrlBit | altBit)
     property int held: 0                   // modifiers held on the real keyboard
     readonly property int layer: clicked | held
 
     // The bar's shortcut badges show only while ALT is down (held or toggled on screen).
-    readonly property bool altDown: (layer & 8) !== 0
+    readonly property bool altDown: (layer & altBit) !== 0
     onAltDownChanged: Quickshell.execDetached(["terminus-bar", "msg", "bar-hints", altDown ? "on" : "off"])
 
     function layerName(l) {
         let s = "SUPER"
-        if (l & 1) s += " + SHIFT"
-        if (l & 4) s += " + CTRL"
-        if (l & 8) s += " + ALT"
+        if (l & root.shiftBit) s += " + SHIFT"
+        if (l & root.ctrlBit) s += " + CTRL"
+        if (l & root.altBit) s += " + ALT"
         return s
     }
 
@@ -131,11 +137,11 @@ ShellRoot {
         [k("CAPSLOCK", "CAPS", 1.75, 66), k("A", "A", 1, 38), k("S", "S", 1, 39), k("D", "D", 1, 40), k("F", "F", 1, 41), k("G", "G", 1, 42),
          k("H", "H", 1, 43), k("J", "J", 1, 44), k("K", "K", 1, 45), k("L", "L", 1, 46), k("SEMICOLON", ";", 1, 47),
          k("APOSTROPHE", "'", 1, 48), k("RETURN", "ENTER", 2.25, 36)],
-        [k("SHIFT", "SHIFT", 2.25, 50, 1), k("Z", "Z", 1, 52), k("X", "X", 1, 53), k("C", "C", 1, 54), k("V", "V", 1, 55), k("B", "B", 1, 56),
+        [k("SHIFT", "SHIFT", 2.25, 50, root.shiftBit), k("Z", "Z", 1, 52), k("X", "X", 1, 53), k("C", "C", 1, 54), k("V", "V", 1, 55), k("B", "B", 1, 56),
          k("N", "N", 1, 57), k("M", "M", 1, 58), k("COMMA", ",", 1, 59), k("PERIOD", ".", 1, 60), k("SLASH", "/", 1, 61),
-         k("SHIFT", "SHIFT", 2.75, 62, 1)],
-        [k("CTRL", "CTRL", 1.25, 37, 4), k("SUPER", "SUPER", 1.25, 133, 64), k("ALT", "ALT", 1.25, 64, 8), k("SPACE", "SPACE", 6.25, 65),
-         k("ALT", "ALT", 1.25, 108, 8), k("FN", "FN", 1.25, 0), k("MENU", "MENU", 1.25, 135), k("CTRL", "CTRL", 1.25, 105, 4)]
+         k("SHIFT", "SHIFT", 2.75, 62, root.shiftBit)],
+        [k("CTRL", "CTRL", 1.25, 37, root.ctrlBit), k("SUPER", "SUPER", 1.25, 133, root.superBit), k("ALT", "ALT", 1.25, 64, root.altBit), k("SPACE", "SPACE", 6.25, 65),
+         k("ALT", "ALT", 1.25, 108, root.altBit), k("FN", "FN", 1.25, 0), k("MENU", "MENU", 1.25, 135), k("CTRL", "CTRL", 1.25, 105, root.ctrlBit)]
     ]
 
     readonly property real cx: 15.75       // the pointer / arrows cluster
@@ -162,6 +168,10 @@ ShellRoot {
     }
     readonly property real gridW: 18.75
     readonly property real gridH: 6.5
+
+    // Panel metrics, px: the margin inside the border, and the gap between its parts.
+    readonly property int panelMargin: 28
+    readonly property int panelGap: 20
 
     // bindings whose key has no cap on the board
     readonly property var unplaced: {
@@ -191,9 +201,9 @@ ShellRoot {
     }
 
     function modOf(key) {
-        if (key === Qt.Key_Shift) return 1
-        if (key === Qt.Key_Control) return 4
-        if (key === Qt.Key_Alt || key === Qt.Key_AltGr) return 8
+        if (key === Qt.Key_Shift) return root.shiftBit
+        if (key === Qt.Key_Control) return root.ctrlBit
+        if (key === Qt.Key_Alt || key === Qt.Key_AltGr) return root.altBit
         return 0
     }
 
@@ -267,8 +277,8 @@ ShellRoot {
                 id: panel
 
                 anchors.centerIn: parent
-                width: root.gridW * win.u + 2 * 28
-                height: header.height + board.height + readout.height + 4 * 20 + 28
+                width: root.gridW * win.u + 2 * root.panelMargin
+                height: header.height + board.height + readout.height + 4 * root.panelGap + root.panelMargin
                 color: root.bg
                 border.width: 1
                 border.color: root.accentDim
@@ -282,9 +292,9 @@ ShellRoot {
                 Item {
                     id: header
 
-                    x: 28
-                    y: 20
-                    width: parent.width - 56
+                    x: root.panelMargin
+                    y: root.panelGap
+                    width: parent.width - 2 * root.panelMargin
                     height: 34
 
                     Text {
@@ -312,7 +322,7 @@ ShellRoot {
                         spacing: 8
 
                         Repeater {
-                            model: [{ name: "SHIFT", bit: 1 }, { name: "CTRL", bit: 4 }, { name: "ALT", bit: 8 }]
+                            model: [{ name: "SHIFT", bit: root.shiftBit }, { name: "CTRL", bit: root.ctrlBit }, { name: "ALT", bit: root.altBit }]
 
                             Rectangle {
                                 required property var modelData
@@ -345,8 +355,8 @@ ShellRoot {
                 Item {
                     id: board
 
-                    x: 28
-                    y: header.y + header.height + 20
+                    x: root.panelMargin
+                    y: header.y + header.height + root.panelGap
                     width: root.gridW * win.u
                     height: root.gridH * win.u
 
@@ -359,7 +369,7 @@ ShellRoot {
                             required property var modelData
                             readonly property string id: modelData.id
                             readonly property bool isMod: modelData.mod !== 0
-                            readonly property bool isSuper: modelData.mod === 64
+                            readonly property bool isSuper: modelData.id === "SUPER"
                             readonly property string desc: isMod ? "" : root.descOn(id, root.layer)
                             readonly property bool lit: desc !== ""
                             readonly property bool elsewhere: !isMod && !lit && root.byKey[id] !== undefined
@@ -432,9 +442,9 @@ ShellRoot {
                 Item {
                     id: readout
 
-                    x: 28
-                    y: board.y + board.height + 20
-                    width: parent.width - 56
+                    x: root.panelMargin
+                    y: board.y + board.height + root.panelGap
+                    width: parent.width - 2 * root.panelMargin
                     height: 5 * 20 + 8
 
                     Rectangle {

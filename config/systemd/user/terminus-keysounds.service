@@ -1,3 +1,4 @@
+# Preloaded picker panel: bin/terminus-keysounds only activates this D-Bus service, so the key press starts no Python or GTK.
 [Unit]
 Description=Standalone keyboard sound theme picker
 After=graphical-session.target

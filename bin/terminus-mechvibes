@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # terminus:summary=Mechvibes keyboard/mouse sound packs behind the SUPER+B picker
-"""Mechvibes sound packs: terminus-mechvibes list [--json] | set ID | toggle ID | add SOURCE | install LINK | remove ID | mood | volume up|down | on | off | status
+"""Mechvibes sound packs: terminus-mechvibes list [--json] | set ID | toggle ID | add SOURCE | install LINK \
+| remove ID | mood | volume up|down | on | off | status
 
 Mechvibes runs headless (hidden to the tray); this command edits its config and restarts it.
   set ID      use a keyboard or mouse pack (ids look like keyboard/eg-oreo) and start Mechvibes
@@ -19,18 +20,13 @@ player is not used because it always starts paused and can only be started from 
 The picker is terminus-keysounds (SUPER+B).
 """
 
+# Volume keys and the mood toggle run this per key press: the download/zip modules are imported where used.
 import json
 import os
 import re
-import shutil
-import socket
 import subprocess
 import sys
-import tempfile
 import time
-import urllib.parse
-import urllib.request
-import zipfile
 from pathlib import Path
 
 APP = Path.home() / ".local/opt/mechvibes/squashfs-root/usr/bin/mechvibes"
@@ -41,6 +37,7 @@ PACKS = DATA.parent / "soundpacks"
 API = "https://mechvibes.com/api/sound-packs"
 LIBRARY_CACHE = Path.home() / ".cache/terminus-est/mechvibes-library.json"
 LIBRARY_SIZE, LIBRARY_MAX_AGE = 60, 6 * 3600  # most-downloaded packs shown in the picker, refreshed every 6 h
+STOP_POLLS, START_POLLS, POLL_SECONDS = 40, 100, 0.1  # wait for Mechvibes to exit / to write its pack cache
 PACK_ID = re.compile(r"mv-[0-9a-f]{32}")
 DEVICES = {"keyboard": "Keyboard", "mouse": "Mouse"}
 EMOJI = {"keyboard": "⌨️", "mouse": "🖱️"}
@@ -70,11 +67,12 @@ def running():
 
 
 def stop():
-    subprocess.run(["pkill", "-x", "mechvibes"], check=False)
-    for _ in range(40):
+    if subprocess.run(["pkill", "-x", "mechvibes"], check=False).returncode == 1:  # 1: nothing matched
+        return
+    for _ in range(STOP_POLLS):
         if not running():
             return
-        time.sleep(0.1)
+        time.sleep(POLL_SECONDS)
     subprocess.run(["pkill", "-9", "-x", "mechvibes"], check=False)
 
 
@@ -86,8 +84,12 @@ def start():
     subprocess.run(["terminus-funmode", "off"], check=False)  # two engines would double every key
     env = dict(os.environ, LD_LIBRARY_PATH=f"{LIB}:{os.environ.get('LD_LIBRARY_PATH', '')}".rstrip(":"))
     subprocess.Popen(
-        ["uwsm-app", "--", str(APP)], env=env, start_new_session=True,
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ["uwsm-app", "--", str(APP)],
+        env=env,
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
 
@@ -97,27 +99,27 @@ def load():
 
 def edit(change):
     """Stop Mechvibes (it rewrites its config on exit), apply change(config), start it again."""
-    was = running()
     stop()
     config = load()
     change(config)
     config["start_hidden"] = True
     config["ambiance_active_sounds"] = {}  # mood is played by this command, never by Mechvibes (it would double)
     CONFIG.write_text(json.dumps(config, indent=2))
-    return was
 
 
 def packs():
     if not CACHE.exists():  # removed after an install: Mechvibes rebuilds it when it starts
         start()
-        for _ in range(100):
+        for _ in range(START_POLLS):
             if CACHE.exists():
                 break
-            time.sleep(0.1)
+            time.sleep(POLL_SECONDS)
     try:
         cache = json.loads(CACHE.read_text())["soundpacks"]
     except (OSError, ValueError, KeyError):
-        raise SystemExit("terminus-mechvibes: no pack list yet; start Mechvibes once so it can scan its packs")
+        raise SystemExit(
+            "terminus-mechvibes: no pack list yet; start Mechvibes once so it can scan its packs"
+        ) from None
     return {i: p for i, p in cache.items() if p.get("is_valid_v2") or p.get("validation_status") == "valid"}
 
 
@@ -127,9 +129,19 @@ def device(pack_id):
 
 def row(name, label, emoji, category, description, source, active, tags=()):
     return {
-        "name": name, "label": label, "emoji": emoji, "category": category, "tags": [*tags],
-        "description": description, "source": source, "license": "Mechvibes", "order": 0, "flags": [],
-        "active": bool(active), "position": 1 if active else None, "shadowed": False,
+        "name": name,
+        "label": label,
+        "emoji": emoji,
+        "category": category,
+        "tags": [*tags],
+        "description": description,
+        "source": source,
+        "license": "Mechvibes",
+        "order": 0,
+        "flags": [],
+        "active": bool(active),
+        "position": 1 if active else None,
+        "shadowed": False,
     }
 
 
@@ -157,9 +169,14 @@ def mood_active():
     """Sounds whose player unit is running right now."""
     out = subprocess.run(
         ["systemctl", "--user", "list-units", "--state=active", "--plain", "--no-legend", "terminus-mood-*"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     ).stdout
-    return {line.split()[0].removeprefix("terminus-mood-").removesuffix(".service") for line in out.splitlines() if line.strip()}
+    return {
+        line.split()[0].removeprefix("terminus-mood-").removesuffix(".service")
+        for line in out.splitlines()
+        if line.strip()
+    }
 
 
 def mood_volume():
@@ -167,13 +184,15 @@ def mood_volume():
 
 
 def mood_ipc(sound, volume):
+    import socket
+
     with socket.socket(socket.AF_UNIX) as sock:
         sock.settimeout(1)
         try:
             sock.connect(str(RUNTIME / f"{mood_unit(sound)}.sock"))
             sock.sendall(json.dumps({"command": ["set_property", "volume", volume]}).encode() + b"\n")
         except OSError:
-            pass
+            pass  # best effort: a unit that just exited has no socket, and the next sync starts it afresh
 
 
 def mood_sync():
@@ -186,12 +205,29 @@ def mood_sync():
         subprocess.run(["systemctl", "--user", "stop", mood_unit(sound)], check=False, stderr=subprocess.DEVNULL)
     for sound in want - have:
         if not (MOOD_DIR / f"{sound}.mp3").is_file():
-            raise SystemExit(f"terminus-mechvibes: {MOOD_DIR / (sound + '.mp3')} is missing (copy assets/sounds from the Mechvibes repo)")
-        subprocess.run([
-            "systemd-run", "--user", f"--unit={mood_unit(sound)}", "--collect", "--quiet", "--",
-            "mpv", "--no-video", "--no-terminal", "--really-quiet", "--loop-file=inf", f"--volume={volume}",
-            f"--input-ipc-server={RUNTIME / (mood_unit(sound) + '.sock')}", str(MOOD_DIR / f"{sound}.mp3"),
-        ], check=True)
+            raise SystemExit(
+                f"terminus-mechvibes: {MOOD_DIR / (sound + '.mp3')} is missing "
+                "(copy assets/sounds from the Mechvibes repo)"
+            )
+        subprocess.run(
+            [
+                "systemd-run",
+                "--user",
+                f"--unit={mood_unit(sound)}",
+                "--collect",
+                "--quiet",
+                "--",
+                "mpv",
+                "--no-video",
+                "--no-terminal",
+                "--really-quiet",
+                "--loop-file=inf",
+                f"--volume={volume}",
+                f"--input-ipc-server={RUNTIME / (mood_unit(sound) + '.sock')}",
+                str(MOOD_DIR / f"{sound}.mp3"),
+            ],
+            check=True,
+        )
     for sound in want & have:
         mood_ipc(sound, volume)
 
@@ -224,6 +260,8 @@ def mood_state_text():
 
 
 def fetch(url, timeout=20):
+    import urllib.request
+
     request = urllib.request.Request(url, headers={"User-Agent": "terminus-mechvibes"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read()
@@ -252,6 +290,8 @@ def installed_ids():
 
 def resolve(source):
     """What to install: ('zip', path) for a local zip, ('dir', path) for a pack folder, or ('id', mv-id) to download."""
+    import urllib.parse
+
     path = Path(source).expanduser()
     if path.is_dir():
         return "dir", path
@@ -265,45 +305,60 @@ def resolve(source):
                 return "id", match.group(0)
             raise SystemExit(f"terminus-mechvibes: no pack id found on {source}")
         return "url", source
-    raise SystemExit(f"terminus-mechvibes: cannot tell what {source!r} is (a mechvibes:// link, pack page, zip URL, zip or folder)")
+    raise SystemExit(
+        f"terminus-mechvibes: cannot tell what {source!r} is (a mechvibes:// link, pack page, zip URL, zip or folder)"
+    )
+
+
+def extract_archive(kind, what, tmp):
+    """Unpack a pack zip (local, or downloaded for kind id/url) into tmp; returns the extraction root."""
+    import zipfile
+
+    if kind == "id":
+        archive = tmp / "pack.zip"
+        archive.write_bytes(fetch(f"{API}/{what}/download", timeout=60))
+    elif kind == "url":
+        archive = tmp / "pack.zip"
+        archive.write_bytes(fetch(what, timeout=60))
+    else:
+        archive = what
+    root = tmp / "pack"
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            for name in bundle.namelist():
+                if name.startswith("/") or ".." in Path(name).parts:
+                    raise SystemExit(f"terminus-mechvibes: unsafe path in zip: {name}")
+            bundle.extractall(root)
+    except zipfile.BadZipFile:
+        raise SystemExit("terminus-mechvibes: that is not a zip file") from None
+    return root
+
+
+def read_pack_meta(root):
+    """The shallowest config.json under root: (its folder, its parsed content)."""
+    configs = sorted(root.rglob("config.json"), key=lambda c: len(c.parts))
+    if not configs:
+        raise SystemExit("terminus-mechvibes: no config.json in the pack (a sound pack needs one at its top level)")
+    try:
+        meta = json.loads(configs[0].read_text())
+    except ValueError:
+        raise SystemExit("terminus-mechvibes: the pack's config.json is not valid JSON") from None
+    if not meta.get("name"):
+        raise SystemExit("terminus-mechvibes: the pack's config.json has no name")
+    return configs[0].parent, meta
 
 
 def install_pack(source):
     """Install a sound pack (library link or id, pack page, zip URL, local zip or folder); returns its picker id."""
+    import shutil
+    import tempfile
+
     kind, what = resolve(source)
     with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        if kind == "dir":
-            root, wanted = what, None
-        else:
-            if kind == "id":
-                archive, wanted = tmp / "pack.zip", what
-                archive.write_bytes(fetch(f"{API}/{what}/download", timeout=60))
-            elif kind == "url":
-                archive, wanted = tmp / "pack.zip", None
-                archive.write_bytes(fetch(what, timeout=60))
-            else:
-                archive, wanted = what, None
-            root = tmp / "pack"
-            try:
-                with zipfile.ZipFile(archive) as bundle:
-                    for name in bundle.namelist():
-                        if name.startswith("/") or ".." in Path(name).parts:
-                            raise SystemExit(f"terminus-mechvibes: unsafe path in zip: {name}")
-                    bundle.extractall(root)
-            except zipfile.BadZipFile:
-                raise SystemExit("terminus-mechvibes: that is not a zip file")
-        configs = sorted(root.rglob("config.json"), key=lambda c: len(c.parts))
-        if not configs:
-            raise SystemExit("terminus-mechvibes: no config.json in the pack (a sound pack needs one at its top level)")
-        source_dir = configs[0].parent
-        try:
-            meta = json.loads(configs[0].read_text())
-        except ValueError:
-            raise SystemExit("terminus-mechvibes: the pack's config.json is not valid JSON")
-        if not meta.get("name"):
-            raise SystemExit("terminus-mechvibes: the pack's config.json has no name")
+        root = what if kind == "dir" else extract_archive(kind, what, Path(tmp))
+        source_dir, meta = read_pack_meta(root)
         device_kind = "mouse" if str(meta.get("soundpack_type", "keyboard")).lower() == "mouse" else "keyboard"
+        wanted = what if kind == "id" else None
         slug = wanted or meta.get("id") or re.sub(r"[^a-z0-9]+", "-", meta["name"].lower()).strip("-") or "pack"
         slug = re.sub(r"[^A-Za-z0-9._-]", "-", Path(str(slug)).name)
         dest = PACKS / device_kind / slug
@@ -317,6 +372,8 @@ def install_pack(source):
 
 def remove_pack(pack_id):
     """Delete an installed sound pack; a device whose pack it was falls back to a bundled one."""
+    import shutil
+
     kind = device(pack_id)
     folder = PACKS / pack_id
     if kind not in DEVICES or not folder.is_dir() or folder.parent.parent != PACKS:
@@ -333,42 +390,85 @@ def remove_pack(pack_id):
     start()
 
 
-def list_packs():
-    config, on = load(), running()
+def installed_rows(config):
     rows = []
+    on = running()
     for pack_id, p in packs().items():
         kind = device(pack_id)
         if kind not in DEVICES:
             continue
-        active = on and config.get(f"{kind}_soundpack") == pack_id and config.get("enable_sound", True) \
+        active = (
+            on
+            and config.get(f"{kind}_soundpack") == pack_id
+            and config.get("enable_sound", True)
             and config.get(f"enable_{kind}_sound", True)
-        rows.append(row(
-            pack_id, p["name"], EMOJI[kind], DEVICES[kind],
-            p.get("description") or f"{DEVICES[kind]} sound pack by {p.get('author') or 'unknown'}",
-            p.get("author") or "custom", active, [p.get("author") or "", *p.get("tags", [])],
-        ))
-    rows.sort(key=lambda r: (r["category"], r["label"].lower()))
+        )
+        rows.append(
+            row(
+                pack_id,
+                p["name"],
+                EMOJI[kind],
+                DEVICES[kind],
+                p.get("description") or f"{DEVICES[kind]} sound pack by {p.get('author') or 'unknown'}",
+                p.get("author") or "custom",
+                active,
+                [p.get("author") or "", *p.get("tags", [])],
+            )
+        )
+    return sorted(rows, key=lambda r: (r["category"], r["label"].lower()))
+
+
+def library_rows():
+    """Library packs that are not installed yet."""
+    rows = []
     have = installed_ids()
     for p in library():
-        pack_id = f"{p['type']}/{p['id']}"
-        if p["type"] not in DEVICES or pack_id in have:
+        if p["type"] not in DEVICES or f"{p['type']}/{p['id']}" in have:
             continue
-        rows.append(row(
-            f"library/{p['id']}", p["name"], EMOJI[p["type"]], "Library",
-            f"{p['type'].capitalize()} pack, {p.get('downloads', 0)} downloads. {(p.get('description') or '').splitlines()[0] if p.get('description') else ''}".strip(),
-            p.get("author") or "community", False, [p.get("author") or "", p["type"], *p.get("tags", [])],
-        ))
+        first_line = ((p.get("description") or "").splitlines() or [""])[0]
+        rows.append(
+            row(
+                f"library/{p['id']}",
+                p["name"],
+                EMOJI[p["type"]],
+                "Library",
+                f"{p['type'].capitalize()} pack, {p.get('downloads', 0)} downloads. {first_line}".strip(),
+                p.get("author") or "community",
+                False,
+                [p.get("author") or "", p["type"], *p.get("tags", [])],
+            )
+        )
+    return rows
+
+
+def list_packs():
+    config = load()
+    rows = [*installed_rows(config), *library_rows()]
     playing = mood_active()
     for sound, (label, emoji, description) in MOOD.items():
-        rows.append(row(f"mood/{sound}", label, emoji, "Mood", description, "ambient", sound in playing, ["ambient", "mood"]))
+        rows.append(
+            row(f"mood/{sound}", label, emoji, "Mood", description, "ambient", sound in playing, ["ambient", "mood"])
+        )
     level = master_percent(config)
     for direction, sign in (("up", "+"), ("down", "-")):
-        rows.append(row(f"volume/{direction}", f"Volume {direction} ({sign}{STEP}%)", "🔊", "Volume",
-                        f"Keyboard, mouse and mood volume together. Now {level}%. "
-                        f"Press + / - in the picker to change it without closing.",
-                        "volume", False, ["volume"]))
-    return {"categories": [*DEVICES.values(), "Mood", "Volume", "Library"], "effects": rows,
-            "state": f"vol {level}%" + mood_state_text()}
+        rows.append(
+            row(
+                f"volume/{direction}",
+                f"Volume {direction} ({sign}{STEP}%)",
+                "🔊",
+                "Volume",
+                f"Keyboard, mouse and mood volume together. Now {level}%. "
+                f"Press + / - in the picker to change it without closing.",
+                "volume",
+                False,
+                ["volume"],
+            )
+        )
+    return {
+        "categories": [*DEVICES.values(), "Mood", "Volume", "Library"],
+        "effects": rows,
+        "state": f"vol {level}%" + mood_state_text(),
+    }
 
 
 def known(pack_id):
@@ -439,7 +539,7 @@ def toggle(name):
     else:
         kind = known(name)
         if running() and current.get(f"{kind}_soundpack") == name and current.get(f"enable_{kind}_sound", True):
-            edit(lambda config: config.__setitem__(f"enable_{kind}_sound", False))
+            edit(lambda config: config.update({f"enable_{kind}_sound": False}))
             start()
         else:
             use(name)

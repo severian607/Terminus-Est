@@ -1,8 +1,8 @@
 # Terminus-Bar native shell lifecycle
 [Unit]
 Description=Terminus-Bar desktop shell
-PartOf=graphical-session.target
 After=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple

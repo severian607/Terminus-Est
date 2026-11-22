@@ -13,6 +13,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -34,9 +35,8 @@ class WaylandConnection;
 // Sound quick panel in the terminal look. `¹output` / `²input`: one row per device with short names (Enter makes it
 // the default; bluetooth devices can switch card profile) and the default device's `vol` meter directly under it.
 // `³apps`: one meter row per playing application (←→ volume, `a` mute / move to another output). `⁴equaliser`: a
-// single line while off, the preset line
-// and ten centre-zero bands while on (driven through the `terminus-audiofx eq` command line). The whole body scrolls
-// when it outgrows the panel.
+// single line while off, the preset line and ten centre-zero bands while on (driven through the `terminus-audiofx eq`
+// command line). The whole body scrolls when it outgrows the panel.
 class SoundTab : public Tab {
 public:
   static constexpr std::size_t kBandCount = 10;
@@ -54,7 +54,8 @@ public:
   [[nodiscard]] float quickPanelHeight(float width, float fallback) const override;
   [[nodiscard]] std::string quickPanelHints() const override;
   [[nodiscard]] std::string quickPanelStatus() const override;
-  [[nodiscard]] bool handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
+  [[nodiscard]] bool
+  handleQuickPanelKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
 
 protected:
   void doLayout(Renderer& renderer, float contentWidth, float bodyHeight) override;
@@ -124,6 +125,7 @@ private:
     std::string active;
     std::vector<CardProfile> profiles;
   };
+  using CardMap = std::unordered_map<std::string, Card>;
 
   // One selectable row (device meter, device, application, equaliser line or band).
   struct Item {
@@ -149,6 +151,10 @@ private:
 
   // ---- Data helpers
   [[nodiscard]] std::vector<AudioNode> devices(bool input) const;
+  [[nodiscard]] std::size_t deviceCount(bool input) const; // `devices(input).size()` without copying or sorting
+  [[nodiscard]] const AudioNode* defaultNode(bool input) const;
+  [[nodiscard]] std::uint32_t defaultId(bool input) const;
+  [[nodiscard]] bool eqUsable() const; // status loaded and no error
   [[nodiscard]] std::vector<AudioNode> sortedApps() const;
   [[nodiscard]] const AudioNode* findNode(const Item& item) const;
   [[nodiscard]] std::string statusKey(const Item& item) const;
@@ -157,16 +163,20 @@ private:
   // ---- Body construction
   [[nodiscard]] std::string structureKey() const;
   void rebuildBody();
+  void clearBody();
+  void addMutedBadge(Item& item, Flex& row, float scale);
   [[nodiscard]] Item& addItem(Kind kind, std::uint32_t id, std::size_t index);
   [[nodiscard]] std::unique_ptr<Flex>
   buildMeterRow(Item& item, std::string tag, std::function<void(double)> onChange, float scale);
-  [[nodiscard]] std::unique_ptr<Flex> buildDeviceRow(Item& item, const AudioNode& node, std::string shortName, float scale);
+  [[nodiscard]] std::unique_ptr<Flex>
+  buildDeviceRow(Item& item, const AudioNode& node, std::string shortName, float scale);
   [[nodiscard]] std::unique_ptr<Flex> buildEqRow(Item& item, float scale);
   [[nodiscard]] std::unique_ptr<Flex> buildBandRow(Item& item, std::size_t band, float scale);
   void buildDeviceSection(Flex& content, bool input, float scale);
   void buildAppsSection(Flex& content, float scale);
   void buildEqSection(Flex& content, float scale);
   void buildMenu(Flex& box, Item& item, float scale);
+  [[nodiscard]] bool buildMoveMenu(Flex& box, float scale);
   [[nodiscard]] std::vector<MenuAction> menuActions(const Item& item) const;
 
   // ---- Sync
@@ -188,6 +198,7 @@ private:
   void updateSelection();
   void styleItem(Item& item, bool selected);
   void adjustSelected(int direction);
+  [[nodiscard]] bool handleMoveKey(std::uint32_t sym, bool pressed);
   void activateSelected();
   void toggleMenu();
   void closeMenu();
@@ -208,6 +219,7 @@ private:
 
   // ---- pactl (bluetooth card profiles)
   void loadCards();
+  [[nodiscard]] static std::optional<CardMap> parseCards(const std::string& json);
   void applyCards(const std::string& json);
 
   // ---- Equaliser bands
@@ -220,6 +232,7 @@ private:
   void enqueueStatus();
   void pump();
   void onJobDone(const Job& job, const process::RunResult& result);
+  [[nodiscard]] static std::optional<EqState> parseEqStatus(const std::string& json);
   void applyStatus(const std::string& json);
   void setError(std::string message);
 
@@ -246,9 +259,12 @@ private:
 
   std::unordered_map<std::string, RowStatus> m_statuses;
   std::vector<Pending> m_pending;
-  std::unordered_map<std::string, Card> m_cards;
+  CardMap m_cards;
   std::unordered_set<std::string> m_cardsTried;
   bool m_cardsLoading = false;
+  // WirePlumber leaves `default.audio.source` unset while the configured microphone is unplugged; this is the
+  // source `pactl get-default-source` still names (read on open).
+  std::string m_fallbackSource;
   Timer m_tickTimer;
 
   EqState m_eq;

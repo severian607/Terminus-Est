@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
 """Laptop saver dispatcher and sole compositor-acknowledged lock supervisor."""
+
 import fcntl
 import gzip
 import hashlib
 import json
 import os
-from pathlib import Path
 import select
 import signal
 import socket
 import stat
 import subprocess
 import sys
+from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
 OVERLAY = PROJECT / "bin/terminus-screensaver"
 UNIT = "terminus-lock.service"
+HYPRLOCK = Path.home() / "Projects/Hyprlock-Amaterasu/build/hyprlock"
+HYPRLOCK_CONFIG = PROJECT / "config/hyprlock/hyprlock.conf"
+READY_TIMEOUT_SECONDS = 20  # locker must acknowledge the compositor's session lock within this
+OVERLAY_STOP_TIMEOUT_SECONDS = 10
+LOCKER_TERMINATE_GRACE_SECONDS = 3
 
 
 def run(*args, **kwargs):
@@ -90,8 +96,15 @@ def lock():
         if active() and not acknowledged(identity):
             raise RuntimeError("An acknowledged lock belongs to a different graphical session")
         # Never let a lingering user manager supply yesterday's display socket.
-        run("systemctl", "--user", "import-environment", "WAYLAND_DISPLAY",
-            "HYPRLAND_INSTANCE_SIGNATURE", "XDG_RUNTIME_DIR", "PATH")
+        run(
+            "systemctl",
+            "--user",
+            "import-environment",
+            "WAYLAND_DISPLAY",
+            "HYPRLAND_INSTANCE_SIGNATURE",
+            "XDG_RUNTIME_DIR",
+            "PATH",
+        )
         run("systemctl", "--user", "start", UNIT)
         if session() != identity or not acknowledged(identity):
             raise RuntimeError("Lock exited or session changed before acknowledgement")
@@ -107,8 +120,6 @@ def supervise():
     root = state_dir()
     marker = root / "ready.json"
     marker.unlink(missing_ok=True)
-    binary = Path.home() / "Projects/Hyprlock-Amaterasu/build/hyprlock"
-    config = PROJECT / "config/hyprlock/hyprlock.conf"
     read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
     child_env = dict(os.environ)
     child_env.pop("NOTIFY_SOCKET", None)
@@ -116,11 +127,14 @@ def supervise():
     signal.signal(signal.SIGUSR1, signal.SIG_IGN)
     child = None
     try:
-        child = subprocess.Popen([str(binary), "--config", str(config), "--ready-fd", str(write_fd)],
-                                 pass_fds=(write_fd,), env=child_env)
+        child = subprocess.Popen(
+            [str(HYPRLOCK), "--config", str(HYPRLOCK_CONFIG), "--ready-fd", str(write_fd)],
+            pass_fds=(write_fd,),
+            env=child_env,
+        )
         os.close(write_fd)
         write_fd = -1
-        if not select.select([read_fd], [], [], 20)[0] or os.read(read_fd, 2) != b"\n":
+        if not select.select([read_fd], [], [], READY_TIMEOUT_SECONDS)[0] or os.read(read_fd, 2) != b"\n":
             raise RuntimeError("Hyprlock did not acknowledge the compositor session lock")
         if child.poll() is not None or session() != identity:
             raise RuntimeError("Locker exited or compositor changed during startup")
@@ -136,7 +150,7 @@ def supervise():
         # The secure lock is ready. Decorative overlay cleanup must never hold
         # suspend readiness or tear down the authenticated session lock.
         try:
-            run(str(OVERLAY), "--stop", timeout=10)
+            run(str(OVERLAY), "--stop", timeout=OVERLAY_STOP_TIMEOUT_SECONDS)
         except (OSError, subprocess.SubprocessError) as error:
             print("Terminus-Lock: overlay cleanup failed: " + str(error), file=sys.stderr)
         return child.wait()
@@ -150,7 +164,7 @@ def supervise():
         if child is not None and child.poll() is None:
             child.terminate()
             try:
-                child.wait(timeout=3)
+                child.wait(timeout=LOCKER_TERMINATE_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait()
@@ -182,4 +196,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except (OSError, RuntimeError, KeyError, subprocess.SubprocessError) as error:
         print("Terminus-Lock: " + str(error), file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from error

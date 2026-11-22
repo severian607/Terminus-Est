@@ -111,6 +111,10 @@ private:
   void doLayoutQuick(Renderer& renderer, float contentWidth, float bodyHeight);
   void syncQuick(Renderer& renderer, bool force);
   void rebuildQuickLists(Renderer& renderer);
+  // Identity of the built lists; they are rebuilt exactly when it changes.
+  [[nodiscard]] std::string quickListKey(const std::vector<BluetoothDeviceInfo>& devices, float listWidth) const;
+  // Fills the emptied lists from the service state; true when a pairing prompt took a row.
+  bool fillQuickLists(const std::vector<BluetoothDeviceInfo>& devices, float scale);
   void buildQuickRows(Flex& list, const std::vector<BluetoothDeviceInfo>& devices, float scale);
   void buildQuickPairRow(Flex& list, float scale);
   std::unique_ptr<Flex> buildQuickMenu(const BluetoothDeviceInfo& device, float scale);
@@ -118,7 +122,10 @@ private:
   std::unique_ptr<Flex> makeQuickLine(float scale, Label** gutterOut, Flex** nodeOut = nullptr);
   // Updates names, states and meters in place. Returns true when a row's text changed.
   bool syncQuickRows();
+  [[nodiscard]] std::string quickDetail(const BluetoothDeviceInfo& device) const;
   void syncQuickGutters();
+  void scrollSelectedIntoView();
+  void pollQuickFailures(bool adapterFailing);
   void quickSelectId(const std::string& id);
   void quickActivateSelected();
   void quickActivate(const std::string& path);
@@ -132,9 +139,12 @@ private:
   void quickPressConfirmed(term_frame::Keyword& keyword, const std::function<void()>& run);
   void quickClearArmed();
   bool quickPressMenuKey(std::uint32_t sym);
+  bool handlePairingKey(const BluetoothPairingRequest& req, std::uint32_t sym);
+  void quickRescan();
   void setLocalFailure(const std::string& key, std::string reason);
   void clearQuickFailure(const std::string& key);
   void refreshProfiles();
+  [[nodiscard]] static std::optional<std::unordered_map<std::string, QuickProfiles>> parseProfiles(const std::string& json);
   void applyProfiles(const std::string& json);
   void deferDiscoveryStop();
   void resetQuick();

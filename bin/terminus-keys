@@ -3,12 +3,20 @@
 # shortcut key badge under each widget that has one, while Alt is down.
 #   terminus-keys [toggle]      open it, or close it if it is already up
 #   terminus-keys json          print the bindings the overlay reads
-dir="$(dirname "$(readlink -f "$0")")/../modules/terminus-keys"
+self=$(readlink -f "$0")
+dir=${self%/*}/../modules/terminus-keys
 case "${1:-toggle}" in
-    toggle)
-        if pkill -f "qs -p $dir/shell.qml"; then terminus-bar msg bar-hints off >/dev/null 2>&1; exit 0; fi
-        /usr/bin/qs -p "$dir/shell.qml"
-        terminus-bar msg bar-hints off >/dev/null 2>&1 ;;
-    json) exec python3 "$dir/bindings.py" ;;
-    *) echo "usage: terminus-keys [toggle|json]" >&2; exit 2 ;;
+  toggle)
+    if pkill -f "qs -p $dir/shell.qml"; then
+      terminus-bar msg bar-hints off >/dev/null 2>&1
+      exit 0
+    fi
+    /usr/bin/qs -p "$dir/shell.qml"
+    terminus-bar msg bar-hints off >/dev/null 2>&1
+    ;;
+  json) exec python3 "$dir/bindings.py" ;;
+  *)
+    echo "usage: terminus-keys [toggle|json]" >&2
+    exit 2
+    ;;
 esac

@@ -1,12 +1,15 @@
+// Display quick panel: ¹brightness rows (per output + all) and ²night light (schedule, force, warmth).
+// Hot path: doUpdate (syncBrightness, syncNightLight) runs on every panel update while the panel is open.
+
 #include "shell/control_center/tabs/display_tab.h"
 
 #include "config/config_service.h"
 #include "core/input/key_modifiers.h"
 #include "render/core/renderer.h"
+#include "shell/panel/panel_manager.h"
 #include "system/brightness_service.h"
 #include "system/gamma_service.h"
 #include "system/weather_service.h"
-#include "shell/panel/panel_manager.h"
 #include "time/time_format.h"
 #include "ui/builders.h"
 
@@ -15,18 +18,27 @@
 #include <format>
 #include <string_view>
 #include <utility>
-
 #include <xkbcommon/xkbcommon-keysyms.h>
 
 namespace {
 
   constexpr float kSyncEpsilon = 0.005F;
+  constexpr float kMixedSpread = 0.02F; // outputs further apart than this read "mixed" on the `all` row
+  constexpr double kBrightnessSliderStep = 0.01;
+  constexpr float kWarmthDimmedOpacity = 0.45F;
+  constexpr float kMaxTagWidthFraction = 0.34F;
   constexpr auto kBrightnessCommitInterval = std::chrono::milliseconds(16);
-  constexpr auto kBrightnessStateHoldoff = std::chrono::milliseconds(180);
   constexpr auto kWarmthCommitDelay = std::chrono::milliseconds(200);
   constexpr std::int32_t kWarmthMin = 1500;
   constexpr std::int32_t kWarmthMax = 6500;
   constexpr std::int32_t kWarmthStep = 100;
+
+  constexpr std::size_t kTagCols = 9;
+  constexpr std::size_t kValueCols = 6;
+  // Night-light rows: schedule, force on now, warmth, status line.
+  constexpr int kNightRows = 4;
+  using term_frame::kBoxChrome;
+  using term_frame::kSectionGap;
 
   std::string formatPercent(float value) { return std::format("{}%", static_cast<int>(std::lround(value * 100.0F))); }
 
@@ -39,16 +51,11 @@ namespace {
     return key;
   }
 
-  constexpr std::size_t kTagCols = 9;
-  constexpr std::size_t kValueCols = 6;
-  constexpr float kBoxChrome = 2.0F * (Style::spaceSm + Style::borderWidth) + 20.0F + Style::spaceXs;
-  constexpr float kSectionGap = Style::spaceSm;
-
   // Sizes a tag | meter | value row to `innerWidth` on fixed monospace columns, so the value column is always
   // reserved and never pushed out of the row by the slider.
   float layoutMeterRow(const term_frame::MeterRow& meter, float innerWidth, float scale) {
     const float font = Style::fontSizeCaption * scale;
-    const float tagWidth = std::min(term_frame::monoWidth(kTagCols, font), innerWidth * 0.34F);
+    const float tagWidth = std::min(term_frame::monoWidth(kTagCols, font), innerWidth * kMaxTagWidthFraction);
     const float valueWidth = term_frame::monoWidth(kValueCols, font);
     meter.value->setVisible(true);
     return term_frame::layoutMeterCells(
@@ -81,14 +88,19 @@ std::unique_ptr<Flex> DisplayTab::create() {
       .align = FlexAlign::Stretch,
       .gap = Style::spaceSm * scale,
   });
+  tab->addChild(buildBrightnessBox(scale));
+  tab->addChild(buildNightBox(scale));
 
-  const auto tileRow = [&]() {
-    return ui::row({.align = FlexAlign::Stretch, .gap = Style::spaceXs * scale, .fillWidth = true});
-  };
+  m_rowsBuilt = false;
+  m_rowsKey.clear();
+  m_reportedRows = -1;
+  m_resizePending = false;
+  return tab;
+}
 
-  // --- ¹brightness ---
-  auto brightnessBox = term_frame::box("¹", "brightness", scale, &m_brightnessBox, &m_brightnessChip);
-  brightnessBox->addChild(
+std::unique_ptr<Flex> DisplayTab::buildBrightnessBox(float scale) {
+  auto box = term_frame::box("¹", "brightness", scale, &m_brightnessBox, &m_brightnessChip);
+  box->addChild(
       ui::column({
           .out = &m_brightnessPanel,
           .align = FlexAlign::Stretch,
@@ -96,25 +108,24 @@ std::unique_ptr<Flex> DisplayTab::create() {
           .fillWidth = true,
       })
   );
-  {
-    auto unavailable = mutedLabel(scale, "unavailable", false);
-    m_brightnessUnavailable = unavailable.get();
-    brightnessBox->addChild(std::move(unavailable));
-  }
-  {
-    auto row = tileRow();
-    row->addChild(term_frame::makeKeyword(m_rescanKey, "rescan displays", 0, scale, [this]() { rescanDisplays(); }));
-    brightnessBox->addChild(std::move(row));
-  }
-  tab->addChild(std::move(brightnessBox));
+  auto unavailable = mutedLabel(scale, "unavailable", false);
+  m_brightnessUnavailable = unavailable.get();
+  box->addChild(std::move(unavailable));
 
-  // --- ²night light ---
-  auto nightBox = term_frame::box("²", "night light", scale, &m_nightBox, &m_nightChip);
-  {
-    auto unavailable = mutedLabel(scale, "unavailable", false);
-    m_nightUnavailable = unavailable.get();
-    nightBox->addChild(std::move(unavailable));
-  }
+  auto rescanRow = ui::row({.align = FlexAlign::Stretch, .gap = Style::spaceXs * scale, .fillWidth = true});
+  rescanRow->addChild(term_frame::makeKeyword(m_rescanKey, "rescan displays", 0, scale, [this]() {
+    rescanDisplays();
+  }));
+  box->addChild(std::move(rescanRow));
+  return box;
+}
+
+std::unique_ptr<Flex> DisplayTab::buildNightBox(float scale) {
+  auto box = term_frame::box("²", "night light", scale, &m_nightBox, &m_nightChip);
+  auto unavailable = mutedLabel(scale, "unavailable", false);
+  m_nightUnavailable = unavailable.get();
+  box->addChild(std::move(unavailable));
+
   auto controls = ui::column({
       .out = &m_nightControls,
       .align = FlexAlign::Stretch,
@@ -124,35 +135,32 @@ std::unique_ptr<Flex> DisplayTab::create() {
   controls->addChild(term_frame::toggleRow("schedule", scale, m_scheduleRow, [this]() { toggleSchedule(); }));
   controls->addChild(term_frame::toggleRow("force on now", scale, m_forceRow, [this]() { toggleForce(); }));
   controls->addChild(term_frame::meterRow("warmth", scale, m_warmthMeter));
-  if (Slider* slider = m_warmthMeter.slider; slider != nullptr) {
-    slider->setRange(static_cast<double>(kWarmthMin), static_cast<double>(kWarmthMax));
-    slider->setStep(static_cast<double>(kWarmthStep));
-    slider->setValue(static_cast<double>(kWarmthMin));
-    slider->setReadOnly(false);
-    slider->setWheelAdjustEnabled(true);
-    slider->setAccentColor(colorSpecFromRole(ColorRole::Primary));
-    slider->setOnValueChanged([this](double value) {
-      if (m_syncing) {
-        return;
-      }
-      queueWarmth(static_cast<std::int32_t>(std::lround(value)));
-    });
-    slider->setOnDragEnd([this]() { flushPendingWarmth(); });
-  }
-  {
-    auto status = mutedLabel(scale, "");
-    m_nightStatus = status.get();
-    controls->addChild(std::move(status));
-  }
-  nightBox->addChild(std::move(controls));
-  tab->addChild(std::move(nightBox));
+  configureWarmthSlider();
+  auto status = mutedLabel(scale, "");
+  m_nightStatus = status.get();
+  controls->addChild(std::move(status));
+  box->addChild(std::move(controls));
+  return box;
+}
 
-
-  m_rowsBuilt = false;
-  m_rowsKey.clear();
-  m_reportedRows = -1;
-  m_resizePending = false;
-  return tab;
+void DisplayTab::configureWarmthSlider() {
+  Slider* slider = m_warmthMeter.slider;
+  if (slider == nullptr) {
+    return;
+  }
+  slider->setRange(static_cast<double>(kWarmthMin), static_cast<double>(kWarmthMax));
+  slider->setStep(static_cast<double>(kWarmthStep));
+  slider->setValue(static_cast<double>(kWarmthMin));
+  slider->setReadOnly(false);
+  slider->setWheelAdjustEnabled(true);
+  slider->setAccentColor(colorSpecFromRole(ColorRole::Primary));
+  slider->setOnValueChanged([this](double value) {
+    if (m_syncing) {
+      return;
+    }
+    queueWarmth(static_cast<std::int32_t>(std::lround(value)));
+  });
+  slider->setOnDragEnd([this]() { flushPendingWarmth(); });
 }
 
 void DisplayTab::setActive(bool active) {
@@ -245,7 +253,7 @@ void DisplayTab::rebuildBrightnessRows(float scale) {
     m_brightnessPanel->addChild(term_frame::meterRow(tag, scale, state->meter));
     Slider* slider = state->meter.slider;
     slider->setRange(static_cast<double>(minimumBrightness()), 1.0);
-    slider->setStep(0.01);
+    slider->setStep(kBrightnessSliderStep);
     slider->setReadOnly(false);
     slider->setWheelAdjustEnabled(true);
     slider->setAccentColor(colorSpecFromRole(ColorRole::Primary));
@@ -284,8 +292,7 @@ void DisplayTab::rebuildBrightnessRows(float scale) {
   }
 }
 
-void DisplayTab::doLayout(Renderer& renderer, float contentWidth, float bodyHeight) {
-  (void)bodyHeight;
+void DisplayTab::doLayout(Renderer& renderer, float contentWidth, float /*bodyHeight*/) {
   if (m_rootLayout == nullptr) {
     return;
   }
@@ -326,8 +333,7 @@ void DisplayTab::doLayout(Renderer& renderer, float contentWidth, float bodyHeig
   m_rootLayout->layout(renderer);
 }
 
-void DisplayTab::doUpdate(Renderer& renderer) {
-  (void)renderer;
+void DisplayTab::doUpdate(Renderer& /*renderer*/) {
   if (m_rootLayout == nullptr) {
     return;
   }
@@ -339,9 +345,26 @@ void DisplayTab::doUpdate(Renderer& renderer) {
   }
 }
 
+DisplayTab::OutputSummary DisplayTab::summarizeOutputs() const {
+  OutputSummary summary;
+  float sum = 0.0F;
+  float lowest = 1.0F;
+  float highest = 0.0F;
+  for (const auto& display : m_brightness->displays()) {
+    if (display.controllable) {
+      sum += display.brightness;
+      lowest = std::min(lowest, display.brightness);
+      highest = std::max(highest, display.brightness);
+      ++summary.controllable;
+    }
+  }
+  summary.mixed = summary.controllable > 1 && highest - lowest > kMixedSpread;
+  summary.mean = summary.controllable > 0 ? sum / static_cast<float>(summary.controllable) : 0.0F;
+  return summary;
+}
+
 void DisplayTab::syncBrightness() {
   const bool haveService = m_brightness != nullptr;
-  const bool haveRows = !m_rows.empty();
   if (m_brightnessUnavailable != nullptr) {
     const bool showUnavailable = !haveService || m_brightness->displays().empty();
     if (m_brightnessUnavailable->visible() != showUnavailable) {
@@ -356,78 +379,63 @@ void DisplayTab::syncBrightness() {
     const std::size_t outputs = haveService ? m_brightness->displays().size() : 0;
     term_frame::setChip(*m_brightnessChip, haveService ? std::format("{} outputs", outputs) : std::string());
   }
-  if (!haveService || !haveRows) {
+  if (!haveService || m_rows.empty()) {
     return;
   }
 
-  const auto now = std::chrono::steady_clock::now();
   const float minimum = minimumBrightness();
-
-  // Mean of the controllable outputs drives the `all` row.
-  float sum = 0.0F;
-  float lowest = 1.0F;
-  float highest = 0.0F;
-  int count = 0;
-  for (const auto& display : m_brightness->displays()) {
-    if (display.controllable) {
-      sum += display.brightness;
-      lowest = std::min(lowest, display.brightness);
-      highest = std::max(highest, display.brightness);
-      ++count;
-    }
-  }
-  const bool mixed = count > 1 && highest - lowest > 0.02F;
-  const float mean = count > 0 ? sum / static_cast<float>(count) : 0.0F;
-
+  const OutputSummary outputs = summarizeOutputs();
   for (auto& row : m_rows) {
-    Slider* slider = row->meter.slider;
-    if (slider == nullptr) {
-      continue;
-    }
-    const bool isAll = row->displayId.empty();
-    const BrightnessDisplay* display = isAll ? nullptr : m_brightness->findDisplay(row->displayId);
-    const bool controllable = isAll ? count > 0 : (display != nullptr && display->controllable);
-    if (!isAll && display == nullptr) {
-      continue;
-    }
-    if (!controllable) {
-      row->meter.value->setText("n/a");
-      row->lastControllable = false;
-      continue;
-    }
-
-    const float actual = isAll ? mean : display->brightness;
-    const bool dragging = slider->dragging();
-    const bool isPending = m_pendingValid && m_pendingDisplayId == row->displayId;
-    const bool holdState = dragging && m_lastSentBrightness >= 0.0F && m_lastSentId == row->displayId
-        && now < m_ignoreStateUntil && std::abs(actual - m_lastSentBrightness) > 0.02F;
-
-    if (dragging) {
-      row->lastControllable = true;
-      continue;
-    }
-    const float shown = std::clamp(isPending ? m_pendingBrightness : (holdState ? m_lastSentBrightness : actual), minimum, 1.0F);
-    const bool changed = !row->lastControllable || std::abs(shown - row->lastValue) >= kSyncEpsilon;
-    m_syncing = true;
-    slider->setRange(static_cast<double>(minimum), 1.0);
-    slider->setEnabled(true);
-    if (changed) {
-      slider->setValue(shown);
-      row->lastValue = shown;
-    }
-    m_syncing = false;
-    if (changed || !row->lastControllable) {
-      row->meter.tag->setColor(colorSpecFromRole(ColorRole::OnSurface));
-      row->meter.value->setColor(colorSpecFromRole(ColorRole::OnSurface));
-    }
-    // Always (re)write the value: the row may have been rebuilt or laid out since the last change.
-    const std::string percent = isAll && mixed ? std::string("mixed") : formatPercent(shown);
-    if (row->meter.value->text() != percent) {
-      row->meter.value->setText(percent);
-      PanelManager::instance().requestLayout();
-    }
-    row->lastControllable = true;
+    syncBrightnessRow(*row, outputs, minimum);
   }
+}
+
+// Brings one row's slider, colours and value text in line with the service; the `all` row shows the mean.
+void DisplayTab::syncBrightnessRow(BrightnessRow& row, const OutputSummary& outputs, float minimum) {
+  Slider* slider = row.meter.slider;
+  if (slider == nullptr) {
+    return;
+  }
+  const bool isAll = row.displayId.empty();
+  const BrightnessDisplay* display = isAll ? nullptr : m_brightness->findDisplay(row.displayId);
+  if (!isAll && display == nullptr) {
+    return;
+  }
+  const bool controllable = isAll ? outputs.controllable > 0 : display->controllable;
+  if (!controllable) {
+    row.meter.value->setText("n/a");
+    row.lastControllable = false;
+    return;
+  }
+  if (slider->dragging()) {
+    row.lastControllable = true;
+    return;
+  }
+
+  // A write still queued wins over the service's reading.
+  const float actual = isAll ? outputs.mean : display->brightness;
+  const bool isPending = m_pendingValid && m_pendingDisplayId == row.displayId;
+  const float shown = std::clamp(isPending ? m_pendingBrightness : actual, minimum, 1.0F);
+  const bool changed = !row.lastControllable || std::abs(shown - row.lastValue) >= kSyncEpsilon;
+  m_syncing = true;
+  slider->setRange(static_cast<double>(minimum), 1.0);
+  slider->setEnabled(true);
+  if (changed) {
+    slider->setValue(shown);
+    row.lastValue = shown;
+  }
+  m_syncing = false;
+  if (changed || !row.lastControllable) {
+    row.meter.tag->setColor(colorSpecFromRole(ColorRole::OnSurface));
+    row.meter.value->setColor(colorSpecFromRole(ColorRole::OnSurface));
+  }
+  // Always (re)write the value: the row may have been rebuilt or laid out since the last change.
+  const std::string percent = isAll && outputs.mixed ? std::string("mixed") : formatPercent(shown);
+  if (row.meter.value->text() != percent) {
+    row.meter.value->setText(percent);
+    PanelManager::instance().requestLayout();
+  }
+  row.lastControllable = true;
 }
 
 void DisplayTab::syncNightLight() {
@@ -436,11 +444,9 @@ void DisplayTab::syncNightLight() {
     m_nightUnavailable->setVisible(!haveService);
     m_nightUnavailable->setParticipatesInLayout(!haveService);
   }
-  if (m_nightControls != nullptr) {
-    if (m_nightControls->visible() != haveService) {
-      m_nightControls->setVisible(haveService);
-      m_nightControls->setParticipatesInLayout(haveService);
-    }
+  if (m_nightControls != nullptr && m_nightControls->visible() != haveService) {
+    m_nightControls->setVisible(haveService);
+    m_nightControls->setParticipatesInLayout(haveService);
   }
   if (!haveService) {
     if (m_nightChip != nullptr) {
@@ -455,12 +461,10 @@ void DisplayTab::syncNightLight() {
   if (m_nightChip != nullptr) {
     term_frame::setChip(*m_nightChip, (active || forced) ? "active" : (scheduled ? "scheduled" : "off"));
   }
-  std::string sunset;
-  std::string sunrise;
-  sunTimeStrings(sunset, sunrise);
+  const SunStrings sun = sunTimeStrings();
   std::string scheduleDetail;
   if (scheduled) {
-    const std::string& when = active ? sunrise : sunset;
+    const std::string& when = active ? sun.sunrise : sun.sunset;
     if (!when.empty()) {
       scheduleDetail = std::format("· {} {}", active ? "until" : "on at", when);
     }
@@ -468,46 +472,50 @@ void DisplayTab::syncNightLight() {
   term_frame::setToggleRow(m_scheduleRow, true, scheduled, scheduled ? "on" : "off", scheduleDetail);
   term_frame::setToggleRow(m_forceRow, true, forced, forced ? "on" : "off");
 
-  // Warmth only matters while night light is on (scheduled-active or forced); dim it otherwise.
-  const bool warmthLive = active || forced;
-  if (m_warmthMeter.tag != nullptr && m_warmthMeter.value != nullptr && m_warmthMeter.slider != nullptr) {
-    const ColorSpec tone = warmthLive ? colorSpecFromRole(ColorRole::OnSurface) : term_frame::dimColor();
-    m_warmthMeter.tag->setColor(term_frame::dimColor());
-    m_warmthMeter.value->setColor(tone);
-    m_warmthMeter.slider->setOpacity(warmthLive ? 1.0F : 0.45F);
-  }
+  syncWarmth(active || forced);
+  syncNightStatus(sun, forced);
+}
 
-  // Warmth follows the persisted night temperature unless a write is in flight.
+// Warmth only matters while night light is on (scheduled-active or forced); dim it otherwise. The slider follows
+// the persisted night temperature unless a write is in flight.
+void DisplayTab::syncWarmth(bool warmthLive) {
   Slider* slider = m_warmthMeter.slider;
-  if (slider != nullptr && m_config != nullptr) {
-    const std::int32_t ceiling = warmthCeiling();
-    const std::int32_t persisted = std::clamp(m_config->config().nightlight.nightTemperature, kWarmthMin, ceiling);
-    if (!slider->dragging() && m_pendingKelvin < 0) {
-      m_syncing = true;
-      slider->setRange(static_cast<double>(kWarmthMin), static_cast<double>(ceiling));
-      if (static_cast<std::int32_t>(std::lround(slider->value())) != persisted) {
-        slider->setValue(static_cast<double>(persisted));
-      }
-      m_syncing = false;
-      m_warmthMeter.value->setText(std::format("{}K", persisted));
-    }
+  if (m_warmthMeter.tag != nullptr && m_warmthMeter.value != nullptr && slider != nullptr) {
+    m_warmthMeter.tag->setColor(term_frame::dimColor());
+    m_warmthMeter.value->setColor(warmthLive ? colorSpecFromRole(ColorRole::OnSurface) : term_frame::dimColor());
+    slider->setOpacity(warmthLive ? 1.0F : kWarmthDimmedOpacity);
   }
+  if (slider == nullptr || m_config == nullptr || slider->dragging() || m_pendingKelvin >= 0) {
+    return;
+  }
+  const std::int32_t ceiling = warmthCeiling();
+  const std::int32_t persisted = std::clamp(m_config->config().nightlight.nightTemperature, kWarmthMin, ceiling);
+  m_syncing = true;
+  slider->setRange(static_cast<double>(kWarmthMin), static_cast<double>(ceiling));
+  if (static_cast<std::int32_t>(std::lround(slider->value())) != persisted) {
+    slider->setValue(static_cast<double>(persisted));
+  }
+  m_syncing = false;
+  m_warmthMeter.value->setText(std::format("{}K", persisted));
+}
 
-  if (m_nightStatus != nullptr && m_config != nullptr) {
-    const auto& location = m_config->config().location;
-    std::string text;
-    if (!sunset.empty() && !sunrise.empty()) {
-      text = std::format("sunset {}  sunrise {}", sunset, sunrise);
-    } else if (location.autoLocate || !location.address.empty() || (location.latitude && location.longitude)) {
-      text = "location schedule";
-    } else {
-      text = "no schedule: set a location in settings";
-    }
-    if (forced) {
-      text += "  (forced on)";
-    }
-    m_nightStatus->setText(text);
+void DisplayTab::syncNightStatus(const SunStrings& sun, bool forced) {
+  if (m_nightStatus == nullptr || m_config == nullptr) {
+    return;
   }
+  const auto& location = m_config->config().location;
+  std::string text;
+  if (!sun.sunset.empty() && !sun.sunrise.empty()) {
+    text = std::format("sunset {}  sunrise {}", sun.sunset, sun.sunrise);
+  } else if (location.autoLocate || !location.address.empty() || (location.latitude && location.longitude)) {
+    text = "location schedule";
+  } else {
+    text = "no schedule: set a location in settings";
+  }
+  if (forced) {
+    text += "  (forced on)";
+  }
+  m_nightStatus->setText(text);
 }
 
 void DisplayTab::queueBrightness(const std::string& displayId, float value) {
@@ -542,14 +550,12 @@ void DisplayTab::flushPendingBrightness() {
     }
     m_brightness->setBrightness(m_pendingDisplayId, m_pendingBrightness);
   }
-  m_lastSentBrightness = m_pendingBrightness;
-  m_lastSentId = m_pendingDisplayId;
   m_lastCommitAt = std::chrono::steady_clock::now();
-  m_ignoreStateUntil = m_lastCommitAt + kBrightnessStateHoldoff;
 }
 
 void DisplayTab::queueWarmth(std::int32_t kelvin) {
-  const std::int32_t snapped = static_cast<std::int32_t>(std::lround(static_cast<double>(kelvin) / kWarmthStep)) * kWarmthStep;
+  const std::int32_t snapped =
+      static_cast<std::int32_t>(std::lround(static_cast<double>(kelvin) / kWarmthStep)) * kWarmthStep;
   m_pendingKelvin = std::clamp(snapped, kWarmthMin, warmthCeiling());
   if (m_warmthMeter.value != nullptr) {
     m_warmthMeter.value->setText(std::format("{}K", m_pendingKelvin));
@@ -571,36 +577,32 @@ void DisplayTab::flushPendingWarmth() {
   (void)m_config->setOverride({"nightlight", "temperature_night"}, static_cast<std::int64_t>(kelvin));
 }
 
-void DisplayTab::sunTimeStrings(std::string& sunset, std::string& sunrise) const {
-  sunset.clear();
-  sunrise.clear();
+// Sources in order: custom schedule from the config, today's forecast, the night-light service's own estimate.
+DisplayTab::SunStrings DisplayTab::sunTimeStrings() const {
   if (m_config != nullptr) {
     const auto& location = m_config->config().location;
     if (location.customSchedule && !location.sunset.empty() && !location.sunrise.empty()) {
-      sunset = location.sunset;
-      sunrise = location.sunrise;
-      return;
+      return {.sunset = location.sunset, .sunrise = location.sunrise};
     }
   }
   if (m_weather != nullptr) {
     const WeatherSnapshot& snapshot = m_weather->snapshot();
     if (snapshot.valid && !snapshot.forecastDays.empty()) {
-      sunset = formatIsoTime(snapshot.forecastDays.front().sunsetIso, "%H:%M");
-      sunrise = formatIsoTime(snapshot.forecastDays.front().sunriseIso, "%H:%M");
-      if (!sunset.empty() && !sunrise.empty()) {
-        return;
+      SunStrings fromForecast{
+          .sunset = formatIsoTime(snapshot.forecastDays.front().sunsetIso, "%H:%M"),
+          .sunrise = formatIsoTime(snapshot.forecastDays.front().sunriseIso, "%H:%M"),
+      };
+      if (!fromForecast.sunset.empty() && !fromForecast.sunrise.empty()) {
+        return fromForecast;
       }
     }
   }
   if (m_nightLight != nullptr) {
     if (const auto sun = m_nightLight->sunTimes(); sun.has_value()) {
-      sunset = sun->sunset;
-      sunrise = sun->sunrise;
-      return;
+      return {.sunset = sun->sunset, .sunrise = sun->sunrise};
     }
   }
-  sunset.clear();
-  sunrise.clear();
+  return {};
 }
 
 void DisplayTab::rescanDisplays() {
@@ -626,19 +628,18 @@ void DisplayTab::toggleForce() {
   }
 }
 
-float DisplayTab::quickPanelHeight(float width, float fallback) const {
-  (void)width;
-  (void)fallback;
+float DisplayTab::quickPanelHeight(float /*width*/, float /*fallback*/) const {
   constexpr float kRow = term_frame::kRowHeight;
   constexpr float gap = Style::spaceXs;
 
   const std::size_t displays = m_brightness != nullptr ? m_brightness->displays().size() : 0;
   // Output rows plus the `all` row, or the single `unavailable` line.
-  const float bodyHeight = displays > 0 ? static_cast<float>(displays + 1) * kRow + static_cast<float>(displays) * gap : kRow;
+  const float bodyHeight =
+      displays > 0 ? static_cast<float>(displays + 1) * kRow + static_cast<float>(displays) * gap : kRow;
   const float brightnessBox = kBoxChrome + bodyHeight + gap + kRow; // + rescan keyword row
 
-  // schedule, force on now, warmth, status line.
-  const float nightBox = m_nightLight != nullptr ? kBoxChrome + 4.0F * kRow + 3.0F * gap : kBoxChrome + kRow;
+  const float nightBox =
+      m_nightLight != nullptr ? kBoxChrome + kNightRows * kRow + (kNightRows - 1) * gap : kBoxChrome + kRow;
   return brightnessBox + kSectionGap + nightBox;
 }
 

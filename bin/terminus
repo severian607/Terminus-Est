@@ -1,41 +1,18 @@
 #!/usr/bin/env python3
-# Terminus-Est primary desktop dispatcher
+# Terminus-Est primary desktop dispatcher.
+# Runs on key presses (`terminus compat ...`): import only os/sys at top level, so start-up stays near bare Python.
 import os
-from pathlib import Path
-import re
-import runpy
 import sys
 
-PROJECT = Path(__file__).resolve().parents[1]
-DESKTOP = PROJECT / 'modules/desktop'
-os.environ['TERMINUS_PATH'] = str(PROJECT)
-os.environ['TERMINUS_DESKTOP_PATH'] = str(DESKTOP)
-os.environ['PATH'] = os.pathsep.join((str(PROJECT / 'bin'), str(DESKTOP / 'bin'), os.environ.get('PATH', '')))
+PROJECT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+DESKTOP = os.path.join(PROJECT, "modules/desktop")
+os.environ["TERMINUS_PATH"] = PROJECT
+os.environ["TERMINUS_DESKTOP_PATH"] = DESKTOP
+os.environ["PATH"] = os.pathsep.join(
+    (os.path.join(PROJECT, "bin"), os.path.join(DESKTOP, "bin"), os.environ.get("PATH", ""))
+)
 
-
-def run(program, *args):
-    os.execv(str(program), [str(program), *args])
-
-
-def reject(message):
-    print('Terminus-Est: ' + message, file=sys.stderr)
-    raise SystemExit(2)
-
-
-def desktop(name, *args):
-    program = DESKTOP / 'bin' / name
-    if not (program.is_file() and os.access(program, os.X_OK)):
-        reject(f"unknown desktop helper '{name}'")
-    run(program, *args)
-
-
-def owned(name, args):
-    run(PROJECT / 'bin' / name, *args)
-
-
-def dispatch(args):
-    if not args or args[0] in ('-h', '--help', 'commands'):
-        print('''Terminus-Est unified desktop
+HELP = """Terminus-Est unified desktop
   terminus bar [native arguments]         Terminus-Bar
   terminus settings [section]             Open Terminus-Settings
   terminus settings {get,schema,validate,render,set,reset,apply,login-apply} ...
@@ -51,85 +28,179 @@ def dispatch(args):
 Configuration: ~/.config/terminus-est; maintained helpers: modules/desktop.
 Menus, application launching and appearance use the native desktop modules.
 Broad configuration resets are disabled; recovery is recorded in the
-maintained Terminus-Est ownership map.''')
+maintained Terminus-Est ownership map."""
+
+HELPER_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
+# `compat PREFIX-REST` is the upstream spelling of the group command `PREFIX REST`.
+COMPAT_GROUP_PREFIXES = ("launch-", "restart-", "refresh-", "system-", "branding-")
+# Programs this repository owns, by group command (`terminus bar ...`).
+OWNED_PROGRAMS = {"bar": "terminus-bar", "launcher": "terminus-launcher", "screensaver": "terminus-screensaver"}
+# `terminus launch TARGET ...` targets.
+LAUNCH_PROGRAMS = {
+    "launcher": "terminus-launcher",
+    "screensaver": "terminus-screensaver",
+    "settings": "terminus-settings",
+    "menu": "terminus-settings",
+}
+RESTART_UNITS = {
+    "bar": "terminus-bar.service",
+    "launcher": "terminus-launcher.service",
+    "swayosd": "swayosd-server.service",
+}
+SYSTEMCTL = "/usr/bin/systemctl"
+
+
+def run(program, *args):
+    os.execv(program, [program, *args])
+
+
+def reject(message):
+    print("Terminus-Est: " + message, file=sys.stderr)
+    raise SystemExit(2)
+
+
+def desktop(name, *args):
+    program = os.path.join(DESKTOP, "bin", name)
+    if not (os.path.isfile(program) and os.access(program, os.X_OK)):
+        reject(f"unknown desktop helper '{name}'")
+    run(program, *args)
+
+
+def owned(name, args):
+    run(os.path.join(PROJECT, "bin", name), *args)
+
+
+def is_helper_name(name):
+    """Lowercase alphanumeric words joined by single hyphens."""
+    return all(word and HELPER_NAME_CHARS.issuperset(word) for word in name.split("-"))
+
+
+def compat(args):
+    if not args or not is_helper_name(args[0]):
+        reject("compat requires an exact upstream helper suffix")
+    helper, tail = args[0], args[1:]
+    if helper == "hyprland-window-transparency-toggle":
+        owned("terminus-transparency", tail)
+    if helper == "menu" and not tail:
+        owned("terminus-settings", [])
+    for prefix in COMPAT_GROUP_PREFIXES:
+        if helper.startswith(prefix):
+            dispatch([prefix[:-1], helper[len(prefix) :], *tail])  # never returns: every route execs or exits
+    if helper == "screensaver":
+        owned("terminus-screensaver", tail)
+    desktop("terminus-" + helper, *tail)
+
+
+def menu(args):
+    if args:
+        desktop("terminus-menu", *args)
+    owned("terminus-settings", [])
+
+
+def settings(args):
+    # One command: settings subcommands go to the command line, anything else opens the window.
+    owned("terminus-settings", args)
+
+
+def launch(args):
+    if args and args[0] in LAUNCH_PROGRAMS:
+        owned(LAUNCH_PROGRAMS[args[0]], args[1:])
+
+
+def system(args):
+    if not args or args[0] != "lock":
+        return
+    # A host with config/hosts/<hostname>/secure-lock (the laptop) locks for real.
+    try:
+        with open("/etc/hostname") as handle:
+            host = handle.read().strip()
+    except OSError:
+        host = ""
+    if host and os.path.exists(os.path.join(PROJECT, "config/hosts", host, "secure-lock")):
+        owned("terminus-lock", ["force", *args[1:]])
+    owned("terminus-screensaver", ["force", *args[1:]])
+
+
+def branding(args):
+    if args and args[0] == "screensaver":
+        reject(
+            "screensaver artwork is owned by config/terminus-screensaver; "
+            "edit that source, not retired branding writers"
+        )
+
+
+def restart_hypridle():
+    """Regenerate and apply only the idle configuration."""
+    from pathlib import Path
+
+    sys.path.insert(0, os.path.join(PROJECT, "lib"))
+    import session
+    import settings as backend
+
+    root = Path("~/.config/terminus-est").expanduser().resolve()
+    try:
+        with backend.locked(root) as root_fd:
+            values, _ = backend.load(root, root_fd)
+            for notice in session.apply(values, root, {root / "generated/hypridle.conf"}):
+                print(notice)
+    except Exception as error:
+        reject(str(error))
+
+
+def restart(args):
+    if not args:
+        reject("choose bar, launcher, hypridle or swayosd; broad desktop restarts are not supported")
+    if args[0] not in RESTART_UNITS and args[0] != "hypridle":
+        return
+    if len(args) != 1:
+        reject("restart accepts exactly one component")
+    if args[0] == "hypridle":
+        restart_hypridle()
+        raise SystemExit(0)
+    run(SYSTEMCTL, "--user", "restart", RESTART_UNITS[args[0]])
+
+
+def refresh(args):
+    if not args or args[0] not in ("appearance", "settings"):
+        reject(
+            "broad config refresh is disabled: canonical files are maintained sources; "
+            "use settings apply or the documented recovery procedure"
+        )
+    owned("terminus-settings", ["apply", *args[1:]])
+
+
+def owned_route(program):
+    return lambda args: owned(program, args)
+
+
+# Group command -> handler(arguments). A handler either execs, exits, or returns to fall through to desktop-core.
+ROUTES = {
+    "compat": compat,
+    "menu": menu,
+    "settings": settings,
+    "launch": launch,
+    "system": system,
+    "branding": branding,
+    "restart": restart,
+    "refresh": refresh,
+    **{command: owned_route(program) for command, program in OWNED_PROGRAMS.items()},
+}
+
+
+def dispatch(args):
+    if not args or args[0] in ("-h", "--help", "commands"):
+        print(HELP)
         return
     command, rest = args[0], args[1:]
-    if command == 'compat':
-        if not rest or not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', rest[0]):
-            reject('compat requires an exact upstream helper suffix')
-        helper, tail = rest[0], rest[1:]
-        if helper == 'hyprland-window-transparency-toggle':
-            owned('terminus-transparency', tail)
-        if helper == 'menu' and not tail:
-            owned('terminus-settings', [])
-        for prefix in ('launch-', 'restart-', 'refresh-', 'system-', 'branding-'):
-            if helper.startswith(prefix):
-                return dispatch([prefix[:-1], helper[len(prefix):], *tail])
-        if helper == 'screensaver':
-            owned('terminus-screensaver', tail)
-        desktop('terminus-' + helper, *tail)
-    modules = {'bar': 'terminus-bar', 'launcher': 'terminus-launcher',
-               'screensaver': 'terminus-screensaver'}
-    if command in modules:
-        owned(modules[command], rest)
-    if command == 'menu':
-        if rest:
-            desktop('terminus-menu', *rest)
-        owned('terminus-settings', [])
-    if command == 'settings':
-        # One command: settings subcommands go to the command line, anything else opens the window.
-        owned('terminus-settings', rest)
-    if command == 'launch' and rest:
-        if rest[0] == 'launcher':
-            owned('terminus-launcher', rest[1:])
-        if rest[0] == 'screensaver':
-            owned('terminus-screensaver', rest[1:])
-        if rest[0] in ('settings', 'menu'):
-            owned('terminus-settings', rest[1:])
-    if command == 'system' and rest and rest[0] == 'lock':
-        # A host with config/hosts/<hostname>/secure-lock (the laptop) locks for real.
-        try:
-            host = Path('/etc/hostname').read_text().strip()
-        except OSError:
-            host = ''
-        if host and (PROJECT / 'config/hosts' / host / 'secure-lock').exists():
-            owned('terminus-lock', ['force', *rest[1:]])
-        owned('terminus-screensaver', ['force', *rest[1:]])
-    if command == 'branding' and rest and rest[0] == 'screensaver':
-        reject('screensaver artwork is owned by config/terminus-screensaver; edit that source, not retired branding writers')
-    if command == 'restart':
-        if not rest:
-            reject('choose bar, launcher, hypridle or swayosd; broad desktop restarts are not supported')
-        if rest[0] == 'hypridle':
-            if len(rest) != 1:
-                reject('restart accepts exactly one component')
-            root = (Path.home() / '.config/terminus-est').resolve()
-            backend = runpy.run_path(str(PROJECT / 'lib/settings.py'))
-            session = runpy.run_path(str(PROJECT / 'lib/session.py'))
-            try:
-                with backend['locked'](root) as root_fd:
-                    values, _ = backend['load'](root, root_fd)
-                    for notice in session['apply'](values, root, {root / 'generated/hypridle.conf'}):
-                        print(notice)
-            except Exception as error:
-                reject(str(error))
-            return
-        services = {'bar': 'terminus-bar', 'launcher': 'terminus-launcher',
-                    'swayosd': 'swayosd-server'}
-        if rest[0] in services:
-            if len(rest) != 1:
-                reject('restart accepts exactly one component')
-            run('/usr/bin/systemctl', '--user', 'restart', services[rest[0]] + '.service')
-    if command == 'refresh':
-        if not rest or rest[0] not in ('appearance', 'settings'):
-            reject('broad config refresh is disabled: canonical files are maintained sources; use settings apply or the documented recovery procedure')
-        owned('terminus-settings', ['apply', *rest[1:]])
-    desktop('desktop-core', *args)
+    handler = ROUTES.get(command)
+    if handler is not None:
+        handler(rest)
+    desktop("desktop-core", *args)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     try:
         dispatch(sys.argv[1:])
     except OSError as error:
-        print('Terminus-Est: ' + str(error), file=sys.stderr)
-        raise SystemExit(1)
+        print("Terminus-Est: " + str(error), file=sys.stderr)
+        raise SystemExit(1) from None

@@ -1,3 +1,6 @@
+// Settings-window pages backed by the `terminus-settings` CLI: schema + values reads, queued writes,
+// and the node builders for each row kind. Every CLI call is asynchronous (see run()).
+
 #include "shell/settings/terminus_central_settings.h"
 
 #include "core/deferred_call.h"
@@ -24,6 +27,7 @@ namespace {
 
   using json = nlohmann::json;
 
+  constexpr std::string_view kCli = "terminus-settings";
   constexpr long kReadTimeoutMs = 15000;
   constexpr long kWriteTimeoutMs = 30000;
   constexpr long kLoginApplyTimeoutMs = 600000;
@@ -32,6 +36,10 @@ namespace {
   constexpr std::size_t kValueChars = 6;
   constexpr std::size_t kMaxTileChoices = 4;
   constexpr float kRowHeight = 22.0F;
+  constexpr float kCellInsetPx = 2.0F; // marker/reset cells: room for the tile border
+  constexpr float kSwatchRatio = 0.7F; // swatch edge relative to the row height
+  constexpr double kFloatEpsilon = 1e-6;
+  constexpr double kNumberSnap = 1000.0; // numbers sent to the CLI keep three decimals
 
   struct Group {
     std::string_view numeral;
@@ -43,8 +51,8 @@ namespace {
     static const std::vector<Group> groups = {
         {"¹",
          "palette",
-         {"appearance.background", "appearance.foreground", "appearance.muted", "appearance.alert",
-          "appearance.accent", "appearance.active_border", "appearance.inactive_border"}},
+         {"appearance.background", "appearance.foreground", "appearance.muted", "appearance.alert", "appearance.accent",
+          "appearance.active_border", "appearance.inactive_border"}},
         {"²",
          "glass",
          {"appearance.background_opacity", "appearance.glass_opacity", "appearance.chrome_opacity",
@@ -110,13 +118,15 @@ namespace {
 
   bool sameValue(const json& a, const json& b) {
     if (a.is_number() && b.is_number()) {
-      return std::fabs(a.get<double>() - b.get<double>()) < 1e-6;
+      return std::fabs(a.get<double>() - b.get<double>()) < kFloatEpsilon;
     }
     if (a.is_string() && b.is_string()) {
       return lower(a.get<std::string>()) == lower(b.get<std::string>());
     }
     return a == b;
   }
+
+  double defaultStep(const std::string& kind) { return kind == "integer" ? 1.0 : 0.01; }
 
   std::string formatNumber(const std::string& kind, double value) {
     if (kind == "integer") {
@@ -130,7 +140,7 @@ namespace {
     if (kind == "integer") {
       return static_cast<long long>(std::llround(value));
     }
-    return std::round(value * 1000.0) / 1000.0;
+    return std::round(value * kNumberSnap) / kNumberSnap;
   }
 
   // A dim, single-line terminal-font label.
@@ -228,8 +238,38 @@ void TerminusCentralSettings::finishRead() {
   }
 }
 
+std::optional<TerminusCentralSettings::Entry> TerminusCentralSettings::parseEntry(const json& item) {
+  if (!item.is_object() || !item.contains("key") || !item["key"].is_string()) {
+    return std::nullopt;
+  }
+  Entry entry;
+  entry.key = item["key"].get<std::string>();
+  const auto dot = entry.key.find('.');
+  if (dot == std::string::npos) {
+    return std::nullopt;
+  }
+  entry.section = entry.key.substr(0, dot);
+  entry.name = entry.key.substr(dot + 1);
+  entry.kind = item.value("kind", std::string("string"));
+  entry.label = item.value("label", entry.name);
+  entry.def = item.contains("default") ? item["default"] : json();
+  if (entry.kind == "number" || entry.kind == "integer") {
+    entry.min = item.value("min", 0.0);
+    entry.max = item.value("max", 1.0);
+    entry.step = item.value("step", defaultStep(entry.kind));
+  }
+  if (item.contains("choices") && item["choices"].is_array()) {
+    for (const auto& choice : item["choices"]) {
+      if (choice.is_string()) {
+        entry.choices.push_back(choice.get<std::string>());
+      }
+    }
+  }
+  return entry;
+}
+
 void TerminusCentralSettings::startSchemaRead() {
-  run({"terminus-settings", "schema"}, kReadTimeoutMs, [this](process::RunResult result) {
+  run({std::string(kCli), "schema"}, kReadTimeoutMs, [this](process::RunResult result) {
     if (!result) {
       m_error = failureMessage(result, "terminus-settings schema");
       finishRead();
@@ -243,33 +283,9 @@ void TerminusCentralSettings::startSchemaRead() {
     }
     std::vector<Entry> entries;
     for (const auto& item : schema) {
-      if (!item.is_object() || !item.contains("key") || !item["key"].is_string()) {
-        continue;
+      if (auto entry = parseEntry(item)) {
+        entries.push_back(std::move(*entry));
       }
-      Entry entry;
-      entry.key = item["key"].get<std::string>();
-      const auto dot = entry.key.find('.');
-      if (dot == std::string::npos) {
-        continue;
-      }
-      entry.section = entry.key.substr(0, dot);
-      entry.name = entry.key.substr(dot + 1);
-      entry.kind = item.value("kind", std::string("string"));
-      entry.label = item.value("label", entry.name);
-      entry.def = item.contains("default") ? item["default"] : json();
-      if (entry.kind == "number" || entry.kind == "integer") {
-        entry.min = item.value("min", 0.0);
-        entry.max = item.value("max", 1.0);
-        entry.step = item.value("step", entry.kind == "integer" ? 1.0 : 0.01);
-      }
-      if (item.contains("choices") && item["choices"].is_array()) {
-        for (const auto& choice : item["choices"]) {
-          if (choice.is_string()) {
-            entry.choices.push_back(choice.get<std::string>());
-          }
-        }
-      }
-      entries.push_back(std::move(entry));
     }
     m_entries = std::move(entries);
     m_schemaLoaded = true;
@@ -278,8 +294,14 @@ void TerminusCentralSettings::startSchemaRead() {
   });
 }
 
+// Once values exist a failed re-read only shows in the status line; the page keeps its data.
+void TerminusCentralSettings::failRead(const std::string& message) {
+  (m_valuesLoaded ? m_status : m_error) = message;
+  finishRead();
+}
+
 void TerminusCentralSettings::startGetRead() {
-  run({"terminus-settings", "get"}, kReadTimeoutMs, [this](process::RunResult result) {
+  run({std::string(kCli), "get"}, kReadTimeoutMs, [this](process::RunResult result) {
     // A write is pending or running: its optimistic values would be overwritten by this stale
     // snapshot. The write path re-reads once it drains.
     if (m_inFlight || !m_queue.empty()) {
@@ -288,24 +310,12 @@ void TerminusCentralSettings::startGetRead() {
       return;
     }
     if (!result) {
-      const std::string message = failureMessage(result, "terminus-settings get");
-      if (m_valuesLoaded) {
-        m_status = message;
-      } else {
-        m_error = message;
-      }
-      finishRead();
+      failRead(failureMessage(result, "terminus-settings get"));
       return;
     }
     json values = json::parse(result.out, nullptr, false);
     if (values.is_discarded() || !values.is_object()) {
-      const std::string message = "terminus-settings get: unreadable output";
-      if (m_valuesLoaded) {
-        m_status = message;
-      } else {
-        m_error = message;
-      }
-      finishRead();
+      failRead("terminus-settings get: unreadable output");
       return;
     }
     m_values = std::move(values);
@@ -400,7 +410,7 @@ void TerminusCentralSettings::pumpWrites() {
   }
   m_inFlight = std::move(m_queue.front());
   m_queue.pop_front();
-  std::vector<std::string> args = {"terminus-settings"};
+  std::vector<std::string> args = {std::string(kCli)};
   if (m_inFlight->reset) {
     args.push_back("reset");
     args.push_back(m_inFlight->key);
@@ -449,14 +459,12 @@ void TerminusCentralSettings::runLoginApply() {
   m_loginBusy = true;
   m_status = "login-apply: waiting for authentication...";
   notify();
-  run({"terminus-settings", "login-apply"}, kLoginApplyTimeoutMs, [this](process::RunResult result) {
+  run({std::string(kCli), "login-apply"}, kLoginApplyTimeoutMs, [this](process::RunResult result) {
     m_loginBusy = false;
     if (result) {
       m_status = "login screen updated";
-    } else if (result.timedOut) {
-      m_status = "login-apply timed out";
     } else {
-      m_status = failureMessage(result, "login-apply");
+      m_status = failureMessage(result, "login-apply"); // names the command itself when it timed out
       if (m_status.find("login-apply") == std::string::npos) {
         m_status = std::format("login-apply (exit {}): {}", result.exitCode, m_status);
       }
@@ -507,30 +515,7 @@ std::unique_ptr<Flex> TerminusCentralSettings::buildPage(std::string_view sectio
   }
 
   if (section == "appearance") {
-    std::vector<bool> used(sectionEntries.size(), false);
-    for (const Group& group : appearanceGroups()) {
-      std::vector<const Entry*> members;
-      for (const std::string_view key : group.keys) {
-        for (std::size_t i = 0; i < sectionEntries.size(); ++i) {
-          if (sectionEntries[i]->key == key) {
-            members.push_back(sectionEntries[i]);
-            used[i] = true;
-          }
-        }
-      }
-      if (!members.empty()) {
-        page->addChild(buildBox(group.numeral, group.title, members, scale));
-      }
-    }
-    std::vector<const Entry*> rest;
-    for (std::size_t i = 0; i < sectionEntries.size(); ++i) {
-      if (!used[i]) {
-        rest.push_back(sectionEntries[i]);
-      }
-    }
-    if (!rest.empty()) {
-      page->addChild(buildBox("⁵", "other", rest, scale));
-    }
+    addAppearanceBoxes(*page, sectionEntries, scale);
     return page;
   }
 
@@ -555,6 +540,34 @@ std::unique_ptr<Flex> TerminusCentralSettings::buildPage(std::string_view sectio
   return page;
 }
 
+// Fixed groups in reading order; keys the schema adds later land in a trailing "other" box.
+void TerminusCentralSettings::addAppearanceBoxes(Flex& page, const std::vector<const Entry*>& entries, float scale) {
+  std::vector<bool> used(entries.size(), false);
+  for (const Group& group : appearanceGroups()) {
+    std::vector<const Entry*> members;
+    for (const std::string_view key : group.keys) {
+      for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (entries[i]->key == key) {
+          members.push_back(entries[i]);
+          used[i] = true;
+        }
+      }
+    }
+    if (!members.empty()) {
+      page.addChild(buildBox(group.numeral, group.title, members, scale));
+    }
+  }
+  std::vector<const Entry*> rest;
+  for (std::size_t i = 0; i < entries.size(); ++i) {
+    if (!used[i]) {
+      rest.push_back(entries[i]);
+    }
+  }
+  if (!rest.empty()) {
+    page.addChild(buildBox("⁵", "other", rest, scale));
+  }
+}
+
 std::unique_ptr<Flex> TerminusCentralSettings::buildBox(
     std::string_view numeral, std::string_view title, const std::vector<const Entry*>& entries, float scale
 ) {
@@ -569,8 +582,8 @@ std::unique_ptr<Flex> TerminusCentralSettings::buildRow(const Entry& entry, floa
   const float fontSize = Style::fontSizeCaption * scale;
   const float gap = Style::spaceSm * scale;
   const float controlWidth = term_frame::monoWidth(kControlChars, fontSize);
-  const float resetWidth = term_frame::monoWidth(kResetChars, fontSize) + 2.0F * gap + 2.0F;
-  const float dotWidth = term_frame::monoWidth(1, fontSize) + 2.0F;
+  const float resetWidth = term_frame::monoWidth(kResetChars, fontSize) + 2.0F * gap + kCellInsetPx;
+  const float dotWidth = term_frame::monoWidth(1, fontSize) + kCellInsetPx;
 
   const json* current = currentValue(entry);
   const json value = current != nullptr ? *current : entry.def;
@@ -633,171 +646,174 @@ std::unique_ptr<Flex> TerminusCentralSettings::buildRow(const Entry& entry, floa
 }
 
 void TerminusCentralSettings::buildControl(Flex& cell, const Entry& entry, const json& current, float scale) {
-  const float fontSize = Style::fontSizeCaption * scale;
-  const float gap = Style::spaceSm * scale;
-  const float rowHeight = kRowHeight * scale;
-  const std::string key = entry.key;
-
   if (entry.kind == "boolean") {
-    const bool on = current.is_boolean() && current.get<bool>();
-    Label* marker = nullptr;
-    auto toggle = term_frame::tile(
-        {
-            .label = on ? "on" : "off",
-            .marker = &marker,
-            .toggle = true,
-            .on = on,
-            .dimWhenOff = true,
-            .onClick = [this, key, on]() { commit(key, json(!on)); },
-        },
-        scale
-    );
-    toggle->setFlexGrow(1.0F);
-    cell.addChild(std::move(toggle));
-    return;
+    buildToggle(cell, entry, current, scale);
+  } else if (entry.kind == "number" || entry.kind == "integer") {
+    buildNumberControl(cell, entry, current, scale);
+  } else if (entry.kind == "select") {
+    buildSelectControl(cell, entry, current, scale);
+  } else if (entry.kind == "color") {
+    buildColorControl(cell, entry, current, scale);
+  } else {
+    // Unknown kind: show the raw value, read-only.
+    cell.addChild(mutedLabel(current.dump(), Style::fontSizeCaption * scale, 1.0F));
   }
+}
 
-  if (entry.kind == "number" || entry.kind == "integer") {
-    struct Refs {
-      Slider* slider = nullptr;
-      Label* value = nullptr;
-    };
-    auto refs = std::make_shared<Refs>();
-    const double number = current.is_number() ? current.get<double>() : entry.min;
-    const std::string kind = entry.kind;
-    cell.addChild(
-        ui::slider({
-            .out = &refs->slider,
-            .minValue = entry.min,
-            .maxValue = entry.max,
-            .step = entry.step > 0.0 ? entry.step : (kind == "integer" ? 1.0 : 0.01),
-            .value = number,
-            .trackHeight = Style::sliderTrackHeight * scale,
-            .controlHeight = rowHeight,
-            .flexGrow = 1.0F,
-            .onValueChanged =
-                [refs, kind](double v) {
-                  if (refs->value != nullptr) {
-                    refs->value->setText(formatNumber(kind, v));
-                  }
-                },
-            .onDragEnd =
-                [this, refs, key, kind]() {
-                  if (refs->slider != nullptr) {
-                    commit(key, numberValue(kind, refs->slider->value()));
-                  }
-                },
-        })
-    );
-    const float valueWidth = term_frame::monoWidth(kValueChars, fontSize);
-    cell.addChild(
-        ui::label({
-            .out = &refs->value,
-            .text = formatNumber(kind, number),
-            .fontSize = fontSize,
-            .fontFamily = std::string(term_frame::kFont),
-            .color = colorSpecFromRole(ColorRole::OnSurface),
-            .minWidth = valueWidth,
-            .maxWidth = valueWidth,
-            .maxLines = 1,
-            .textAlign = TextAlign::End,
-        })
-    );
-    return;
-  }
+void TerminusCentralSettings::buildToggle(Flex& cell, const Entry& entry, const json& current, float scale) {
+  const bool on = current.is_boolean() && current.get<bool>();
+  Label* marker = nullptr;
+  auto toggle = term_frame::tile(
+      {
+          .label = on ? "on" : "off",
+          .marker = &marker,
+          .toggle = true,
+          .on = on,
+          .dimWhenOff = true,
+          .onClick = [this, key = entry.key, on]() { commit(key, json(!on)); },
+      },
+      scale
+  );
+  toggle->setFlexGrow(1.0F);
+  cell.addChild(std::move(toggle));
+}
 
-  if (entry.kind == "select") {
-    const std::string selected = current.is_string() ? current.get<std::string>() : std::string();
-    if (entry.choices.size() <= kMaxTileChoices) {
-      for (const std::string& choice : entry.choices) {
-        auto option = term_frame::tile(
-            {
-                .label = choice,
-                .on = choice == selected,
-                .dimWhenOff = true,
-                .center = true,
-                .onClick = [this, key, choice]() { commit(key, json(choice)); },
-            },
-            scale
-        );
-        option->setFlexGrow(1.0F);
-        cell.addChild(std::move(option));
-      }
-      return;
+void TerminusCentralSettings::buildNumberControl(Flex& cell, const Entry& entry, const json& current, float scale) {
+  const float fontSize = Style::fontSizeCaption * scale;
+  struct Refs {
+    Slider* slider = nullptr;
+    Label* value = nullptr;
+  };
+  auto refs = std::make_shared<Refs>();
+  const double number = current.is_number() ? current.get<double>() : entry.min;
+  cell.addChild(
+      ui::slider({
+          .out = &refs->slider,
+          .minValue = entry.min,
+          .maxValue = entry.max,
+          .step = entry.step > 0.0 ? entry.step : defaultStep(entry.kind),
+          .value = number,
+          .trackHeight = Style::sliderTrackHeight * scale,
+          .controlHeight = kRowHeight * scale,
+          .flexGrow = 1.0F,
+          .onValueChanged =
+              [refs, kind = entry.kind](double v) {
+                if (refs->value != nullptr) {
+                  refs->value->setText(formatNumber(kind, v));
+                }
+              },
+          .onDragEnd =
+              [this, refs, key = entry.key, kind = entry.kind]() {
+                if (refs->slider != nullptr) {
+                  commit(key, numberValue(kind, refs->slider->value()));
+                }
+              },
+      })
+  );
+  const float valueWidth = term_frame::monoWidth(kValueChars, fontSize);
+  cell.addChild(
+      ui::label({
+          .out = &refs->value,
+          .text = formatNumber(entry.kind, number),
+          .fontSize = fontSize,
+          .fontFamily = std::string(term_frame::kFont),
+          .color = colorSpecFromRole(ColorRole::OnSurface),
+          .minWidth = valueWidth,
+          .maxWidth = valueWidth,
+          .maxLines = 1,
+          .textAlign = TextAlign::End,
+      })
+  );
+}
+
+void TerminusCentralSettings::buildSelectControl(Flex& cell, const Entry& entry, const json& current, float scale) {
+  const std::string selected = current.is_string() ? current.get<std::string>() : std::string();
+  if (entry.choices.size() <= kMaxTileChoices) {
+    for (const std::string& choice : entry.choices) {
+      auto option = term_frame::tile(
+          {
+              .label = choice,
+              .on = choice == selected,
+              .dimWhenOff = true,
+              .center = true,
+              .onClick = [this, key = entry.key, choice]() { commit(key, json(choice)); },
+          },
+          scale
+      );
+      option->setFlexGrow(1.0F);
+      cell.addChild(std::move(option));
     }
-    std::optional<std::size_t> index;
-    for (std::size_t i = 0; i < entry.choices.size(); ++i) {
-      if (entry.choices[i] == selected) {
-        index = i;
-      }
+    return;
+  }
+  std::optional<std::size_t> index;
+  for (std::size_t i = 0; i < entry.choices.size(); ++i) {
+    if (entry.choices[i] == selected) {
+      index = i;
     }
-    cell.addChild(
-        ui::select({
-            .options = entry.choices,
-            .selectedIndex = index,
-            .fontSize = fontSize,
-            .controlHeight = rowHeight,
-            .horizontalPadding = gap,
-            .flexGrow = 1.0F,
-            .onSelectionChanged =
-                [this, key](std::size_t /*index*/, std::string_view text) { commit(key, json(std::string(text))); },
-        })
-    );
-    return;
   }
+  cell.addChild(
+      ui::select({
+          .options = entry.choices,
+          .selectedIndex = index,
+          .fontSize = Style::fontSizeCaption * scale,
+          .controlHeight = kRowHeight * scale,
+          .horizontalPadding = Style::spaceSm * scale,
+          .flexGrow = 1.0F,
+          .onSelectionChanged = [this, key = entry.key](std::size_t /*index*/, std::string_view text) {
+            commit(key, json(std::string(text)));
+          },
+      })
+  );
+}
 
-  if (entry.kind == "color") {
-    struct Refs {
-      Input* input = nullptr;
-      Box* swatch = nullptr;
-    };
-    auto refs = std::make_shared<Refs>();
-    const std::string text = current.is_string() ? lower(current.get<std::string>()) : std::string();
-    const float swatchSize = rowHeight * 0.7F;
-    cell.addChild(
-        ui::box({
-            .out = &refs->swatch,
-            .fill = validHex(text) ? fixedColorSpec(hexColor(text)) : clearColorSpec(),
-            .border = term_frame::lineColor(),
-            .borderWidth = Style::borderWidth,
-            .radius = 0.0F,
-            .width = swatchSize,
-            .height = swatchSize,
-        })
-    );
-    cell.addChild(
-        ui::input({
-            .out = &refs->input,
-            .value = text,
-            .placeholder = "#rrggbb",
-            .fontSize = fontSize,
-            .controlHeight = rowHeight,
-            .horizontalPadding = gap,
-            .flexGrow = 1.0F,
-            .onChange =
-                [refs](const std::string& typed) {
-                  const bool valid = validHex(typed);
-                  if (refs->input != nullptr) {
-                    refs->input->setInvalid(!valid);
-                  }
-                  if (valid && refs->swatch != nullptr) {
-                    refs->swatch->setFill(hexColor(typed));
-                  }
-                },
-            .onSubmit =
-                [this, refs, key](const std::string& typed) {
-                  if (validHex(typed)) {
-                    commit(key, json(lower(typed)));
-                  } else if (refs->input != nullptr) {
-                    refs->input->setInvalid(true);
-                  }
-                },
-            .submitOnFocusLoss = true,
-        })
-    );
-    return;
-  }
-
-  // Unknown kind: show the raw value, read-only.
-  cell.addChild(mutedLabel(current.dump(), fontSize, 1.0F));
+void TerminusCentralSettings::buildColorControl(Flex& cell, const Entry& entry, const json& current, float scale) {
+  struct Refs {
+    Input* input = nullptr;
+    Box* swatch = nullptr;
+  };
+  auto refs = std::make_shared<Refs>();
+  const float rowHeight = kRowHeight * scale;
+  const std::string text = current.is_string() ? lower(current.get<std::string>()) : std::string();
+  const float swatchSize = rowHeight * kSwatchRatio;
+  cell.addChild(
+      ui::box({
+          .out = &refs->swatch,
+          .fill = validHex(text) ? fixedColorSpec(hexColor(text)) : clearColorSpec(),
+          .border = term_frame::lineColor(),
+          .borderWidth = Style::borderWidth,
+          .radius = 0.0F,
+          .width = swatchSize,
+          .height = swatchSize,
+      })
+  );
+  cell.addChild(
+      ui::input({
+          .out = &refs->input,
+          .value = text,
+          .placeholder = "#rrggbb",
+          .fontSize = Style::fontSizeCaption * scale,
+          .controlHeight = rowHeight,
+          .horizontalPadding = Style::spaceSm * scale,
+          .flexGrow = 1.0F,
+          .onChange =
+              [refs](const std::string& typed) {
+                const bool valid = validHex(typed);
+                if (refs->input != nullptr) {
+                  refs->input->setInvalid(!valid);
+                }
+                if (valid && refs->swatch != nullptr) {
+                  refs->swatch->setFill(hexColor(typed));
+                }
+              },
+          .onSubmit =
+              [this, refs, key = entry.key](const std::string& typed) {
+                if (validHex(typed)) {
+                  commit(key, json(lower(typed)));
+                } else if (refs->input != nullptr) {
+                  refs->input->setInvalid(true);
+                }
+              },
+          .submitOnFocusLoss = true,
+      })
+  );
 }

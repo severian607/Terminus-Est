@@ -21,12 +21,11 @@ o.window("chrome-nngceckbapebfimnlniiiahkandclblb-Default", { no_screen_share = 
 -- # Browsers.
 o.window("((google-)?[cC]hrom(e|ium)|[bB]rave-browser|[mM]icrosoft-edge|Vivaldi-stable|helium)", { tag = "+chromium-based-browser" })
 o.window("([fF]irefox|zen|librewolf)", { tag = "+firefox-based-browser" })
-o.window({ tag = "chromium-based-browser" }, { tag = "-default-opacity", tile = true, })
-o.window({ tag = "firefox-based-browser" }, { tag = "-default-opacity", })
-o.window("(chrome-youtube\\.com__-Default|chrome-app\\.zoom\\.us__wc_home-Default)", { tag = "-chromium-based-browser" })
-o.window("(chrome-youtube\\.com__-Default|chrome-app\\.zoom\\.us__wc_home-Default)", { tag = "-default-opacity" })
+o.window({ tag = "chromium-based-browser" }, { tag = "-default-opacity", tile = true })
+o.window({ tag = "firefox-based-browser" }, { tag = "-default-opacity" })
+o.window(o.classes.web_calls, { tag = "-chromium-based-browser" })
+o.window(o.classes.web_calls, { tag = "-default-opacity" })
 o.window({ title = ".*is sharing.*" }, { workspace = "special silent" })
-
 
 -- # JetBrains, LocalSend and PiP.
 o.window("^(jetbrains-.*)$", { no_follow_mouse = true })
@@ -40,16 +39,15 @@ o.window({ tag = "pip" }, {
   pin = true,
   size = { 600, 338 },
   keep_aspect_ratio = true,
-
   move = { "(monitor_w-window_w-40)", "(monitor_h*0.04)" },
 })
 
 -- # Games and streaming.
-o.window("qemu", { tag = "-default-opacity", })
+o.window("qemu", { tag = "-default-opacity" })
 o.window("com.libretro.RetroArch", { fullscreen = true, tag = "-default-opacity", idle_inhibit = "fullscreen" })
 o.window("steam", { float = true, idle_inhibit = "fullscreen" })
 o.window({ class = "steam", title = "Steam" }, { center = true, size = { 1100, 700 } })
-o.window("steam.*", { tag = "-default-opacity", })
+o.window("steam.*", { tag = "-default-opacity" })
 o.window({ class = "steam", title = "Friends List" }, { size = { 460, 800 } })
 o.window("GeForceNOW", { idle_inhibit = "fullscreen" })
 o.window("com.moonlight_stream.Moonlight", { fullscreen = true, idle_inhibit = "fullscreen" })
@@ -68,17 +66,17 @@ o.window("org.gnome.Calculator", { float = true })
 
 -- # Screensaver and opaque media.
 o.window("org.terminus.screensaver", { fullscreen = true, float = true, animation = "slide" })
-o.window("^(zoom|vlc|mpv|org.kde.kdenlive|com.obsproject.Studio|com.github.PintaProject.Pinta|imv|org.gnome.NautilusPreviewer)$", { tag = "-default-opacity", })
-o.window({ class = "^md\\.obsidian\\.Obsidian$" }, { tag = "-default-opacity" })
-o.window({ class = "^dev\\.zed\\.Zed$" }, { tag = "-default-opacity" })
-o.window({ class = "^io\\.github\\.lgse\\.Strata$" }, { tag = "-default-opacity" })
+o.window(o.classes.opaque_media, { tag = "-default-opacity" })
+o.window({ class = o.classes.obsidian }, { tag = "-default-opacity" })
+o.window({ class = o.classes.zed }, { tag = "-default-opacity" })
+o.window({ class = o.classes.strata }, { tag = "-default-opacity" })
 o.window({ tag = "noidle" }, { idle_inhibit = "always" })
 
 -- # App-specific details.
 o.window("org.telegram.desktop", { focus_on_activate = false })
 o.window({ class = "^Typora$", title = "^Print$" }, { float = true, center = true })
 o.window("(Alacritty|kitty|com.mitchellh.ghostty|foot)", { tag = "+terminal" })
-o.window({ tag = "terminal" }, { tag = "-default-opacity", })
+o.window({ tag = "terminal" }, { tag = "-default-opacity" })
 
 -- # Webcam overlay.
 o.window({ title = "WebcamOverlay" }, {

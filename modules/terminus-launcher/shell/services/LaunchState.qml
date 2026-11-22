@@ -32,9 +32,10 @@ Singleton {
         return Frecency.lastUsed(root.state, id)
     }
 
-    function pickBoost(query, id) {
+    // id => 0..1 for this query; ask once per query, not per item.
+    function pickBoosts(query) {
         root.rev
-        return Frecency.pickBoost(root.state, query, id)
+        return Frecency.pickBoosts(root.state, query)
     }
 
     // The state was mutated: write it out and tell the bindings.

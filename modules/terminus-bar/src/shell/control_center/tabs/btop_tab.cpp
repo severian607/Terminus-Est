@@ -1,3 +1,6 @@
+// Task-manager tab: runs terminus-taskmanager (btop as fallback) on a pty, emulates it with libvterm and shows
+// the cell grid as Pango markup in one Label. Hot path: drainPty + writeMarkup, per key, per frame of a burst.
+
 #include "shell/control_center/tabs/btop_tab.h"
 
 #include "core/files/resource_paths.h"
@@ -19,28 +22,18 @@
 #include <cstdlib>
 #include <fcntl.h>
 #include <format>
+#include <iterator>
 #include <pty.h>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 #include <xkbcommon/xkbcommon-keysyms.h>
 
 namespace {
-
-  constexpr std::string_view kFontFamily = "MonaspiceNe Nerd Font";
-  // Ghostty's configured 9 pt terminal font rasterizes to 12 logical pixels at 96 DPI.
-  constexpr float kFontSize = 12.0F;
-  // The title row above the terminal, like the dashboard tiles' own: `⁸manager` and a rule.
-  constexpr float kTitleHeight = 22.0F;
-  constexpr std::string_view kDefaultForeground = "cfd8dc";
-  constexpr auto kFallbackDrainInterval = std::chrono::milliseconds(2000);
-  constexpr int kMaxResponseDrainFrames = 12;
-  constexpr int kMaxConsecutiveEmptyDrains = 6;
-  constexpr std::string_view kDefaultBackground = "14151a";
 
   struct Rgb {
     std::uint8_t r = 0;
@@ -49,6 +42,39 @@ namespace {
 
     [[nodiscard]] bool operator==(const Rgb&) const = default;
   };
+
+  constexpr std::string_view kFontFamily = "MonaspiceNe Nerd Font";
+  // Ghostty's configured 9 pt terminal font rasterizes to 12 logical pixels at 96 DPI.
+  constexpr float kFontSize = 12.0F;
+  // The title row above the terminal, like the dashboard tiles' own: `⁸manager` and a rule.
+  constexpr float kTitleHeight = 22.0F;
+  constexpr Rgb kDefaultForeground{.r = 0xcf, .g = 0xd8, .b = 0xdc};
+  constexpr Rgb kDefaultBackground{.r = 0x14, .g = 0x15, .b = 0x1a};
+
+  constexpr int kMinColumns = 40;
+  constexpr int kMinRows = 12;
+  constexpr std::size_t kPtyReadChunkBytes = 65536;
+  constexpr long kWinsizeFieldMax = 65535; // struct winsize fields are unsigned short
+
+  // Drain scheduling: after input, poll every frame for a short burst; otherwise poll slowly as a safety net.
+  constexpr auto kFallbackDrainInterval = std::chrono::milliseconds(2000);
+  constexpr int kMaxResponseDrainFrames = 12;
+  constexpr int kMaxConsecutiveEmptyDrains = 6;
+
+  // A task manager that dies at once must not be respawned in a tight loop by repeated Enter / focus events.
+  constexpr auto kRestartCooldown = std::chrono::milliseconds(250);
+  constexpr auto kTermGrace = std::chrono::milliseconds(1500);
+  constexpr auto kReapPoll = std::chrono::milliseconds(20);
+
+  // libvterm mouse button numbers.
+  constexpr int kVtermButtonLeft = 1;
+  constexpr int kVtermButtonMiddle = 2;
+  constexpr int kVtermButtonRight = 3;
+  constexpr int kVtermWheelUp = 4;
+  constexpr int kVtermWheelDown = 5;
+
+  // Ctrl-R: btop's "repaint now".
+  constexpr char kRequestRedraw = '\x12';
 
   struct CellStyle {
     Rgb foreground;
@@ -62,17 +88,6 @@ namespace {
     [[nodiscard]] bool operator==(const CellStyle&) const = default;
   };
 
-  [[nodiscard]] Rgb hexRgb(std::string_view value) {
-    const auto byte = [value](std::size_t offset) {
-      return static_cast<std::uint8_t>(std::stoul(std::string(value.substr(offset, 2)), nullptr, 16));
-    };
-    return {.r = byte(0), .g = byte(2), .b = byte(4)};
-  }
-
-  [[nodiscard]] std::string hexColor(const Rgb& color) {
-    return std::format("#{:02x}{:02x}{:02x}", color.r, color.g, color.b);
-  }
-
   [[nodiscard]] Rgb resolvedColor(VTermScreen* screen, VTermColor color, const Rgb& fallback, bool isDefault) {
     if (isDefault) {
       return fallback;
@@ -81,28 +96,32 @@ namespace {
     return {.r = color.rgb.red, .g = color.rgb.green, .b = color.rgb.blue};
   }
 
+  void appendEscapedChar(std::string& out, char ch) {
+    switch (ch) {
+    case '&':
+      out += "&amp;";
+      break;
+    case '<':
+      out += "&lt;";
+      break;
+    case '>':
+      out += "&gt;";
+      break;
+    case '\'':
+      out += "&apos;";
+      break;
+    case '"':
+      out += "&quot;";
+      break;
+    default:
+      out.push_back(ch);
+      break;
+    }
+  }
+
   void appendEscaped(std::string& out, std::string_view value) {
     for (const char ch : value) {
-      switch (ch) {
-      case '&':
-        out += "&amp;";
-        break;
-      case '<':
-        out += "&lt;";
-        break;
-      case '>':
-        out += "&gt;";
-        break;
-      case '\'':
-        out += "&apos;";
-        break;
-      case '"':
-        out += "&quot;";
-        break;
-      default:
-        out.push_back(ch);
-        break;
-      }
+      appendEscapedChar(out, ch);
     }
   }
 
@@ -124,17 +143,23 @@ namespace {
     }
   }
 
-  void appendStyledRun(std::string& markup, const CellStyle& style, std::string_view text) {
-    if (text.empty()) {
-      return;
+  void appendEscapedCodepoint(std::string& out, std::uint32_t codepoint) {
+    if (codepoint < 0x80U) {
+      appendEscapedChar(out, static_cast<char>(codepoint));
+    } else {
+      appendUtf8(out, codepoint);
     }
-    markup += "<span foreground=\"";
-    markup += hexColor(style.foreground);
-    markup += '"';
+  }
+
+  void appendColorAttribute(std::string& markup, std::string_view name, const Rgb& color) {
+    std::format_to(std::back_inserter(markup), " {}=\"#{:02x}{:02x}{:02x}\"", name, color.r, color.g, color.b);
+  }
+
+  void appendSpanOpen(std::string& markup, const CellStyle& style) {
+    markup += "<span";
+    appendColorAttribute(markup, "foreground", style.foreground);
     if (style.drawBackground) {
-      markup += " background=\"";
-      markup += hexColor(style.background);
-      markup += '"';
+      appendColorAttribute(markup, "background", style.background);
     }
     if (style.bold) {
       markup += " weight=\"bold\"";
@@ -149,8 +174,16 @@ namespace {
       markup += " strikethrough=\"true\"";
     }
     markup += '>';
-    appendEscaped(markup, text);
-    markup += "</span>";
+  }
+
+  [[nodiscard]] winsize makeWinsize(int rows, int cols, float cellWidth, float cellHeight) {
+    const auto field = [](long value) { return static_cast<unsigned short>(std::clamp(value, 0L, kWinsizeFieldMax)); };
+    return {
+        .ws_row = field(rows),
+        .ws_col = field(cols),
+        .ws_xpixel = field(std::lround(static_cast<float>(cols) * cellWidth)),
+        .ws_ypixel = field(std::lround(static_cast<float>(rows) * cellHeight)),
+    };
   }
 
   [[nodiscard]] VTermModifier vtermModifiers(std::uint32_t modifiers) {
@@ -209,9 +242,6 @@ namespace {
     }
   }
 
-  constexpr auto kTermGrace = std::chrono::milliseconds(1500);
-  constexpr auto kReapPoll = std::chrono::milliseconds(20);
-
   // Takes ownership of `child` (already detached from the tab): SIGTERM, poll with WNOHANG, SIGKILL after the
   // grace period, then reap. The pid is only signalled while unreaped, so it cannot have been recycled.
   // Runs on its own thread so the UI thread never waits; the thread outlives the tab.
@@ -251,6 +281,35 @@ namespace {
     }).detach();
   }
 
+  // btop >= 1.4.8 ignores ~/.config/btop/themes when --config is given; the generated theme lives there.
+  [[nodiscard]] std::string btopThemesDir() {
+    if (const char* xdgConfig = std::getenv("XDG_CONFIG_HOME"); xdgConfig != nullptr && xdgConfig[0] == '/') {
+      return std::string(xdgConfig) + "/btop/themes";
+    }
+    if (const char* home = std::getenv("HOME"); home != nullptr && home[0] == '/') {
+      return std::string(home) + "/.config/btop/themes";
+    }
+    return {};
+  }
+
+  // Child side of forkpty: the caller prepares every argument so nothing allocates between fork and exec.
+  [[noreturn]] void execTaskManager(const std::string& configPath, const std::string& themesDir) {
+    ::setenv("TERM", "xterm-256color", 1);
+    ::setenv("COLORTERM", "truecolor", 1);
+    ::unsetenv("NO_COLOR");
+    // Terminus-TaskManager, square-cornered like the panel's other boxes; btop where it is not installed.
+    ::execlp("terminus-taskmanager", "terminus-taskmanager", "--square", static_cast<char*>(nullptr));
+    if (themesDir.empty()) {
+      ::execl("/usr/bin/btop", "btop", "--config", configPath.c_str(), static_cast<char*>(nullptr));
+    } else {
+      ::execl(
+          "/usr/bin/btop", "btop", "--config", configPath.c_str(), "--themes-dir", themesDir.c_str(),
+          static_cast<char*>(nullptr)
+      );
+    }
+    _exit(127);
+  }
+
 } // namespace
 
 BtopTab::BtopTab() {
@@ -279,10 +338,8 @@ BtopTab::BtopTab() {
 
   VTermColor foreground;
   VTermColor background;
-  const Rgb fg = hexRgb(kDefaultForeground);
-  const Rgb bg = hexRgb(kDefaultBackground);
-  vterm_color_rgb(&foreground, fg.r, fg.g, fg.b);
-  vterm_color_rgb(&background, bg.r, bg.g, bg.b);
+  vterm_color_rgb(&foreground, kDefaultForeground.r, kDefaultForeground.g, kDefaultForeground.b);
+  vterm_color_rgb(&background, kDefaultBackground.r, kDefaultBackground.g, kDefaultBackground.b);
   vterm_screen_set_default_colors(m_screen, &foreground, &background);
   vterm_screen_reset(m_screen, 1);
 }
@@ -324,29 +381,11 @@ std::unique_ptr<Flex> BtopTab::create() {
         label.setOnMotion([this](const InputArea::PointerData& data) { sendPointerMotion(data.localX, data.localY); });
         label.setOnPress([this](const InputArea::PointerData& data) { sendPointerButton(data); });
         label.setOnAxisHandler([this](const InputArea::PointerData& data) { return sendPointerAxis(data); });
-        label.setOnFocusGain([this]() {
-          if (m_vterm != nullptr) {
-            vterm_state_focus_in(vterm_obtain_state(m_vterm));
-            if (m_cursorVisible) {
-              m_screenDirty = true;
-            }
-            (void)drainAndRefresh();
-            armResponseDrain();
-          }
-        });
+        label.setOnFocusGain([this]() { reportFocus(true); });
         label.setOnKeyDown([this](const InputArea::KeyData& data) {
           (void)handleKey(data.sym, data.utf32, data.modifiers, data.pressed, data.preedit);
         });
-        label.setOnFocusLoss([this]() {
-          if (m_vterm != nullptr) {
-            vterm_state_focus_out(vterm_obtain_state(m_vterm));
-            if (m_cursorVisible) {
-              m_screenDirty = true;
-            }
-            (void)drainAndRefresh();
-            armResponseDrain();
-          }
-        });
+        label.setOnFocusLoss([this]() { reportFocus(false); });
       },
   });
   root->addChild(std::move(terminal));
@@ -375,17 +414,14 @@ void BtopTab::setActive(bool active) {
   m_active = active;
   if (active) {
     startProcess();
-    (void)drainAndRefresh();
-    armResponseDrain();
+    drainAndArm();
   } else {
-    m_responseDrainFramesRemaining = 0;
-    m_consecutiveEmptyDrains = 0;
+    cancelResponseDrain();
   }
 }
 
 void BtopTab::onClose() {
-  m_responseDrainFramesRemaining = 0;
-  m_consecutiveEmptyDrains = 0;
+  cancelResponseDrain();
   m_root = nullptr;
   m_terminal = nullptr;
   m_titleRow = nullptr;
@@ -407,7 +443,7 @@ void BtopTab::onFrameTick(float /*deltaMs*/) {
     PanelManager::instance().requestFrameTick();
     PanelManager::instance().requestRedraw();
   } else {
-    m_responseDrainFramesRemaining = 0;
+    cancelResponseDrain();
   }
 }
 
@@ -433,18 +469,12 @@ bool BtopTab::handleKey(std::uint32_t sym, std::uint32_t utf32, std::uint32_t mo
   }
 
   const VTermModifier mods = vtermModifiers(modifiers);
-  const VTermKey key = vtermKey(sym);
-  if (key != VTERM_KEY_NONE) {
+  if (const VTermKey key = vtermKey(sym); key != VTERM_KEY_NONE) {
     vterm_keyboard_key(m_vterm, key, mods);
-    (void)drainAndRefresh();
-    armResponseDrain();
-    return true;
-  }
-  if (utf32 != 0U) {
+    drainAndArm();
+  } else if (utf32 != 0U) {
     vterm_keyboard_unichar(m_vterm, utf32, mods);
-    (void)drainAndRefresh();
-    armResponseDrain();
-    return true;
+    drainAndArm();
   }
   return true;
 }
@@ -463,9 +493,9 @@ void BtopTab::doLayout(Renderer& renderer, float contentWidth, float bodyHeight)
       renderer.measureText("M", m_fontSize, FontWeight::Normal, 0.0F, 1, TextAlign::Start, kFontFamily);
   m_cellWidth = std::max(1.0F, cell.width);
   m_cellHeight = std::max(1.0F, cell.bottom - cell.top);
-  const int cols = std::max(40, static_cast<int>(std::floor(contentWidth / m_cellWidth)));
+  const int cols = std::max(kMinColumns, static_cast<int>(std::floor(contentWidth / m_cellWidth)));
   const float titleHeight = kTitleHeight * contentScale();
-  const int rows = std::max(12, static_cast<int>(std::floor((bodyHeight - titleHeight) / m_cellHeight)));
+  const int rows = std::max(kMinRows, static_cast<int>(std::floor((bodyHeight - titleHeight) / m_cellHeight)));
   resizeTerminal(rows, cols);
   if (!m_sizeKnown) {
     m_sizeKnown = true;
@@ -497,7 +527,7 @@ void BtopTab::startProcess() {
   }
 
   const auto now = std::chrono::steady_clock::now();
-  if (m_lastStart.time_since_epoch().count() != 0 && now - m_lastStart < std::chrono::milliseconds(250)) {
+  if (m_lastStart.time_since_epoch().count() != 0 && now - m_lastStart < kRestartCooldown) {
     return;
   }
   m_lastStart = now;
@@ -505,19 +535,8 @@ void BtopTab::startProcess() {
   m_screenDirty = true;
 
   const std::string configPath = paths::assetPath("btop/terminusbar.conf").string();
-  // btop >= 1.4.8 ignores ~/.config/btop/themes when --config is given; the generated theme lives there.
-  std::string themesDir;
-  if (const char* xdgConfig = std::getenv("XDG_CONFIG_HOME"); xdgConfig != nullptr && xdgConfig[0] == '/') {
-    themesDir = std::string(xdgConfig) + "/btop/themes";
-  } else if (const char* home = std::getenv("HOME"); home != nullptr && home[0] == '/') {
-    themesDir = std::string(home) + "/.config/btop/themes";
-  }
-  winsize size{
-      .ws_row = static_cast<unsigned short>(std::clamp(m_rows, 1, 65535)),
-      .ws_col = static_cast<unsigned short>(std::clamp(m_cols, 1, 65535)),
-      .ws_xpixel = 0,
-      .ws_ypixel = 0,
-  };
+  const std::string themesDir = btopThemesDir();
+  winsize size = makeWinsize(m_rows, m_cols, 0.0F, 0.0F);
   int ptyFd = -1;
   const pid_t child = ::forkpty(&ptyFd, nullptr, nullptr, &size);
   if (child < 0) {
@@ -525,18 +544,7 @@ void BtopTab::startProcess() {
     return;
   }
   if (child == 0) {
-    ::setenv("TERM", "xterm-256color", 1);
-    ::setenv("COLORTERM", "truecolor", 1);
-    ::unsetenv("NO_COLOR");
-    // Terminus-TaskManager, square-cornered like the panel's other boxes; btop where it is not installed.
-    ::execlp("terminus-taskmanager", "terminus-taskmanager", "--square", static_cast<char*>(nullptr));
-    if (themesDir.empty()) {
-      ::execl("/usr/bin/btop", "btop", "--config", configPath.c_str(), static_cast<char*>(nullptr));
-    } else {
-      ::execl("/usr/bin/btop", "btop", "--config", configPath.c_str(), "--themes-dir", themesDir.c_str(),
-              static_cast<char*>(nullptr));
-    }
-    _exit(127);
+    execTaskManager(configPath, themesDir);
   }
 
   const int flags = ::fcntl(ptyFd, F_GETFL, 0);
@@ -545,15 +553,13 @@ void BtopTab::startProcess() {
   }
   m_ptyFd = ptyFd;
   m_childPid = child;
-  (void)drainAndRefresh();
-  armResponseDrain();
+  drainAndArm();
   scheduleFallbackDrain();
 }
 
 void BtopTab::stopProcess() {
   m_fallbackDrainTimer.stop();
-  m_responseDrainFramesRemaining = 0;
-  m_consecutiveEmptyDrains = 0;
+  cancelResponseDrain();
   const pid_t child = m_childPid;
   m_childPid = -1;
   if (m_ptyFd >= 0) {
@@ -572,7 +578,7 @@ BtopTab::PtyDrainResult BtopTab::drainPty() {
     return {};
   }
 
-  std::array<char, 65536> buffer{};
+  std::array<char, kPtyReadChunkBytes> buffer; // filled by read(); zeroing 64 KiB per drain would be waste
   bool received = false;
   bool ended = false;
   for (;;) {
@@ -625,6 +631,33 @@ bool BtopTab::drainAndRefresh() {
   return result.activity;
 }
 
+void BtopTab::drainAndArm() {
+  (void)drainAndRefresh();
+  armResponseDrain();
+}
+
+void BtopTab::cancelResponseDrain() {
+  m_responseDrainFramesRemaining = 0;
+  m_consecutiveEmptyDrains = 0;
+}
+
+void BtopTab::reportFocus(bool focused) {
+  if (m_vterm == nullptr) {
+    return;
+  }
+  VTermState* state = vterm_obtain_state(m_vterm);
+  if (focused) {
+    vterm_state_focus_in(state);
+  } else {
+    vterm_state_focus_out(state);
+  }
+  // The cursor is drawn filled only while focused.
+  if (m_cursorVisible) {
+    m_screenDirty = true;
+  }
+  drainAndArm();
+}
+
 void BtopTab::armResponseDrain() {
   if (!m_active || m_ptyFd < 0) {
     return;
@@ -663,19 +696,11 @@ void BtopTab::resizeTerminal(int rows, int cols) {
     vterm_set_size(m_vterm, rows, cols);
   }
   if (m_ptyFd >= 0) {
-    winsize size{
-        .ws_row = static_cast<unsigned short>(std::clamp(rows, 1, 65535)),
-        .ws_col = static_cast<unsigned short>(std::clamp(cols, 1, 65535)),
-        .ws_xpixel =
-            static_cast<unsigned short>(std::clamp(std::lround(static_cast<float>(cols) * m_cellWidth), 0L, 65535L)),
-        .ws_ypixel =
-            static_cast<unsigned short>(std::clamp(std::lround(static_cast<float>(rows) * m_cellHeight), 0L, 65535L)),
-    };
+    const winsize size = makeWinsize(rows, cols, m_cellWidth, m_cellHeight);
     (void)::ioctl(m_ptyFd, TIOCSWINSZ, &size);
     // SIGWINCH updates btop's geometry, but its next full repaint otherwise waits
     // for update_ms. Ctrl-R requests that repaint immediately so the first visible
     // frame uses the final panel dimensions instead of the warm 80x24 buffer.
-    static constexpr char kRequestRedraw = '\x12';
     writePty(&kRequestRedraw, 1);
     armResponseDrain();
   }
@@ -705,69 +730,11 @@ void BtopTab::writeMarkup() {
     return;
   }
 
-  const Rgb defaultForeground = hexRgb(kDefaultForeground);
-  const Rgb defaultBackground = hexRgb(kDefaultBackground);
+  const bool drawCursor = m_cursorVisible && ownsKeyboardFocus();
   std::string markup;
   markup.reserve(static_cast<std::size_t>(m_rows * m_cols * 2));
-
   for (int row = 0; row < m_rows; ++row) {
-    CellStyle runStyle{};
-    std::string runText;
-    bool hasRun = false;
-
-    const auto flush = [&]() {
-      if (hasRun) {
-        appendStyledRun(markup, runStyle, runText);
-        runText.clear();
-      }
-    };
-
-    for (int col = 0; col < m_cols; ++col) {
-      VTermScreenCell cell{};
-      if (vterm_screen_get_cell(m_screen, {.row = row, .col = col}, &cell) == 0 || cell.width == 0) {
-        continue;
-      }
-
-      const bool defaultFg = VTERM_COLOR_IS_DEFAULT_FG(&cell.fg);
-      const bool defaultBg = VTERM_COLOR_IS_DEFAULT_BG(&cell.bg);
-      CellStyle style{
-          .foreground = resolvedColor(m_screen, cell.fg, defaultForeground, defaultFg),
-          .background = resolvedColor(m_screen, cell.bg, defaultBackground, defaultBg),
-          .drawBackground = !defaultBg,
-          .bold = cell.attrs.bold != 0U,
-          .italic = cell.attrs.italic != 0U,
-          .underline = cell.attrs.underline != 0U,
-          .strike = cell.attrs.strike != 0U,
-      };
-      if (cell.attrs.reverse != 0U) {
-        std::swap(style.foreground, style.background);
-        style.drawBackground = true;
-      }
-      if (m_cursorVisible && row == m_cursorRow && col == m_cursorCol && ownsKeyboardFocus()) {
-        std::swap(style.foreground, style.background);
-        style.drawBackground = true;
-      }
-
-      std::string glyph;
-      if (cell.attrs.conceal != 0U || cell.chars[0] == 0U) {
-        glyph = " ";
-      } else {
-        for (const std::uint32_t codepoint : cell.chars) {
-          if (codepoint == 0U) {
-            break;
-          }
-          appendUtf8(glyph, codepoint);
-        }
-      }
-
-      if (!hasRun || !(style == runStyle)) {
-        flush();
-        runStyle = style;
-        hasRun = true;
-      }
-      runText += glyph;
-    }
-    flush();
+    appendRowMarkup(markup, row, drawCursor);
     if (row + 1 < m_rows) {
       markup.push_back('\n');
     }
@@ -777,11 +744,67 @@ void BtopTab::writeMarkup() {
   m_screenDirty = false;
 }
 
+// One <span> per run of equal style, escaped glyphs appended in place (no per-cell strings).
+void BtopTab::appendRowMarkup(std::string& markup, int row, bool drawCursor) const {
+  CellStyle runStyle{};
+  bool inRun = false;
+
+  for (int col = 0; col < m_cols; ++col) {
+    VTermScreenCell cell{};
+    if (vterm_screen_get_cell(m_screen, {.row = row, .col = col}, &cell) == 0 || cell.width == 0) {
+      continue;
+    }
+
+    const bool defaultBackground = VTERM_COLOR_IS_DEFAULT_BG(&cell.bg);
+    CellStyle style{
+        .foreground = resolvedColor(m_screen, cell.fg, kDefaultForeground, VTERM_COLOR_IS_DEFAULT_FG(&cell.fg)),
+        .background = resolvedColor(m_screen, cell.bg, kDefaultBackground, defaultBackground),
+        .drawBackground = !defaultBackground,
+        .bold = cell.attrs.bold != 0U,
+        .italic = cell.attrs.italic != 0U,
+        .underline = cell.attrs.underline != 0U,
+        .strike = cell.attrs.strike != 0U,
+    };
+    if (cell.attrs.reverse != 0U) {
+      std::swap(style.foreground, style.background);
+      style.drawBackground = true;
+    }
+    if (drawCursor && row == m_cursorRow && col == m_cursorCol) {
+      std::swap(style.foreground, style.background);
+      style.drawBackground = true;
+    }
+
+    if (!inRun || style != runStyle) {
+      if (inRun) {
+        markup += "</span>";
+      }
+      appendSpanOpen(markup, style);
+      runStyle = style;
+      inRun = true;
+    }
+
+    if (cell.attrs.conceal != 0U || cell.chars[0] == 0U) {
+      markup.push_back(' ');
+      continue;
+    }
+    for (const std::uint32_t codepoint : cell.chars) {
+      if (codepoint == 0U) {
+        break;
+      }
+      appendEscapedCodepoint(markup, codepoint);
+    }
+  }
+  if (inRun) {
+    markup += "</span>";
+  }
+}
+
 void BtopTab::setStatus(std::string message) {
   if (m_terminal == nullptr) {
     return;
   }
-  std::string markup = "<span foreground=\"" + hexColor(hexRgb(kDefaultForeground)) + "\">";
+  std::string markup;
+  appendSpanOpen(markup, {.foreground = kDefaultForeground});
   appendEscaped(markup, message);
   markup += "</span>";
   m_terminal->setText(markup);
@@ -804,16 +827,15 @@ void BtopTab::sendPointerButton(const InputArea::PointerData& data) {
   sendPointerMotion(data.localX, data.localY);
   int button = 0;
   if (data.button == BTN_LEFT) {
-    button = 1;
+    button = kVtermButtonLeft;
   } else if (data.button == BTN_MIDDLE) {
-    button = 2;
+    button = kVtermButtonMiddle;
   } else if (data.button == BTN_RIGHT) {
-    button = 3;
+    button = kVtermButtonRight;
   }
   if (button != 0) {
     vterm_mouse_button(m_vterm, button, data.pressed, VTERM_MOD_NONE);
-    (void)drainAndRefresh();
-    armResponseDrain();
+    drainAndArm();
   }
 }
 
@@ -826,14 +848,13 @@ bool BtopTab::sendPointerAxis(const InputArea::PointerData& data) {
     return false;
   }
   sendPointerMotion(data.localX, data.localY);
-  const int button = steps > 0.0F ? 5 : 4;
+  const int button = steps > 0.0F ? kVtermWheelDown : kVtermWheelUp;
   const int count = std::max(1, static_cast<int>(std::lround(std::abs(steps))));
   for (int i = 0; i < count; ++i) {
     vterm_mouse_button(m_vterm, button, true, VTERM_MOD_NONE);
     vterm_mouse_button(m_vterm, button, false, VTERM_MOD_NONE);
   }
-  (void)drainAndRefresh();
-  armResponseDrain();
+  drainAndArm();
   return true;
 }
 

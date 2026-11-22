@@ -44,7 +44,8 @@ public:
   bool handleArrowNavigation(
       InputDispatcher& dispatcher, std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit
   );
-  bool handleHotkey(InputDispatcher& dispatcher, std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit);
+  bool
+  handleHotkey(InputDispatcher& dispatcher, std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit);
   // Called for every key on the dashboard: anything but the confirming press disarms an armed action.
   void noteKey(InputDispatcher& dispatcher, std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit);
 

@@ -5,7 +5,8 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from settings import SettingsError, defaults as settings_defaults, validate_settings
+from settings import SettingsError, validate_settings
+from settings import defaults as settings_defaults
 from tokens import mix, tokens
 
 SETTINGS_FILE = Path.home() / ".config/terminus-est/settings.toml"
@@ -63,8 +64,7 @@ window { background: transparent; }
 
 def hypr_json(command):
     """Parsed `hyprctl COMMAND -j`."""
-    return json.loads(subprocess.check_output(
-        ["hyprctl", command, "-j"], text=True, timeout=2))
+    return json.loads(subprocess.check_output(["hyprctl", command, "-j"], text=True, timeout=2))
 
 
 def read_theme(extra_css=""):
@@ -85,9 +85,15 @@ def read_theme(extra_css=""):
     palette = tokens(settings)
     bg, fg, muted = palette["background"], palette["foreground"], palette["muted"]
     values = {
-        "bg": bg, "fg": fg, "accent": palette["accent"], "alert": palette["alert"],
-        "line": mix(bg, fg, 0.15), "hover": mix(bg, fg, 0.07),
-        "muted": muted, "dim": mix(bg, muted, 0.7), "font": palette["ui_font"],
+        "bg": bg,
+        "fg": fg,
+        "accent": palette["accent"],
+        "alert": palette["alert"],
+        "line": mix(bg, fg, 0.15),
+        "hover": mix(bg, fg, 0.07),
+        "muted": muted,
+        "dim": mix(bg, muted, 0.7),
+        "font": palette["ui_font"],
     }
     css = CSS_TEMPLATE + extra_css
     for key, value in values.items():

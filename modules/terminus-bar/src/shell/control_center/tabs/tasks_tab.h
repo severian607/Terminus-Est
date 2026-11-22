@@ -22,6 +22,7 @@ public:
   void onClose() override;
 
 private:
+  // Declaration order is the option order of the selects in tasks_tab.cpp; selection indices are cast to these enums.
   enum class View { Active, Completed, Trash, History };
   enum class DateFilter { All, Today, Overdue, Upcoming, None };
   enum class LocalConfirmation { None, Purge, ClearHistory };
@@ -36,12 +37,37 @@ private:
     Label* detail = nullptr;
   };
 
+  std::unique_ptr<Flex> buildHeader(float scale);
+  std::unique_ptr<Flex> buildBrowseToolbar(float scale);
+  std::unique_ptr<Flex> buildFilterToolbar(float scale);
+  std::unique_ptr<ScrollView> buildBody(float scale);
+  std::unique_ptr<Flex> buildPasswordCard(float scale);
+  std::unique_ptr<Flex> buildEditor(float scale);
+  std::unique_ptr<Flex> buildDeleteConfirmation(float scale);
+  std::unique_ptr<Flex> buildLocalConfirmation(float scale);
+  std::unique_ptr<Flex> buildTaskLine(Row& row, const std::string& title, float scale);
+  std::unique_ptr<Flex> buildTrashActions(Row& row, float scale);
+
   void doLayout(Renderer& renderer, float contentWidth, float bodyHeight) override;
   void doUpdate(Renderer& renderer) override;
   void onPanelCardOpacityChanged(float opacity) override;
   void synchronize();
+  void synchronizeToolbars(const TaskSnapshot& snapshot);
+  void moveFocusOutOfHiddenPanels(const TaskSnapshot& snapshot);
+  void synchronizeEditor(const TaskSnapshot& snapshot);
+  void synchronizeLocalConfirmation(const TaskSnapshot& snapshot);
   void synchronizeRows(const TaskSnapshot& snapshot);
+  void rebuildRows(const TaskSnapshot& snapshot, const std::vector<std::size_t>& visible);
+  void updateTaskRow(Row& row, const TaskItem& item, bool writable);
+  void updateTrashRow(Row& row, const TrashedTask& archived, bool writable);
+  void updateHistoryRow(Row& row, const TaskHistoryEntry& entry);
+  void updateCounts(const TaskSnapshot& snapshot, std::size_t shown, std::size_t total);
+  [[nodiscard]] bool showsTasks() const;
+  [[nodiscard]] bool passesDateFilter(const std::string& due) const;
+  [[nodiscard]] std::vector<std::size_t>
+  visibleTasks(const TaskSnapshot& snapshot, const std::string& query, std::size_t& total) const;
   [[nodiscard]] std::vector<std::size_t> visibleRows(const TaskSnapshot& snapshot, std::size_t& total) const;
+  [[nodiscard]] const std::string& rowId(const TaskSnapshot& snapshot, std::size_t index) const;
   void openEditor(const std::string& id);
   void saveEditor();
   void copyToNewTask();

@@ -163,6 +163,8 @@ rm -rf ~/Projects/Terminus-Est        # your earlier files are in ~/.local/state
 | `terminus-screensaver` `terminus-lock` `terminus-login` | Screensaver, laptop lock supervisor, login appearance |
 | `terminus-transparency` | Window opacity toggles |
 
+**Code style.** Terminus-Est's own code is kept formatted and linted: Python with `uvx ruff format` and `uvx ruff check` (`ruff.toml`), shell with `shfmt -i 2 -ci` and `shellcheck`, the bar's C++ with `modules/terminus-bar/.clang-format`, Rust with `cargo fmt` and `cargo clippy`. In the forks, only the files Terminus wrote follow it; upstream files keep their style.
+
 <a id="origins"></a>
 ### `⁷ origins`
 

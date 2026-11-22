@@ -1,7 +1,8 @@
+# On-screen display for the volume and brightness keys (config/swayosd)
 [Unit]
 Description=SwayOSD server
-PartOf=graphical-session.target
 After=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple

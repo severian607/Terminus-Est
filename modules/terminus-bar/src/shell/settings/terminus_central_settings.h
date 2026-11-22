@@ -61,8 +61,10 @@ private:
   void run(std::vector<std::string> args, long timeoutMs, std::function<void(process::RunResult)> done);
   void notify();
 
+  [[nodiscard]] static std::optional<Entry> parseEntry(const nlohmann::json& item);
   void startSchemaRead();
   void startGetRead();
+  void failRead(const std::string& message);
   void finishRead();
 
   void commit(const std::string& key, nlohmann::json value, bool reset = false);
@@ -75,11 +77,15 @@ private:
   void storeValue(const Entry& entry, const nlohmann::json& value);
   [[nodiscard]] bool differsFromDefault(const Entry& entry) const;
 
-  [[nodiscard]] std::unique_ptr<Flex> buildBox(
-      std::string_view numeral, std::string_view title, const std::vector<const Entry*>& entries, float scale
-  );
+  void addAppearanceBoxes(Flex& page, const std::vector<const Entry*>& entries, float scale);
+  [[nodiscard]] std::unique_ptr<Flex>
+  buildBox(std::string_view numeral, std::string_view title, const std::vector<const Entry*>& entries, float scale);
   [[nodiscard]] std::unique_ptr<Flex> buildRow(const Entry& entry, float scale);
   void buildControl(Flex& cell, const Entry& entry, const nlohmann::json& current, float scale);
+  void buildToggle(Flex& cell, const Entry& entry, const nlohmann::json& current, float scale);
+  void buildNumberControl(Flex& cell, const Entry& entry, const nlohmann::json& current, float scale);
+  void buildSelectControl(Flex& cell, const Entry& entry, const nlohmann::json& current, float scale);
+  void buildColorControl(Flex& cell, const Entry& entry, const nlohmann::json& current, float scale);
 
   std::shared_ptr<void> m_alive;
   std::shared_ptr<std::atomic<bool>> m_cancel;
