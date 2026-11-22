@@ -216,7 +216,9 @@ def sidebar_rules(accent: str, home: Path | None = None) -> str:
             rows.append((f"window .sidebar > :nth-child({2 * k}) image", places[place]))
     # Pinned rows (.sidebar-pinned-row) alternate with gap widgets inside their own box;
     # an unmapped pin gets the generic folder icon so no stock coloured icon survives.
-    pin_icons = icons.get("pins", {})
+    # Pinned folders are personal; their icons live in a separate file (older setups kept them in sidebar-icons.toml).
+    pin_icons = {**icons.get("pins", {}),
+                 **_read_toml(config / "terminus-est" / "strata" / "sidebar-pins.toml").get("pins", {})}
     for j, path in enumerate(pins, 1):
         rows.append((f"window .sidebar-pinned-row:nth-child({2 * j}) image", pin_icons.get(str(path), PIN_FALLBACK)))
 

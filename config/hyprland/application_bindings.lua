@@ -50,8 +50,15 @@ o.bind("SUPER + SHIFT + X", "X", [=[terminus compat launch-webapp "https://x.com
 o.bind("SUPER + SHIFT + ALT + X", "X Post", [=[terminus compat launch-webapp "https://x.com/compose/post"]=])
 o.bind("SUPER + V", "Toggle Hyprwhspr recording", "/usr/lib/hyprwhspr/config/hyprland/hyprwhspr-tray.sh record")
 
+-- Panels open on the main monitor when monitors.lua names one, else where the focus is.
+local function focus_primary()
+  if o.monitors.primary then
+    hl.dispatch(hl.dsp.focus({ monitor = o.monitors.primary }))
+  end
+end
+
 o.bind("SUPER + SPACE", "Toggle launcher on the main monitor", function()
-  hl.dispatch(hl.dsp.focus({ monitor = o.monitors.primary }))
+  focus_primary()
   hl.dispatch(hl.dsp.exec_cmd("terminus-launcher toggle"))
 end)
 o.bind("SUPER + I", "Insert Unicode symbol", "terminus-symbols")
@@ -61,15 +68,15 @@ o.bind("SUPER + S", "Choose audio effects", "terminus-audio")
 o.bind("SUPER + H", "Show SUPER keybindings on a keyboard", "terminus-keys")
 o.bind("SUPER + SHIFT + R", "Rnote", [=[terminus compat launch-or-focus '^com\.github\.flxzt\.rnote$' "uwsm-app -- rnote"]=])
 
-o.bind("SUPER + SHIFT + SPACE", "Toggle Terminus-Bar bar", "terminus-bar msg bar-toggle default " .. o.monitors.primary)
+o.bind("SUPER + SHIFT + SPACE", "Toggle Terminus-Bar bar", "terminus-bar msg bar-toggle default " .. (o.monitors.primary or ""))
 
 o.bind("SUPER + ESCAPE", "Toggle Terminus-Bar menu on the main monitor", function()
-  hl.dispatch(hl.dsp.focus({ monitor = o.monitors.primary }))
+  focus_primary()
   hl.dispatch(hl.dsp.exec_cmd("terminus-bar msg panel-toggle control-center"))
 end)
 
 o.bind("SUPER + CTRL + SPACE", "Wallpaper panel on the main monitor", function()
-  hl.dispatch(hl.dsp.focus({ monitor = o.monitors.primary }))
+  focus_primary()
   hl.dispatch(hl.dsp.exec_cmd("terminus-bar msg panel-toggle wallpaper"))
 end)
 

@@ -1,0 +1,16 @@
+# Sidebar icon map for Strata (generated stylesheet: lib/skin_strata.py).
+# Values are file stems in config/strata/icons/ (recoloured to the palette into generated/strata-icons/). Unlisted rows keep Strata's own icon.
+# Icons for pinned folders go in sidebar-pins.toml ([pins] "path" = "stem"); unlisted pins use the generic "folder" icon.
+device = "volume"
+
+[places]
+home = "home"
+trash = "trash"
+network = "network"
+recent = "recent"
+desktop = "desktop"
+documents = "documents"
+downloads = "downloads"
+music = "music"
+pictures = "pictures"
+videos = "videos"

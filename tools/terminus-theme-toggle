@@ -50,7 +50,8 @@ def reload_btop(previous: int) -> None:
 def write_ghostty(mode: str) -> None:
     """Dark leaves Ghostty on its normal theme; light overrides it with the bar's light terminal colours."""
     lines = ['# Written by terminus-theme-toggle; empty in dark mode.']
-    if mode == 'light':
+    # The palette appears with the first wallpaper change; until then light mode leaves Ghostty as it is.
+    if mode == 'light' and PALETTE.is_file():
         term = json.loads(PALETTE.read_text())['light']['terminal']
         order = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white']
         lines += ['background = %s' % term['background'], 'background-opacity = 1',

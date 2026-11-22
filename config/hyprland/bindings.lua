@@ -91,10 +91,16 @@ local symbol_keys = {
   ["<"] = "SHIFT + comma", [">"] = "SHIFT + period",
   ["S"] = "SHIFT + S",
 }
-for line in io.lines(os.getenv("HOME") .. "/.config/terminus-est/symbol-shortcuts.tsv") do
-  local key, symbol, description = line:match("^([^\t]+)\t([^\t]+)\t(.+)$")
-  o.bind("ALT + " .. (symbol_keys[key] or key), "Insert " .. symbol .. " — " .. description,
-    "wtype -- " .. string.format("%q", symbol))
+local symbol_file = io.open(os.getenv("HOME") .. "/.config/terminus-est/symbol-shortcuts.tsv")
+if symbol_file then
+  for line in symbol_file:lines() do
+    local key, symbol, description = line:match("^([^\t]+)\t([^\t]+)\t(.+)$")
+    if key then
+      o.bind("ALT + " .. (symbol_keys[key] or key), "Insert " .. symbol .. " — " .. description,
+        "wtype -- " .. string.format("%q", symbol))
+    end
+  end
+  symbol_file:close()
 end
 
 -- # Menus and utilities.

@@ -99,8 +99,10 @@ if o.monitors.secondary then
 end
 
 -- # Workspace placement
-for workspace = 1, 4 do
-  hl.workspace_rule({ workspace = tostring(workspace), monitor = o.monitors.primary })
+if o.monitors.primary then
+  for workspace = 1, 4 do
+    hl.workspace_rule({ workspace = tostring(workspace), monitor = o.monitors.primary })
+  end
 end
 if o.monitors.secondary then
   hl.workspace_rule({ workspace = "5", monitor = o.monitors.secondary })

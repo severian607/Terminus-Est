@@ -50,7 +50,7 @@ def apply(settings: dict, root: Path, changed: set[Path]) -> list[str]:
         if tokens.unit_active("mako.service"):
             _run(["makoctl", "reload"])
             notices.append("mako reloaded.")
-    if swayosd in affected:
+    if swayosd in affected and tokens.unit_active("swayosd-server.service"):
         _run(["systemctl", "--user", "try-restart", "swayosd-server.service"])
         notices.append("SwayOSD restarted to read its new stylesheet.")
     return notices

@@ -1,0 +1,3 @@
+# Skwd Wall draws the wallpaper; the bar's own wallpaper layer stays off.
+[wallpaper]
+enabled = false

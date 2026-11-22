@@ -71,8 +71,11 @@ main() {
   done
   link "$dir/config/generated/mako.ini" "$HOME/.config/mako/config"
   link "$dir/config/zed" "$HOME/.config/zed"
+  link "$dir/config/swayosd" "$HOME/.config/swayosd"
   link "$dir/wallpapers" "$HOME/Pictures/Wallpapers/Terminus Est"
-  for file in "$dir"/config/systemd/user/terminus-*; do link "$file" "$HOME/.config/systemd/user/$(basename "$file")"; done
+  for file in "$dir"/config/systemd/user/terminus-* "$dir"/config/systemd/user/swayosd-server.service; do
+    link "$file" "$HOME/.config/systemd/user/$(basename "$file")"
+  done
   for file in "$dir"/config/dbus-1/services/*; do link "$file" "$HOME/.local/share/dbus-1/services/$(basename "$file")"; done
   for file in "$dir"/modules/terminus-bar-plugins/*/; do
     file=${file%/}
@@ -84,9 +87,19 @@ main() {
   [[ -x $dir/modules/terminus-bar/build-release/terminusbar ]] ||
     die "the bar did not build; see: ninja -C $dir/modules/terminus-bar/build-release terminusbar"
 
+  # A new machine starts on the bar design from the screenshots; an existing bar state is left alone.
+  local bar_state=$HOME/.local/state/terminusbar/settings.toml
+  if [[ ! -e $bar_state ]]; then
+    mkdir -p "$(dirname "$bar_state")"
+    : > "$bar_state"
+    "$dir/bin/terminus-bar-style" set tmux || say "could not apply the bar preset; run: terminus-bar-style set tmux"
+  fi
+
   step "user units"
   systemctl --user daemon-reload
   systemctl --user enable "${UNITS[@]}"
+  # The wallpaper daemon comes with the optional Skwd Wall.
+  systemctl --user enable skwd-walld.service 2>/dev/null || say "skwd-walld is not installed; wallpapers need Skwd Wall (AUR)"
   if [[ -n ${WAYLAND_DISPLAY:-} ]]; then
     systemctl --user restart terminus-bar.service terminus-launcher.service || true
   fi
@@ -106,7 +119,7 @@ EOF
 
 PACKAGES=(
   # build
-  base-devel git meson ninja just pkgconf
+  base-devel git meson ninja just pkgconf libvterm
   wayland wayland-protocols libglvnd freetype2 fontconfig cairo pango harfbuzz libxkbcommon glib2
   libsecret libsodium sdbus-cpp libpipewire wireplumber polkit pam curl libwebp libjxl libsndfile librsvg
   libqalculate libxml2 md4c tomlplusplus libical nlohmann-json stb jemalloc pixman
@@ -115,15 +128,16 @@ PACKAGES=(
   quickshell mako swayosd
   # tools and pickers
   python python-gobject gtk4 gtk4-layer-shell python-tomlkit python-evdev python-numpy
-  mpv btop jq libnotify brightnessctl playerctl wl-clipboard grim slurp wf-recorder
+  mpv btop jq libnotify brightnessctl playerctl wl-clipboard grim slurp wf-recorder wtype socat
   # terminal, editor, fonts
   ghostty zed otf-monaspace-nerd ttf-jetbrains-mono-nerd
 )
-AUR_PACKAGES=(skwd-wall-v2 mechvibes python-sounddevice)
+AUR_PACKAGES=(skwd-wall-v2 mechvibes python-sounddevice python-terminaltexteffects)
 UNITS=(
   terminus-bar.service terminus-launcher.service terminus-audio.service terminus-motion.service
   terminus-shaders.service terminus-symbols.service terminus-keysounds.service terminus-vitals-log.service
   terminus-strata-skin.path terminus-skwd-colors.path
+  swayosd-server.service hypridle.service hyprpolkitagent.service
 )
 FONT_URL=https://inai.de/files/consoleet/consoleet-terminus-4.49.1.tar.zst
 FONT_SHA256=207fb58272584429b9b83dcd21706c94522cfaf83676adae523664a96a69f121
