@@ -39,7 +39,7 @@ shell does not install or synchronize a separate display-manager greeter.
 
 The maintained layout restores the original pre-visual-rework bar: **27px high,
 full output width, no top/end margins**, original font/icon scales and accent
-colors, with no module boxes. The original `severian@terminus-est ~` launcher,
+colors, with no module boxes. The original `terminus-est ~` launcher,
 workspace indicators and app icons with short window titles are on the left.
 The bracketed blue clock is centered and now includes the date.
 

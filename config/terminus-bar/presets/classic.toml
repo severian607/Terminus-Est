@@ -159,7 +159,7 @@ type = "custom_button"
 color = "primary"
 glyph = "U+250C"
 icon_color = "tertiary"
-label = "severian@terminus-est ~"
+label = "terminus-est ~"
 tooltip = "Launcher"
 type = "custom_button"
 
