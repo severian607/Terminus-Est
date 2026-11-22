@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Audio effects through EasyEffects: terminus-audiofx <name> | set|toggle|remove NAME | off | list | status | check | eq."""
+
+import json
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+import audiofx  # noqa: E402
+
+USAGE = """usage: terminus-audiofx NAME               toggle an effect (hotkey form)
+       terminus-audiofx set NAME           load an effect (one runs at a time)
+       terminus-audiofx toggle NAME        load an effect, or turn it off if it is already active
+       terminus-audiofx remove NAME        turn the effect off if it is active
+       terminus-audiofx off | clear        stop the active effect (an enabled EQ keeps running; EQ gains are kept)
+       terminus-audiofx list [--json]      list effects
+       terminus-audiofx status [--json]    show the active effect and the EQ state
+       terminus-audiofx check [NAME...]    check that effects compile to presets
+       terminus-audiofx eq [status] [--json]  show the 10-band EQ (32 Hz .. 16 kHz, -12..+12 dB)
+       terminus-audiofx eq set G1 .. G10   set all ten gains (dB), enable the EQ
+       terminus-audiofx eq band N GAIN     set band N (1-10), enable the EQ
+       terminus-audiofx eq preset NAME     load an EQ preset (flat bass treble vocal v-shape loudness warm bright)
+       terminus-audiofx eq on | off        enable or bypass the EQ (gains are kept)
+       terminus-audiofx eq reset           flat gains (enabled state unchanged)
+       The EQ runs together with the active effect in one EasyEffects preset."""
+
+
+def table(data):
+    for cat in data["categories"]:
+        rows = [e for e in data["effects"] if e["category"] == cat]
+        if not rows:
+            continue
+        print(cat)
+        for e in rows:
+            mark = "*" if e["active"] else " "
+            print(f" {mark} {e['name']:<14} {e['emoji']} {e['label']:<22} {e['description']}")
+
+
+def eq(args, js, effects):
+    sub, rest = (args[0], args[1:]) if args else ("status", [])
+    if sub == "status" and not rest:
+        data = audiofx.eq_status()
+        if js:
+            print(json.dumps(data))
+        else:
+            print(f"eq: {'on' if data['enabled'] else 'off'} ({data['preset']})")
+            print("  ".join(f"{b['hz']}Hz {b['gain']:+g}" for b in data["bands"]))
+            print("presets: " + ", ".join(data["presets"]))
+        return 0
+    if sub == "set" and rest:
+        audiofx.eq_set(rest)
+    elif sub == "band" and len(rest) == 2:
+        audiofx.eq_band(*rest)
+    elif sub == "preset" and len(rest) == 1:
+        audiofx.eq_preset_set(rest[0])
+    elif sub == "reset" and not rest:
+        audiofx.eq_reset()
+    elif sub in ("on", "off") and not rest:
+        audiofx.eq_update(sub == "on")
+    else:
+        print(USAGE, file=sys.stderr)
+        return 2
+    audiofx.apply(audiofx.read_stack(effects), effects)
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(USAGE, file=sys.stderr if not argv else sys.stdout)
+        return 2 if not argv else 0
+    cmd, args = argv[0], argv[1:]
+    js = "--json" in args
+    args = [a for a in args if a != "--json"]
+    try:
+        effects = audiofx.load_effects()
+        if cmd == "list":
+            data = audiofx.list_effects(effects)
+            if js:
+                print(json.dumps(data, ensure_ascii=False))
+            else:
+                table(data)
+        elif cmd == "status":
+            data = audiofx.status(effects)
+            if js:
+                print(json.dumps(data))
+            else:
+                print("active: " + (", ".join(data["active"]) or "none"))
+                print("easyeffects bypass: " + ("on" if data["bypassed"] else "off"))
+                print(f"eq: {'on' if data['eq']['enabled'] else 'off'} ({data['eq']['preset']})")
+        elif cmd == "check":
+            ok, msgs = audiofx.check(args, effects)
+            print("\n".join(msgs))
+            return 0 if ok else 1
+        elif cmd in ("off", "clear"):
+            audiofx.apply([], effects)
+        elif cmd == "eq":
+            return eq(args, js, effects)
+        elif cmd in ("set", "toggle", "remove"):
+            if not args and cmd != "set":
+                print(USAGE, file=sys.stderr)
+                return 2
+            audiofx.apply(audiofx.build_stack(audiofx.read_stack(effects), args, effects, cmd), effects)
+        else:  # legacy hotkey form: terminus-audiofx NAME
+            if args:
+                print(USAGE, file=sys.stderr)
+                return 2
+            audiofx.known([cmd], effects)
+            audiofx.apply([] if audiofx.read_stack(effects) == [cmd] else [cmd], effects)
+    except audiofx.FxError as err:
+        print(f"terminus-audiofx: {err}", file=sys.stderr)
+        return 2
+    return 0
+
+
+sys.exit(main(sys.argv[1:]))

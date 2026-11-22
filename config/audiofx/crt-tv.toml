@@ -1,0 +1,7 @@
+label = "CRT TV speaker"
+emoji = "📺"
+category = "Retro"
+tags = ["tv", "crt", "television", "speaker", "tube"]
+description = "Tiny mono-ish TV speaker: 150 Hz-7 kHz with a 3 kHz presence bump and a plastic-case ring."
+order = 40
+ir = "crt-tv"

@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+# Mirror the Skwd Wall colour scheme into an Terminus-Bar custom palette.
+#
+# Skwd (SUPER + R) regenerates ~/.cache/skwd-wall-v2/scheme.json whenever a
+# wallpaper is applied (theme.policy = "wallpaper"). This turns that scheme into
+# ~/.config/terminus-est/terminus-bar/palettes/Skwd Wall.json using the same role mapping
+# Terminus-Bar applies to its own wallpaper-generated palettes, then asks Terminus-Bar to
+# re-resolve so the bar, control center and templates (btop) pick it up. The
+# same pass picks Terminus-Bar's font from the mood of the wallpaper itself.
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+HOME = Path.home()
+SCHEME = Path(os.environ.get('XDG_CACHE_HOME', HOME / '.cache')) / 'skwd-wall-v2/scheme.json'
+CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', HOME / '.config')) / 'terminus-est/terminus-bar'
+BTOP_THEME = Path(os.environ.get('XDG_CONFIG_HOME', HOME / '.config')) / 'btop/themes/terminusbar.theme'
+NAME = 'Skwd Wall'
+# The bar fills with the palette's surface role and has no colour setting of its
+# own, so surface is the central background; every other role follows Skwd.
+FALLBACK_SURFACE = '#0b0b0b'
+FALLBACK_FONT = 'MonaspiceNe Nerd Font'
+FONT_FILE = CONFIG / '95-skwd-font.toml'
+TERMINUS_BAR = Path(__file__).resolve().parents[1] / 'bin/terminus-bar'
+SETTINGS = Path(__file__).resolve().parents[1] / 'bin/terminus-settings'
+# Light mode is fixed to Modus Operandi Tinted (same as Zed and Obsidian); only dark follows the wallpaper.
+MODUS_OPERANDI_TINTED = {
+    'mPrimary': '#0031a9', 'mOnPrimary': '#fbf7f0',
+    'mSecondary': '#006800', 'mOnSecondary': '#fbf7f0',
+    'mTertiary': '#721045', 'mOnTertiary': '#fbf7f0',
+    'mError': '#a60000', 'mOnError': '#fbf7f0',
+    'mSurface': '#fbf7f0', 'mOnSurface': '#000000',
+    'mSurfaceVariant': '#efe9dd', 'mOnSurfaceVariant': '#404040',
+    'mOutline': '#9f9690', 'mShadow': '#000000',
+    'mHover': '#dfd5cf', 'mOnHover': '#000000',
+    'terminal': {
+        'foreground': '#000000', 'background': '#fbf7f0',
+        'cursor': '#0031a9', 'cursorText': '#fbf7f0',
+        'selectionFg': '#000000', 'selectionBg': '#c2bcb5',
+        'normal': {'black': '#000000', 'red': '#a60000', 'green': '#006800', 'yellow': '#6f5500',
+                   'blue': '#0031a9', 'magenta': '#721045', 'cyan': '#005e8b', 'white': '#595959'},
+        'bright': {'black': '#595959', 'red': '#d00000', 'green': '#008900', 'yellow': '#808000',
+                   'blue': '#2546a0', 'magenta': '#8f0075', 'cyan': '#00799e', 'white': '#000000'},
+    },
+}
+
+
+def surface_colour() -> str:
+    try:
+        out = subprocess.run([str(SETTINGS), 'get', 'appearance.background'],
+                             capture_output=True, text=True, timeout=10).stdout
+        value = json.loads(out)
+        if isinstance(value, str) and len(value) == 7 and value[0] == '#':
+            int(value[1:], 16)
+            return value.lower()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return FALLBACK_SURFACE
+
+
+def publish(target: Path, text: str) -> None:
+    # Temp file and replace, so readers never see a partial file.
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix='.skwd-', suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w') as handle:
+            handle.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+
+def mix(color: str, toward: str, amount: float) -> str:
+    a = [int(color[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(toward[i:i + 2], 16) for i in (1, 3, 5)]
+    return '#' + ''.join('%02x' % round(x + (y - x) * amount) for x, y in zip(a, b))
+
+
+def build(scheme: dict) -> dict:
+    roles = {name: value['default']['color'] for name, value in scheme['colors'].items()}
+    b16 = scheme['base16']
+    surface = surface_colour()
+    ansi = {'red': b16['base08'], 'green': b16['base0B'], 'yellow': b16['base0A'],
+            'blue': b16['base0D'], 'magenta': b16['base0E'], 'cyan': b16['base0C']}
+    variant = {
+        'mPrimary': roles['primary'], 'mOnPrimary': roles['on_primary'],
+        'mSecondary': roles['secondary'], 'mOnSecondary': roles['on_secondary'],
+        'mTertiary': roles['tertiary'], 'mOnTertiary': roles['on_tertiary'],
+        'mError': roles['error'], 'mOnError': roles['on_error'],
+        'mSurface': surface, 'mOnSurface': roles['on_surface'],
+        # Same mapping as terminus-bar's mapGeneratedPaletteMode (fixed_palette.cpp).
+        'mSurfaceVariant': roles['surface_container'],
+        'mOnSurfaceVariant': roles['on_surface_variant'],
+        'mOutline': roles['outline_variant'],
+        'mShadow': roles.get('shadow', '#000000'),
+        'mHover': roles['tertiary'], 'mOnHover': roles['on_tertiary'],
+        'terminal': {
+            'foreground': roles['on_surface'], 'background': surface,
+            'cursor': roles['primary'], 'cursorText': roles['on_primary'],
+            'selectionFg': b16['base05'], 'selectionBg': b16['base02'],
+            'normal': {'black': b16['base00'], **ansi, 'white': b16['base05']},
+            'bright': {'black': b16['base03'],
+                       **{k: mix(v, '#ffffff', .2) for k, v in ansi.items()},
+                       'white': mix(b16['base05'], '#ffffff', .2)},
+        },
+    }
+    # Skwd generates one variant at a time; dark carries it so the palette matches the wallpaper.
+    return {'dark': variant, 'light': MODUS_OPERANDI_TINTED}
+
+
+def bar_output() -> str | None:
+    # The monitor hosting the bar layer, else the focused monitor.
+    try:
+        layers = json.loads(subprocess.run(['hyprctl', 'layers', '-j'], capture_output=True, text=True,
+                                           timeout=5).stdout)
+        for name, monitor in layers.items():
+            for level in monitor.get('levels', {}).values():
+                if any(layer.get('namespace') == 'terminusbar-bar-default' for layer in level):
+                    return name
+        monitors = json.loads(subprocess.run(['hyprctl', 'monitors', '-j'], capture_output=True, text=True,
+                                             timeout=5).stdout)
+        return next((m['name'] for m in monitors if m.get('focused')), None)
+    except (OSError, ValueError, KeyError, AttributeError, subprocess.SubprocessError):
+        return None
+
+
+def wallpaper_path() -> str | None:
+    # The wallpaper on the bar's output drives the font.
+    name = bar_output()
+    if not name:
+        return None
+    try:
+        out = subprocess.run(['skwd-helm', 'current', '--json'], capture_output=True, text=True, timeout=5).stdout
+        for output in json.loads(out)['outputs']:
+            if output['name'] == name and output.get('type') == 'static' and Path(output['path']).is_file():
+                return output['path']
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def installed_fonts() -> set[str]:
+    try:
+        out = subprocess.run(['fc-list', ':', 'family'], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {name.strip() for line in out.splitlines() for name in line.split(',')}
+
+
+def choose(candidates: list[str]) -> str:
+    # First installed candidate; the Nerd Font is the guaranteed fallback.
+    have = installed_fonts()
+    return next((name for name in candidates if name in have), FALLBACK_FONT)
+
+
+def pick_font(path: str) -> str | None:
+    """Wallpaper mood -> Monaspace font. Brightness, saturation and warm/cool balance of a 64x64 thumbnail."""
+    try:
+        import numpy
+    except ImportError:
+        return None
+    # ImageMagick where installed, ffmpeg otherwise (also reads the first frame of video wallpapers).
+    raw = b''
+    for command in (['magick', thumbnail(path) + '[0]', '-resize', '64x64!', '-depth', '8', 'rgb:-'],
+                    ['ffmpeg', '-v', 'error', '-i', path, '-vf', 'scale=64:64', '-frames:v', '1',
+                     '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']):
+        try:
+            raw = subprocess.run(command, capture_output=True, timeout=30).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if len(raw) == 64 * 64 * 3:
+            break
+    if len(raw) != 64 * 64 * 3:
+        return None
+    px = numpy.frombuffer(raw, numpy.uint8).reshape(-1, 3) / 255.
+    mx, mn = px.max(1), px.min(1)
+    sat = numpy.where(mx > 0, (mx - mn) / numpy.maximum(mx, 1e-6), 0)
+    weight = sat * mx + 1e-6
+    luma = float((px @ [.2126, .7152, .0722]).mean())
+    colour = float((sat * mx).sum() / max(mx.sum(), 1e-6))
+    warm = float((((px[:, 0] >= px[:, 2]) & (px[:, 0] >= px[:, 1] * .9)) * weight).sum() / weight.sum())
+    if colour < .2:
+        return choose(['Monaspace Krypton', 'Monaspace Xenon'])   # drained, near-greyscale
+    if luma >= .38:
+        return choose(['Monaspace Argon'])                        # bright, daylight
+    if warm >= .5:
+        return choose(['MonaspiceNe Nerd Font'])                  # dark and warm: embers, dusk
+    if colour >= .6:
+        return choose(['Monaspace Neon'])                         # dark, vivid and cool: neon night
+    return choose(['Monaspace Radon', 'Monaspace Xenon'])         # dark and cool
+
+
+def sync_font() -> bool:
+    path = wallpaper_path()
+    font = pick_font(path) if path else None
+    if not font:
+        return False
+    text = ('# Generated by terminus-skwd-palette from the wallpaper; do not edit.\n'
+            '[bar.default]\nfont_family = "%s"\n\n[shell]\nfont_family = "%s"\n' % (font, font))
+    if FONT_FILE.exists() and FONT_FILE.read_text() == text:
+        return False
+    publish(FONT_FILE, text)
+    return True
+
+
+def thumbnail(path: str) -> str:
+    """A 256 px copy of the wallpaper, cached by path and modification time: a 8K PNG takes about a second to
+    decode and the font pick reads it on every colour change. Falls back to the original."""
+    try:
+        stat = os.stat(path)
+        cache = Path(os.environ.get('XDG_CACHE_HOME', HOME / '.cache')) / 'terminus-est/skwd-thumbs'
+        key = hashlib.sha1(('%s|%d|%d' % (path, stat.st_mtime_ns, stat.st_size)).encode()).hexdigest()[:20]
+        target = cache / (key + '.png')
+        if not target.exists():
+            cache.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_suffix('.tmp.png')
+            subprocess.run(['magick', path + '[0]', '-resize', '256x256!', str(tmp)], capture_output=True,
+                           timeout=30, check=True)
+            os.replace(tmp, target)
+            for old in sorted(cache.glob('*.png'), key=lambda p: p.stat().st_mtime)[:-20]:
+                old.unlink(missing_ok=True)
+        return str(target)
+    except (OSError, subprocess.SubprocessError):
+        return path
+
+
+def mtime(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def reload_btop(previous: int) -> None:
+    # Terminus-Bar renders the btop theme asynchronously; wait for it, then tell the
+    # embedded btop (a long-lived child of the control center) to reload it. Without a running btop there
+    # is nothing to tell, and the theme file is read when one starts, so do not wait at all.
+    pattern = r'^btop --config .*/btop/terminusbar\.conf( |$)'
+    if not subprocess.run(['pgrep', '-f', pattern], capture_output=True, text=True).stdout.split():
+        return
+    deadline = time.monotonic() + 2
+    while mtime(BTOP_THEME) == previous and time.monotonic() < deadline:
+        time.sleep(.05)
+    out = subprocess.run(['pgrep', '-f', pattern], capture_output=True, text=True).stdout
+    for pid in out.split():
+        os.kill(int(pid), signal.SIGUSR2)
+
+
+def read_scheme() -> bytes:
+    # Skwd rewrites the file in place; retry a torn read instead of giving up.
+    for _ in range(20):
+        raw = SCHEME.read_bytes()
+        try:
+            json.loads(raw)
+            return raw
+        except ValueError:
+            time.sleep(.05)
+    raise SystemExit('scheme.json never became valid JSON')
+
+
+def sync_accent(raw: bytes) -> int:
+    # The wallpaper's primary role becomes the desktop accent and active border.
+    try:
+        primary = json.loads(raw)['colors']['primary']['default']['color'].lower()
+        current = subprocess.run([str(SETTINGS), 'get', 'appearance.accent'],
+                                 capture_output=True, text=True).stdout.strip()
+        if current and json.loads(current) == primary:
+            return 0
+        value = json.dumps(primary)
+        result = subprocess.run([str(SETTINGS), 'set', 'appearance.accent', value,
+                                 'appearance.active_border', value],
+                                capture_output=True, text=True)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print('terminus-settings accent sync failed: %s' % error, file=sys.stderr)
+        return 1
+    if result.returncode:
+        print('terminus-settings set failed: ' + result.stderr.strip(), file=sys.stderr)
+        return 1
+    return 0
+
+
+def sync(raw: bytes) -> int:
+    palette = build(json.loads(raw))
+    target = CONFIG / 'palettes' / (NAME + '.json')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(palette, indent=2) + '\n'
+    if target.exists() and target.read_text() == text:
+        return 0
+    publish(target, text)
+    before = mtime(BTOP_THEME)
+    # Terminus-Bar does not watch palette files; re-selecting the palette forces a re-resolve.
+    try:
+        result = subprocess.run([str(TERMINUS_BAR), 'msg', 'color-scheme-set', 'custom', NAME],
+                                capture_output=True, text=True)
+    except OSError as error:
+        print('terminus-bar color-scheme-set failed: %s' % error, file=sys.stderr)
+        return 1
+    if result.returncode:
+        print('terminus-bar color-scheme-set failed: ' + result.stderr.strip(), file=sys.stderr)
+        return 1
+    reload_btop(before)
+    return 0
+
+
+def main() -> int:
+    # systemd drops a path trigger that fires while this oneshot is running, so
+    # keep going until the scheme stops changing underneath us.
+    # The scheme and style are Skwd's own settings and are never written from here: Skwd takes an outside
+    # change to its config as a reason to restore its own value, which reverted a choice made in its picker.
+    while True:
+        raw = read_scheme()
+        # Palette first, then accent, then font: a failure in one never skips the next.
+        try:
+            status = sync(raw)
+        except (KeyError, TypeError, ValueError, OSError) as error:
+            print('terminus-skwd-palette: palette sync failed: %r' % error, file=sys.stderr)
+            status = 1
+        status |= sync_accent(raw)
+        if sync_font():
+            try:
+                subprocess.run([str(TERMINUS_BAR), 'msg', 'config-reload'], capture_output=True)
+            except OSError:
+                pass
+        # A write that lands just after this check would be dropped by systemd: look once more after a pause.
+        time.sleep(.3)
+        if SCHEME.read_bytes() == raw:
+            return status
+
+if __name__ == '__main__':
+    raise SystemExit(main())

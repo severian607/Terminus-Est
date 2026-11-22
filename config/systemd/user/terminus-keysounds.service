@@ -1,0 +1,15 @@
+[Unit]
+Description=Standalone keyboard sound theme picker
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=local.terminus.Keysounds
+ExecStart=/usr/bin/python3 %h/Projects/Terminus-Est/lib/shader_panel.py keysounds
+Restart=on-failure
+RestartSec=1
+TimeoutStopSec=5
+
+[Install]
+WantedBy=graphical-session.target

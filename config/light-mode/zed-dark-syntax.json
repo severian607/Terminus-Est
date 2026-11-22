@@ -1,0 +1,131 @@
+{
+  "variable": {
+    "color": "#cdd6f4"
+  },
+  "variable.special": {
+    "color": "#f2cdcd"
+  },
+  "property": {
+    "color": "#b4befe"
+  },
+  "type": {
+    "color": "#f9e2af"
+  },
+  "constructor": {
+    "color": "#74c7ec"
+  },
+  "enum": {
+    "color": "#94e2d5"
+  },
+  "variant": {
+    "color": "#94e2d5"
+  },
+  "namespace": {
+    "color": "#f9e2af"
+  },
+  "primary": {
+    "color": "#cdd6f4"
+  },
+  "embedded": {
+    "color": "#cdd6f4"
+  },
+  "attribute": {
+    "color": "#f9e2af"
+  },
+  "label": {
+    "color": "#74c7ec"
+  },
+  "text": {
+    "color": "#cdd6f4"
+  },
+  "function": {
+    "color": "#89b4fa"
+  },
+  "function.method": {
+    "color": "#89b4fa"
+  },
+  "function.special.definition": {
+    "color": "#89b4fa"
+  },
+  "punctuation": {
+    "color": "#9399b2"
+  },
+  "punctuation.bracket": {
+    "color": "#9399b2"
+  },
+  "punctuation.delimiter": {
+    "color": "#9399b2"
+  },
+  "punctuation.list_marker": {
+    "color": "#94e2d5"
+  },
+  "punctuation.special": {
+    "color": "#f5c2e7"
+  },
+  "operator": {
+    "color": "#89dceb"
+  },
+  "keyword": {
+    "color": "#cba6f7"
+  },
+  "preproc": {
+    "color": "#f5c2e7"
+  },
+  "tag": {
+    "color": "#89b4fa"
+  },
+  "link_uri": {
+    "color": "#94e2d5"
+  },
+  "link_text": {
+    "color": "#89b4fa"
+  },
+  "title": {
+    "color": "#89b4fa",
+    "font_weight": 700
+  },
+  "constant": {
+    "color": "#fab387"
+  },
+  "number": {
+    "color": "#fab387"
+  },
+  "boolean": {
+    "color": "#fab387"
+  },
+  "string": {
+    "color": "#a6e3a1"
+  },
+  "string.escape": {
+    "color": "#f5c2e7"
+  },
+  "string.regex": {
+    "color": "#fab387"
+  },
+  "string.special": {
+    "color": "#f5c2e7"
+  },
+  "string.special.symbol": {
+    "color": "#f2cdcd"
+  },
+  "text.literal": {
+    "color": "#a6e3a1"
+  },
+  "hint": {
+    "color": "#7f849c"
+  },
+  "comment": {
+    "color": "#7f849c",
+    "font_style": "italic"
+  },
+  "comment.doc": {
+    "color": "#7f849c",
+    "font_style": "italic"
+  },
+  "emphasis": {
+    "font_style": "italic"
+  },
+  "emphasis.strong": {
+    "font_weight": 700
+  }
+}

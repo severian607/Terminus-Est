@@ -1,0 +1,10 @@
+# Re-derive Terminus-Bar colours whenever Skwd Wall writes a new scheme
+[Unit]
+Description=Watch the Skwd Wall colour scheme
+
+[Path]
+PathChanged=%h/.cache/skwd-wall-v2/scheme.json
+Unit=terminus-skwd-colors.service
+
+[Install]
+WantedBy=graphical-session.target

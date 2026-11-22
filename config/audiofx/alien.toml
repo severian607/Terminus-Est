@@ -1,0 +1,24 @@
+label = "Alien"
+emoji = "👽"
+category = "Voice & Pitch"
+tags = ["alien", "ufo", "weird", "pitch", "comb"]
+description = "Pitch raised three semitones, then a 3 ms comb."
+order = 80
+headroom_db = -4
+
+[[plugin]]
+type = "pitch"
+dry = -100.0
+wet = 0.0
+semitones = 3.0
+
+[[plugin]]
+type = "delay"
+mode-l = "Time"
+mode-r = "Time"
+time-l = 3.0
+time-r = 3.5
+dry-l = 0.0
+dry-r = 0.0
+wet-l = -1.0
+wet-r = -1.0

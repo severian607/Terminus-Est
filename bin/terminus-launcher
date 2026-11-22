@@ -1,0 +1,16 @@
+#!/bin/sh
+# Terminus-Launcher (the CRT launcher, modules/terminus-launcher).
+#   terminus-launcher toggle | open | close          show / hide the panel
+#   terminus-launcher search <text>                  open with <text> typed (e.g. "=" for the calculator)
+#   terminus-launcher pin <digit 0-9> <app name>     pin the best match for <app name> to a slot (0 unpins it)
+#   terminus-launcher slots                          list the pinned slots
+#   terminus-launcher theme-reload                   re-read ~/.config/terminus-launcher/theme.json
+shell="$(dirname "$(readlink -f "$0")")/../modules/terminus-launcher/shell/shell.qml"
+case "${1:-toggle}" in
+    toggle|open|close) exec /usr/bin/qs -p "$shell" ipc call applauncher "${1:-toggle}" ;;
+    search) exec /usr/bin/qs -p "$shell" ipc call applauncher search "${2-}" ;;
+    pin) exec /usr/bin/qs -p "$shell" ipc call launcherslots pin "${2:?digit required}" "${3:?app name required}" ;;
+    slots) exec /usr/bin/qs -p "$shell" ipc call launcherslots slots ;;
+    theme-reload) exec /usr/bin/qs -p "$shell" ipc call theme reload ;;
+    *) echo "usage: terminus-launcher toggle|open|close | search <text> | pin <digit> <app> | slots | theme-reload" >&2; exit 2 ;;
+esac

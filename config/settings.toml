@@ -1,0 +1,51 @@
+# Terminus-Est central settings
+# Edit through terminus-settings; login changes require explicit login-apply.
+
+# Appearance
+[appearance]
+background_opacity = 0.42
+active_opacity = 1.0
+inactive_opacity = 0.97
+default_active_opacity = 0.97
+default_inactive_opacity = 0.9
+global_active_opacity = 0.97
+global_inactive_opacity = 0.95
+blur = true
+blur_strength = 6
+brightness = 0.42
+contrast = 0.87
+dim_inactive = false
+dim_strength = 0.5
+bar_opacity = 1.0
+
+# Palette: neutrals are fixed here; the accent follows the wallpaper.
+background = "#0b0b0b"
+foreground = "#ececec"
+muted = "#8c8c8c"
+alert = "#e8a07a"
+accent = "#ffb3b0"
+active_border = "#ffb3b0"
+inactive_border = "#262626"
+glass_opacity = 0.46
+chrome_opacity = 0.28
+popover_opacity = 0.9
+ui_font = "MonaspiceNe Nerd Font"
+
+# Screensaver
+[screensaver]
+enabled = true
+idle_seconds = 150
+style = "per-monitor"
+fps = 30
+
+# Login
+[login]
+animation = "dur_file"
+password_style = "constellation"
+animation_frame_delay = 20
+animation_timeout_sec = 60
+background = "#0b0b0b"
+foreground = "#ececec"
+accent = "#86d993"
+show_borders = true
+show_clock = false

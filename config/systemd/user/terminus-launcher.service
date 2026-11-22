@@ -1,0 +1,16 @@
+# Terminus-Launcher: the CRT application launcher (modules/terminus-launcher)
+[Unit]
+Description=Terminus-Launcher application launcher
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/qs -p %h/Projects/Terminus-Est/modules/terminus-launcher/shell/shell.qml
+Restart=on-failure
+RestartSec=2
+# Applications started from the launcher live in their own uwsm scopes; stop only the shell itself.
+KillMode=process
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,63 @@
+#!/bin/bash
+
+# terminus:summary=Start or stop a region screen recording (wf-recorder, no audio)
+# terminus:group=capture
+# terminus:args=
+# terminus:examples=terminus screenrecord
+# terminus:aliases=terminus screenrecord
+#
+# Env: TERMINUS_SCREENRECORD_DIR overrides the output directory
+# (default: $XDG_VIDEOS_DIR/Screencasts).
+
+[[ -f ~/.config/user-dirs.dirs ]] && source ~/.config/user-dirs.dirs
+OUTPUT_DIR="${TERMINUS_SCREENRECORD_DIR:-${XDG_VIDEOS_DIR:-$HOME/Videos}/Screencasts}"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+PID_FILE="$STATE_DIR/terminus-screenrecord.pid"
+FILE_FILE="$STATE_DIR/terminus-screenrecord.file"
+
+# True only when the recorded pid is still a wf-recorder (guards against pid reuse).
+recording_active() {
+  local pid
+  pid=$(cat "$PID_FILE" 2>/dev/null) || return 1
+  [[ $pid =~ ^[0-9]+$ ]] && [[ $(cat "/proc/$pid/comm" 2>/dev/null) == wf-recorder ]]
+}
+
+if recording_active; then
+  pid=$(cat "$PID_FILE")
+  filename=$(cat "$FILE_FILE" 2>/dev/null)
+  kill -INT "$pid" # SIGINT lets wf-recorder finalize the file
+  for _ in $(seq 50); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  rm -f "$PID_FILE" "$FILE_FILE"
+  notify-send "Screen recording saved" "${filename:-unknown file}"
+  exit 0
+fi
+rm -f "$PID_FILE" "$FILE_FILE"
+
+exec 9>"$STATE_DIR/terminus-screenrecord.lock"
+flock -n 9 || exit 0
+
+region=$(slurp) || exit 0
+[[ -n $region ]] || exit 0
+
+mkdir -p "$OUTPUT_DIR" || {
+  notify-send "Screen recording directory unavailable: $OUTPUT_DIR" -u critical -t 3000
+  exit 1
+}
+filename="$OUTPUT_DIR/screenrecording-$(date +'%Y-%m-%d_%H-%M-%S').mp4"
+
+setsid wf-recorder -g "$region" -f "$filename" >/dev/null 2>&1 9>&- &
+pid=$!
+echo "$pid" >"$PID_FILE"
+echo "$filename" >"$FILE_FILE"
+disown "$pid"
+
+sleep 0.3
+if ! recording_active; then
+  rm -f "$PID_FILE" "$FILE_FILE"
+  notify-send "Screen recording failed" -u critical
+  exit 1
+fi
+notify-send "Screen recording started" "Press the same key again to stop." -u low

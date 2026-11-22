@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+# Terminus-Est primary desktop dispatcher
+import os
+from pathlib import Path
+import re
+import runpy
+import sys
+
+PROJECT = Path(__file__).resolve().parents[1]
+DESKTOP = PROJECT / 'modules/desktop'
+os.environ['TERMINUS_PATH'] = str(PROJECT)
+os.environ['TERMINUS_DESKTOP_PATH'] = str(DESKTOP)
+os.environ['PATH'] = os.pathsep.join((str(PROJECT / 'bin'), str(DESKTOP / 'bin'), os.environ.get('PATH', '')))
+
+
+def run(program, *args):
+    os.execv(str(program), [str(program), *args])
+
+
+def reject(message):
+    print('Terminus-Est: ' + message, file=sys.stderr)
+    raise SystemExit(2)
+
+
+def desktop(name, *args):
+    program = DESKTOP / 'bin' / name
+    if not (program.is_file() and os.access(program, os.X_OK)):
+        reject(f"unknown desktop helper '{name}'")
+    run(program, *args)
+
+
+def owned(name, args):
+    run(PROJECT / 'bin' / name, *args)
+
+
+def dispatch(args):
+    if not args or args[0] in ('-h', '--help', 'commands'):
+        print('''Terminus-Est unified desktop
+  terminus bar [native arguments]         Terminus-Bar
+  terminus settings [section]             Open Terminus-Settings
+  terminus settings {get,schema,validate,render,set,reset,apply,login-apply} ...
+  terminus menu [NAME [arguments]]        Open Terminus-Settings, or run a desktop menu
+  terminus launcher [toggle|mode NAME]    Terminus-Launcher
+  terminus screensaver [force|--stop|--running]
+  terminus system lock                    Non-authenticating Terminus-Screensaver
+  terminus restart {bar,launcher,hypridle,swayosd}
+                                          Idle restarts preserve a paused owner.
+  terminus refresh {appearance,settings} [--dry-run]
+  terminus compat HELPER [arguments]      Explicit desktop helper
+  terminus GROUP COMMAND [arguments]      Other desktop operations
+Configuration: ~/.config/terminus-est; maintained helpers: modules/desktop.
+Menus, application launching and appearance use the native desktop modules.
+Broad configuration resets are disabled; recovery is recorded in the
+maintained Terminus-Est ownership map.''')
+        return
+    command, rest = args[0], args[1:]
+    if command == 'compat':
+        if not rest or not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', rest[0]):
+            reject('compat requires an exact upstream helper suffix')
+        helper, tail = rest[0], rest[1:]
+        if helper == 'hyprland-window-transparency-toggle':
+            owned('terminus-transparency', tail)
+        if helper == 'menu' and not tail:
+            owned('terminus-settings', [])
+        for prefix in ('launch-', 'restart-', 'refresh-', 'system-', 'branding-'):
+            if helper.startswith(prefix):
+                return dispatch([prefix[:-1], helper[len(prefix):], *tail])
+        if helper == 'screensaver':
+            owned('terminus-screensaver', tail)
+        desktop('terminus-' + helper, *tail)
+    modules = {'bar': 'terminus-bar', 'launcher': 'terminus-launcher',
+               'screensaver': 'terminus-screensaver'}
+    if command in modules:
+        owned(modules[command], rest)
+    if command == 'menu':
+        if rest:
+            desktop('terminus-menu', *rest)
+        owned('terminus-settings', [])
+    if command == 'settings':
+        # One command: settings subcommands go to the command line, anything else opens the window.
+        owned('terminus-settings', rest)
+    if command == 'launch' and rest:
+        if rest[0] == 'launcher':
+            owned('terminus-launcher', rest[1:])
+        if rest[0] == 'screensaver':
+            owned('terminus-screensaver', rest[1:])
+        if rest[0] in ('settings', 'menu'):
+            owned('terminus-settings', rest[1:])
+    if command == 'system' and rest and rest[0] == 'lock':
+        # A host with config/hosts/<hostname>/secure-lock (the laptop) locks for real.
+        try:
+            host = Path('/etc/hostname').read_text().strip()
+        except OSError:
+            host = ''
+        if host and (PROJECT / 'config/hosts' / host / 'secure-lock').exists():
+            owned('terminus-lock', ['force', *rest[1:]])
+        owned('terminus-screensaver', ['force', *rest[1:]])
+    if command == 'branding' and rest and rest[0] == 'screensaver':
+        reject('screensaver artwork is owned by config/terminus-screensaver; edit that source, not retired branding writers')
+    if command == 'restart':
+        if not rest:
+            reject('choose bar, launcher, hypridle or swayosd; broad desktop restarts are not supported')
+        if rest[0] == 'hypridle':
+            if len(rest) != 1:
+                reject('restart accepts exactly one component')
+            root = (Path.home() / '.config/terminus-est').resolve()
+            backend = runpy.run_path(str(PROJECT / 'lib/settings.py'))
+            session = runpy.run_path(str(PROJECT / 'lib/session.py'))
+            try:
+                with backend['locked'](root) as root_fd:
+                    values, _ = backend['load'](root, root_fd)
+                    for notice in session['apply'](values, root, {root / 'generated/hypridle.conf'}):
+                        print(notice)
+            except Exception as error:
+                reject(str(error))
+            return
+        services = {'bar': 'terminus-bar', 'launcher': 'terminus-launcher',
+                    'swayosd': 'swayosd-server'}
+        if rest[0] in services:
+            if len(rest) != 1:
+                reject('restart accepts exactly one component')
+            run('/usr/bin/systemctl', '--user', 'restart', services[rest[0]] + '.service')
+    if command == 'refresh':
+        if not rest or rest[0] not in ('appearance', 'settings'):
+            reject('broad config refresh is disabled: canonical files are maintained sources; use settings apply or the documented recovery procedure')
+        owned('terminus-settings', ['apply', *rest[1:]])
+    desktop('desktop-core', *args)
+
+
+if __name__ == '__main__':
+    try:
+        dispatch(sys.argv[1:])
+    except OSError as error:
+        print('Terminus-Est: ' + str(error), file=sys.stderr)
+        raise SystemExit(1)

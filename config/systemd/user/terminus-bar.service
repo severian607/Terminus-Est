@@ -1,0 +1,18 @@
+# Terminus-Bar native shell lifecycle
+[Unit]
+Description=Terminus-Bar desktop shell
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/Projects/Terminus-Est/bin/terminus-bar
+ExecStartPost=%h/Projects/Terminus-Est/tools/terminus-bar-ready
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=15
+# Taskbar applications can share this cgroup; stop only the shell itself.
+KillMode=process
+
+[Install]
+WantedBy=graphical-session.target

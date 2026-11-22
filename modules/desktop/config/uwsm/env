@@ -1,0 +1,15 @@
+# Changes require a restart to take effect.
+
+# Ensure Terminus-Est bins are in the path
+export TERMINUS_PATH=$HOME/Projects/Terminus-Est
+export TERMINUS_DESKTOP_PATH=$HOME/.local/share/terminus-est
+export PATH=$TERMINUS_PATH/bin:$TERMINUS_DESKTOP_PATH/bin:$PATH:$HOME/.local/bin
+
+# Let KDE applications discover Arch's installed application catalog.
+export XDG_MENU_PREFIX=arch-
+
+# Set default terminal and editor
+source ~/.config/uwsm/default
+
+# Activate mise if present on the system
+terminus-cmd-present mise && eval "$(mise activate bash --shims)"

@@ -1,0 +1,7 @@
+label = "Gramophone"
+emoji = "🎻"
+category = "Retro"
+tags = ["gramophone", "phonograph", "horn", "78", "vintage"]
+description = "Acoustic horn gramophone: narrow, resonant, and honky."
+order = 20
+ir = "gramophone"

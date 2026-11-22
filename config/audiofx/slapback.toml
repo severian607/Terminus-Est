@@ -1,0 +1,18 @@
+label = "Slapback echo"
+emoji = "🔁"
+category = "Space"
+tags = ["echo", "delay", "slapback", "rockabilly"]
+description = "A single quiet repeat 110 ms (left) and 130 ms (right) later."
+order = 80
+headroom_db = -2
+
+[[plugin]]
+type = "delay"
+mode-l = "Time"
+mode-r = "Time"
+time-l = 110.0
+time-r = 130.0
+dry-l = 0.0
+dry-r = 0.0
+wet-l = -8.0
+wet-r = -8.0

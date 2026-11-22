@@ -1,0 +1,23 @@
+label = "4-bit"
+emoji = "🔲"
+category = "Retro"
+tags = ["4-bit", "4bit", "gameboy", "wave channel", "crushed", "retro", "game"]
+description = "Extreme 4-bit steps at a fifth of the sample rate, like a Game Boy wave channel."
+order = 55
+headroom_db = -5
+
+[[band]]
+type = "highpass"
+freq = 80
+q = 0.707
+
+[[band]]
+type = "lowpass"
+freq = 10000
+q = 0.707
+
+[[plugin]]
+type = "crusher"
+bit-reduction = 4.0
+sample-reduction = 5.0
+mode = "Linear"

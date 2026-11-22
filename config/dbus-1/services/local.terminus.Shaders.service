@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=local.terminus.Shaders
+Exec=/usr/bin/systemctl --user start terminus-shaders.service
+SystemdService=terminus-shaders.service

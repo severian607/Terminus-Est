@@ -1,0 +1,5 @@
+#!/bin/bash
+
+# terminus:summary=Restart the hypridle service used for the idle screensaver.
+
+systemctl --user try-restart hypridle.service

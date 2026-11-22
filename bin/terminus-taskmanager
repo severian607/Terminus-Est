@@ -1,0 +1,11 @@
+#!/bin/bash
+# Terminus-TaskManager: btop's layout with the GPU beside the CPU. Builds itself on first run
+# and whenever its sources are newer than the binary.
+#   terminus-taskmanager      keys are the highlighted letters in the box titles; q quits
+dir="$(dirname "$(readlink -f "$0")")/../modules/terminus-taskmanager"
+bin="$dir/target/release/terminus-taskmanager"
+if [[ ! -x $bin ]] || [[ -n $(find "$dir/src" "$dir/Cargo.toml" -newer "$bin" -print -quit) ]]; then
+  echo "building terminus-taskmanager..." >&2
+  cargo build --release --quiet --manifest-path "$dir/Cargo.toml" || exit 1
+fi
+exec "$bin" "$@"

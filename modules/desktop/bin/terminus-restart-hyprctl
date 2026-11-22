@@ -1,0 +1,5 @@
+#!/bin/bash
+
+# terminus:summary=Reload hyprland configuration (used by the Terminus-Est theme switching).
+
+hyprctl reload >/dev/null

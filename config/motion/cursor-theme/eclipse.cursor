@@ -1,0 +1,10 @@
+-- label: Eclipse
+-- emoji: 🌘
+-- category: Cursor · Theme
+-- slot: cursor-theme
+-- tags: eclipse, ring, arrow, accent, animated, cursor, theme
+-- description: A pale arrow with an eclipse ring in the wallpaper accent. A slow arc circles it, two race when hovering links, one spins while busy.
+-- source: original (modules/terminus-eclipse-cursor)
+-- license: original
+theme = terminus-eclipse
+size = 40

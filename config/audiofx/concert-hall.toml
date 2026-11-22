@@ -1,0 +1,16 @@
+label = "Concert hall"
+emoji = "🎻"
+category = "Space"
+tags = ["hall", "reverb", "concert", "classical"]
+description = "Large hall: 2.8 s decay with a 25 ms predelay."
+order = 30
+headroom_db = -3
+
+[[plugin]]
+type = "reverb"
+room-size = "Large"
+decay-time = 2.8
+amount = -10.0
+dry = 0.0
+predelay = 25.0
+hf-damp = 9000.0

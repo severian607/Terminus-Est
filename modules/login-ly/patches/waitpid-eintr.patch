@@ -1,0 +1,43 @@
+diff --git a/src/auth.zig b/src/auth.zig
+index 6a97fff..62fd37d 100644
+--- a/src/auth.zig
++++ b/src/auth.zig
+@@ -36,6 +36,20 @@ pub fn sessionSignalHandler(sig: std.posix.SIG) callconv(.c) void {
+     if (child_pid > 0) _ = std.c.kill(child_pid, sig);
+ }
+ 
++fn waitForChild(pid: std.posix.pid_t, status: *c_int) !void {
++    while (true) {
++        const result = std.posix.system.waitpid(pid, status, 0);
++        switch (std.posix.errno(result)) {
++            .SUCCESS => {
++                std.debug.assert(result == pid);
++                return;
++            },
++            .INTR => continue,
++            else => |err| return std.posix.unexpectedErrno(err),
++        }
++    }
++}
++
+ pub fn authenticate(allocator: std.mem.Allocator, io: std.Io, log_file: *LogFile, options: AuthOptions, current_environment: Environment, login: []const u8, password: []const u8) !void {
+     var tty_buffer: [3]u8 = undefined;
+     const tty_str = try std.fmt.bufPrint(&tty_buffer, "{d}", .{options.tty});
+@@ -133,7 +147,7 @@ pub fn authenticate(allocator: std.mem.Allocator, io: std.Io, log_file: *LogFile
+         errdefer cleanup: {
+             std.posix.kill(child_pid, std.posix.SIG.TERM) catch break :cleanup;
+             var child_status: c_int = undefined;
+-            _ = std.posix.system.waitpid(child_pid, &child_status, 0);
++            waitForChild(child_pid, &child_status) catch {};
+         }
+ 
+         // If we receive SIGTERM, forward it to child_pid
+@@ -148,7 +162,7 @@ pub fn authenticate(allocator: std.mem.Allocator, io: std.Io, log_file: *LogFile
+     }
+     // Wait for the session to stop
+     var child_status: c_int = undefined;
+-    _ = std.posix.system.waitpid(child_pid, &child_status, 0);
++    try waitForChild(child_pid, &child_status);
+ 
+     try log_file.reinit(io);
+ 

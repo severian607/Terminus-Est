@@ -1,0 +1,192 @@
+# Terminus-Bar style preset 'classic': complete [bar] and [widget] tables.
+# Apply with: terminus-bar-style set classic
+
+[bar.default]
+border = "primary"
+border_width = 0.0
+capsule = false
+capsule_fill = "surface"
+capsule_foreground = "on_surface"
+capsule_opacity = 0.0
+capsule_padding = 0.0
+capsule_radius = 0.0
+capsule_thickness = 0.0
+center = [ "clock" ]
+color = "primary"
+concave_edge_corners = true
+end = [
+    "weather",
+    "root-divider",
+    "media",
+    "root-divider",
+    "audio-visualizer",
+    "tray",
+    "bluetooth",
+    "root-divider",
+    "volume",
+    "brightness",
+    "root-divider",
+    "ram",
+    "gpu",
+    "cat",
+    "root-divider",
+    "network_rx",
+    "network_tx"
+]
+font_weight = 500
+hover_highlight = false
+icon_color = "tertiary"
+margin_edge = 0
+margin_ends = 0
+padding = 5
+panel_overlap = 0
+position = "top"
+radius = 0
+radius_bottom_left = 28
+radius_bottom_right = 28
+radius_top_left = 0
+radius_top_right = 0
+reserve_space = true
+shadow = false
+start = [ "terminus-launcher", "branch-divider", "workspaces", "clipboard-shortcut" ]
+thickness = 27
+widget_spacing = 3
+
+    [bar.default.monitor.HDMI-A-1]
+    enabled = false
+
+[widget.audio-visualizer]
+centered = true
+color_2 = "secondary"
+mirrored = false
+show_when_idle = false
+type = "audio_visualizer"
+
+[widget.battery]
+color = "error"
+
+[widget.branch-divider]
+color = "tertiary"
+glyph = "chevron-right"
+icon_color = "tertiary"
+label = "│"
+tooltip = ""
+type = "custom_button"
+
+    [widget.branch-divider.actions]
+    left = "none"
+    middle = "none"
+    right = "none"
+
+[widget.brightness]
+color = "primary"
+icon_color = "tertiary"
+show_when_unavailable = true
+
+[widget.cat]
+cat_color = "primary"
+cat_color_mode = "custom"
+show_cpu_percent = true
+type = "dotnetrob/cat:cat"
+
+[widget.clipboard-shortcut]
+color = "primary"
+glyph = "clipboard"
+icon_color = "tertiary"
+label = "Clipboard"
+tooltip = "Open clipboard history"
+type = "custom_button"
+
+    [widget.clipboard-shortcut.actions]
+    left = "exec terminus-bar msg panel-toggle clipboard"
+
+[widget.clock]
+color = "primary"
+format = "[  {:%a %b %d}  {:%H:%M} ]"
+tooltip_format = "{:%A, %d %B %Y}"
+
+[widget.control-center]
+color = "error"
+
+[widget.gpu]
+color = "primary"
+glyph = ""
+icon_color = "tertiary"
+show_glyph = true
+show_value = true
+stat = "gpu_usage"
+type = "sysmon"
+visualization = "none"
+
+[widget.media]
+color = "primary"
+
+[widget.network_rx]
+color = "primary"
+icon_color = "tertiary"
+network_speed_compact = true
+network_speed_unit = "mb"
+
+[widget.network_tx]
+color = "primary"
+icon_color = "tertiary"
+network_speed_compact = true
+network_speed_unit = "mb"
+
+[widget.ram]
+color = "primary"
+glyph = ""
+icon_color = "tertiary"
+show_glyph = true
+show_value = true
+stat = "ram_pct"
+type = "sysmon"
+visualization = "none"
+
+[widget.root-divider]
+color = "tertiary"
+glyph = ""
+icon_color = "tertiary"
+label = "┊"
+type = "custom_button"
+
+    [widget.root-divider.actions]
+    left = "none"
+    middle = "none"
+    right = "none"
+
+[widget.terminus-launcher]
+color = "primary"
+glyph = "U+250C"
+icon_color = "tertiary"
+label = "severian@terminus-est ~"
+tooltip = "Launcher"
+type = "custom_button"
+
+    [widget.terminus-launcher.actions]
+    left = "exec terminus-launcher toggle"
+
+[widget.volume]
+color = "primary"
+icon_color = "tertiary"
+mute_color = "on_surface"
+
+[widget.weather]
+color = "primary"
+icon_color = "tertiary"
+max_length = 80
+show_condition = false
+show_temperature = true
+
+[widget.workspaces]
+active_pill_size = 1.0
+capsule_radius = 0.0
+change_color_on_hover = false
+empty_color = "outline"
+focused_color = "on_surface"
+inactive_pill_size = 1.0
+label_source = "kanji"
+occupied_color = "on_surface"
+pill_scale = 1.0
+show_labels = true
+style = "regular"

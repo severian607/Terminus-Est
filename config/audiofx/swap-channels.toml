@@ -1,0 +1,9 @@
+label = "Swap channels"
+emoji = "🔁"
+category = "Stereo"
+tags = ["swap", "reverse", "left", "right", "flip"]
+description = "Swaps left and right."
+order = 20
+
+[stereo]
+mode = "swap"

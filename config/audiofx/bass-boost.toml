@@ -1,0 +1,13 @@
+label = "Bass boost"
+emoji = "🔊"
+category = "Tone"
+tags = ["bass", "low", "thump"]
+description = "Low shelf +6 dB under 100 Hz."
+order = 10
+headroom_db = -6
+
+[[band]]
+type = "lowshelf"
+freq = 100
+q = 0.7
+gain = 6

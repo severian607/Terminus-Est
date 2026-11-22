@@ -1,0 +1,19 @@
+label = "Vocal boost"
+emoji = "🎤"
+category = "Tone"
+tags = ["vocal", "voice", "speech", "dialogue"]
+description = "Lifts 2.5 kHz and trims 250 Hz mud so voices come forward."
+order = 60
+headroom_db = -4
+
+[[band]]
+type = "peaking"
+freq = 250
+q = 1.0
+gain = -2
+
+[[band]]
+type = "peaking"
+freq = 2500
+q = 1.0
+gain = 4

@@ -1,0 +1,11 @@
+{
+  "frame": true,
+  "motion": true,
+  "animation": {
+    "warmup": true,
+    "typeOn": true,
+    "cursorBlink": true,
+    "afterglow": true
+  },
+  "labels": "latin"
+}

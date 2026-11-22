@@ -1,0 +1,503 @@
+#!/usr/bin/env python3
+# terminus:summary=Mechvibes keyboard/mouse sound packs behind the SUPER+B picker
+"""Mechvibes sound packs: terminus-mechvibes list [--json] | set ID | toggle ID | add SOURCE | install LINK | remove ID | mood | volume up|down | on | off | status
+
+Mechvibes runs headless (hidden to the tray); this command edits its config and restarts it.
+  set ID      use a keyboard or mouse pack (ids look like keyboard/eg-oreo) and start Mechvibes
+  toggle ID   mute that device's sounds if the pack is already in use, otherwise use the pack
+  add SOURCE  install a sound pack: mechvibes://install/ID link, pack id or pack page, zip URL, local zip or
+              folder. The picker's Library lists the most
+              downloaded packs of mechvibes.com; Enter installs and uses one.
+  install LINK  same as add, then use the pack; the handler of the website's Install buttons (mechvibes://)
+  remove ID   delete an installed (not bundled) sound pack; Ctrl+Delete twice in the picker
+  mood        play / pause the mood sounds
+  volume up|down  one shared volume step (10%) for keyboard, mouse and mood
+  on | off    start / stop Mechvibes and the mood sounds (off silences everything)
+
+Mood sounds are looped by mpv (one transient user unit per sound, terminus-mood-ID); Mechvibes' own mood
+player is not used because it always starts paused and can only be started from its window.
+The picker is terminus-keysounds (SUPER+B).
+"""
+
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+import urllib.request
+import zipfile
+from pathlib import Path
+
+APP = Path.home() / ".local/opt/mechvibes/squashfs-root/usr/bin/mechvibes"
+LIB = APP.parents[1] / "lib"  # holds the libxdo.so.3 -> system libxdo.so.4 link
+DATA = Path.home() / ".local/share/mechvibes/data"
+CONFIG, CACHE = DATA / "config.json", DATA / "soundpack_cache.json"
+PACKS = DATA.parent / "soundpacks"
+API = "https://mechvibes.com/api/sound-packs"
+LIBRARY_CACHE = Path.home() / ".cache/terminus-est/mechvibes-library.json"
+LIBRARY_SIZE, LIBRARY_MAX_AGE = 60, 6 * 3600  # most-downloaded packs shown in the picker, refreshed every 6 h
+PACK_ID = re.compile(r"mv-[0-9a-f]{32}")
+DEVICES = {"keyboard": "Keyboard", "mouse": "Mouse"}
+EMOJI = {"keyboard": "⌨️", "mouse": "🖱️"}
+VOLUME_KEYS = ("volume", "mouse_volume")  # moved together; mood follows the same master level
+MOOD_DIR = Path.home() / ".local/share/terminus-est/mood"  # the mp3s bundled with Mechvibes (MIT)
+MOOD_STATE = Path.home() / ".local/state/terminus-est/mood.json"  # {"sounds": [ids], "playing": bool}
+MOOD_GAIN = 0.7  # mpv volume at 100% master
+RUNTIME = Path(f"/run/user/{os.getuid()}")
+FALLBACK = {"keyboard": "keyboard/eg-oreo", "mouse": "mouse/ping"}  # bundled packs used when the active one is deleted
+STEP = 10  # percent per volume up/down
+MOOD = {  # ambient sounds bundled with Mechvibes: id -> (label, emoji, description)
+    "rain": ("Rain", "🌧️", "Steady rain"),
+    "thunderstorm": ("Thunderstorm", "⛈️", "Thunder and heavy rain"),
+    "forest": ("Forest", "🌲", "Birds chirping in the forest"),
+    "ocean": ("Ocean", "🌊", "Calming ocean waves"),
+    "stream": ("Stream", "💧", "A running stream"),
+    "river": ("River", "🏞️", "Flowing river water"),
+    "fire": ("Fire", "🔥", "Crackling campfire"),
+    "wind": ("Wind", "🍃", "Gentle wind through trees"),
+    "cricket": ("Crickets", "🌙", "Crickets and night sounds"),
+    "chatter": ("Coffee shop", "☕", "Ambient coffee shop chatter"),
+}
+
+
+def running():
+    return subprocess.run(["pgrep", "-x", "mechvibes"], capture_output=True).returncode == 0
+
+
+def stop():
+    subprocess.run(["pkill", "-x", "mechvibes"], check=False)
+    for _ in range(40):
+        if not running():
+            return
+        time.sleep(0.1)
+    subprocess.run(["pkill", "-9", "-x", "mechvibes"], check=False)
+
+
+def start():
+    if running():
+        return
+    if not APP.is_file():
+        raise SystemExit(f"terminus-mechvibes: {APP} is missing")
+    subprocess.run(["terminus-funmode", "off"], check=False)  # two engines would double every key
+    env = dict(os.environ, LD_LIBRARY_PATH=f"{LIB}:{os.environ.get('LD_LIBRARY_PATH', '')}".rstrip(":"))
+    subprocess.Popen(
+        ["uwsm-app", "--", str(APP)], env=env, start_new_session=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def load():
+    return json.loads(CONFIG.read_text())
+
+
+def edit(change):
+    """Stop Mechvibes (it rewrites its config on exit), apply change(config), start it again."""
+    was = running()
+    stop()
+    config = load()
+    change(config)
+    config["start_hidden"] = True
+    config["ambiance_active_sounds"] = {}  # mood is played by this command, never by Mechvibes (it would double)
+    CONFIG.write_text(json.dumps(config, indent=2))
+    return was
+
+
+def packs():
+    if not CACHE.exists():  # removed after an install: Mechvibes rebuilds it when it starts
+        start()
+        for _ in range(100):
+            if CACHE.exists():
+                break
+            time.sleep(0.1)
+    try:
+        cache = json.loads(CACHE.read_text())["soundpacks"]
+    except (OSError, ValueError, KeyError):
+        raise SystemExit("terminus-mechvibes: no pack list yet; start Mechvibes once so it can scan its packs")
+    return {i: p for i, p in cache.items() if p.get("is_valid_v2") or p.get("validation_status") == "valid"}
+
+
+def device(pack_id):
+    return pack_id.split("/", 1)[0]
+
+
+def row(name, label, emoji, category, description, source, active, tags=()):
+    return {
+        "name": name, "label": label, "emoji": emoji, "category": category, "tags": [*tags],
+        "description": description, "source": source, "license": "Mechvibes", "order": 0, "flags": [],
+        "active": bool(active), "position": 1 if active else None, "shadowed": False,
+    }
+
+
+def notify(text):
+    subprocess.run(["notify-send", "-u", "low", "-a", "Mechvibes", "Mechvibes", text], check=False)
+
+
+def mood_load():
+    try:
+        return json.loads(MOOD_STATE.read_text())
+    except (OSError, ValueError):
+        return {"sounds": [], "playing": False}
+
+
+def mood_save(state):
+    MOOD_STATE.parent.mkdir(parents=True, exist_ok=True)
+    MOOD_STATE.write_text(json.dumps(state))
+
+
+def mood_unit(sound):
+    return f"terminus-mood-{sound}"
+
+
+def mood_active():
+    """Sounds whose player unit is running right now."""
+    out = subprocess.run(
+        ["systemctl", "--user", "list-units", "--state=active", "--plain", "--no-legend", "terminus-mood-*"],
+        capture_output=True, text=True,
+    ).stdout
+    return {line.split()[0].removeprefix("terminus-mood-").removesuffix(".service") for line in out.splitlines() if line.strip()}
+
+
+def mood_volume():
+    return round(master_percent(load()) * MOOD_GAIN)
+
+
+def mood_ipc(sound, volume):
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.settimeout(1)
+        try:
+            sock.connect(str(RUNTIME / f"{mood_unit(sound)}.sock"))
+            sock.sendall(json.dumps({"command": ["set_property", "volume", volume]}).encode() + b"\n")
+        except OSError:
+            pass
+
+
+def mood_sync():
+    """Make the running mpv units match the saved state: the chosen sounds when playing, none when paused."""
+    state = mood_load()
+    want = set(state["sounds"]) if state["playing"] else set()
+    have = mood_active()
+    volume = mood_volume()
+    for sound in have - want:
+        subprocess.run(["systemctl", "--user", "stop", mood_unit(sound)], check=False, stderr=subprocess.DEVNULL)
+    for sound in want - have:
+        if not (MOOD_DIR / f"{sound}.mp3").is_file():
+            raise SystemExit(f"terminus-mechvibes: {MOOD_DIR / (sound + '.mp3')} is missing (copy assets/sounds from the Mechvibes repo)")
+        subprocess.run([
+            "systemd-run", "--user", f"--unit={mood_unit(sound)}", "--collect", "--quiet", "--",
+            "mpv", "--no-video", "--no-terminal", "--really-quiet", "--loop-file=inf", f"--volume={volume}",
+            f"--input-ipc-server={RUNTIME / (mood_unit(sound) + '.sock')}", str(MOOD_DIR / f"{sound}.mp3"),
+        ], check=True)
+    for sound in want & have:
+        mood_ipc(sound, volume)
+
+
+def mood_set(sound, add):
+    state = mood_load()
+    sounds = [*state["sounds"]] if add else []
+    if sound in sounds and add:
+        sounds.remove(sound)  # adding a sound that is already in the mix takes it out
+    else:
+        sounds.append(sound)
+    mood_save({"sounds": sounds, "playing": bool(sounds)})
+    mood_sync()
+
+
+def mood_toggle():
+    """Pause the mood sounds if any is playing, otherwise play the chosen ones."""
+    state = mood_load()
+    if not state["sounds"]:
+        raise SystemExit("terminus-mechvibes: no mood sound chosen (pick one under Mood first)")
+    mood_save({**state, "playing": not mood_active()})
+    mood_sync()
+
+
+def mood_state_text():
+    state = mood_load()
+    if not state["sounds"]:
+        return ""
+    return "  mood " + ("playing" if mood_active() else "paused")
+
+
+def fetch(url, timeout=20):
+    request = urllib.request.Request(url, headers={"User-Agent": "terminus-mechvibes"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read()
+
+
+def library():
+    """Most-downloaded packs of the Mechvibes library (cached; stale cache is used when offline)."""
+    try:
+        cached = json.loads(LIBRARY_CACHE.read_text())
+    except (OSError, ValueError):
+        cached = None
+    if cached and time.time() - cached["time"] < LIBRARY_MAX_AGE:
+        return cached["packs"]
+    try:
+        data = json.loads(fetch(f"{API}?sort=downloads&limit={LIBRARY_SIZE}", timeout=5))["packs"]
+    except (OSError, ValueError, KeyError):
+        return cached["packs"] if cached else []
+    LIBRARY_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    LIBRARY_CACHE.write_text(json.dumps({"time": time.time(), "packs": data}))
+    return data
+
+
+def installed_ids():
+    return {f"{kind}/{d.name}" for kind in DEVICES for d in (PACKS / kind).glob("*") if d.is_dir()}
+
+
+def resolve(source):
+    """What to install: ('zip', path) for a local zip, ('dir', path) for a pack folder, or ('id', mv-id) to download."""
+    path = Path(source).expanduser()
+    if path.is_dir():
+        return "dir", path
+    if path.is_file():
+        return "zip", path
+    if match := PACK_ID.search(source):
+        return "id", match.group(0)
+    if source.startswith(("http://", "https://")):
+        if urllib.parse.urlparse(source).netloc.endswith("mechvibes.com"):  # a pack page: its id is in the html
+            if match := PACK_ID.search(fetch(source).decode("utf-8", "replace")):
+                return "id", match.group(0)
+            raise SystemExit(f"terminus-mechvibes: no pack id found on {source}")
+        return "url", source
+    raise SystemExit(f"terminus-mechvibes: cannot tell what {source!r} is (a mechvibes:// link, pack page, zip URL, zip or folder)")
+
+
+def install_pack(source):
+    """Install a sound pack (library link or id, pack page, zip URL, local zip or folder); returns its picker id."""
+    kind, what = resolve(source)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        if kind == "dir":
+            root, wanted = what, None
+        else:
+            if kind == "id":
+                archive, wanted = tmp / "pack.zip", what
+                archive.write_bytes(fetch(f"{API}/{what}/download", timeout=60))
+            elif kind == "url":
+                archive, wanted = tmp / "pack.zip", None
+                archive.write_bytes(fetch(what, timeout=60))
+            else:
+                archive, wanted = what, None
+            root = tmp / "pack"
+            try:
+                with zipfile.ZipFile(archive) as bundle:
+                    for name in bundle.namelist():
+                        if name.startswith("/") or ".." in Path(name).parts:
+                            raise SystemExit(f"terminus-mechvibes: unsafe path in zip: {name}")
+                    bundle.extractall(root)
+            except zipfile.BadZipFile:
+                raise SystemExit("terminus-mechvibes: that is not a zip file")
+        configs = sorted(root.rglob("config.json"), key=lambda c: len(c.parts))
+        if not configs:
+            raise SystemExit("terminus-mechvibes: no config.json in the pack (a sound pack needs one at its top level)")
+        source_dir = configs[0].parent
+        try:
+            meta = json.loads(configs[0].read_text())
+        except ValueError:
+            raise SystemExit("terminus-mechvibes: the pack's config.json is not valid JSON")
+        if not meta.get("name"):
+            raise SystemExit("terminus-mechvibes: the pack's config.json has no name")
+        device_kind = "mouse" if str(meta.get("soundpack_type", "keyboard")).lower() == "mouse" else "keyboard"
+        slug = wanted or meta.get("id") or re.sub(r"[^a-z0-9]+", "-", meta["name"].lower()).strip("-") or "pack"
+        slug = re.sub(r"[^A-Za-z0-9._-]", "-", Path(str(slug)).name)
+        dest = PACKS / device_kind / slug
+        if dest.exists():
+            shutil.rmtree(dest)  # an update of the same pack
+        shutil.copytree(source_dir, dest)
+    # Mechvibes only notices new folders when it scans at start-up; a changed folder list means a rescan.
+    CACHE.unlink(missing_ok=True)
+    return f"{device_kind}/{slug}"
+
+
+def remove_pack(pack_id):
+    """Delete an installed sound pack; a device whose pack it was falls back to a bundled one."""
+    kind = device(pack_id)
+    folder = PACKS / pack_id
+    if kind not in DEVICES or not folder.is_dir() or folder.parent.parent != PACKS:
+        raise SystemExit(f"terminus-mechvibes: {pack_id} is a bundled pack and cannot be deleted")
+
+    def change(config):
+        if config.get(f"{kind}_soundpack") == pack_id:
+            config[f"{kind}_soundpack"] = FALLBACK[kind]
+        config["pinned_soundpacks"] = [p for p in config.get("pinned_soundpacks", []) if p != pack_id]
+
+    edit(change)
+    shutil.rmtree(folder)
+    CACHE.unlink(missing_ok=True)  # rescanned when Mechvibes starts
+    start()
+
+
+def list_packs():
+    config, on = load(), running()
+    rows = []
+    for pack_id, p in packs().items():
+        kind = device(pack_id)
+        if kind not in DEVICES:
+            continue
+        active = on and config.get(f"{kind}_soundpack") == pack_id and config.get("enable_sound", True) \
+            and config.get(f"enable_{kind}_sound", True)
+        rows.append(row(
+            pack_id, p["name"], EMOJI[kind], DEVICES[kind],
+            p.get("description") or f"{DEVICES[kind]} sound pack by {p.get('author') or 'unknown'}",
+            p.get("author") or "custom", active, [p.get("author") or "", *p.get("tags", [])],
+        ))
+    rows.sort(key=lambda r: (r["category"], r["label"].lower()))
+    have = installed_ids()
+    for p in library():
+        pack_id = f"{p['type']}/{p['id']}"
+        if p["type"] not in DEVICES or pack_id in have:
+            continue
+        rows.append(row(
+            f"library/{p['id']}", p["name"], EMOJI[p["type"]], "Library",
+            f"{p['type'].capitalize()} pack, {p.get('downloads', 0)} downloads. {(p.get('description') or '').splitlines()[0] if p.get('description') else ''}".strip(),
+            p.get("author") or "community", False, [p.get("author") or "", p["type"], *p.get("tags", [])],
+        ))
+    playing = mood_active()
+    for sound, (label, emoji, description) in MOOD.items():
+        rows.append(row(f"mood/{sound}", label, emoji, "Mood", description, "ambient", sound in playing, ["ambient", "mood"]))
+    level = master_percent(config)
+    for direction, sign in (("up", "+"), ("down", "-")):
+        rows.append(row(f"volume/{direction}", f"Volume {direction} ({sign}{STEP}%)", "🔊", "Volume",
+                        f"Keyboard, mouse and mood volume together. Now {level}%. "
+                        f"Press + / - in the picker to change it without closing.",
+                        "volume", False, ["volume"]))
+    return {"categories": [*DEVICES.values(), "Mood", "Volume", "Library"], "effects": rows,
+            "state": f"vol {level}%" + mood_state_text()}
+
+
+def known(pack_id):
+    if pack_id not in packs() or device(pack_id) not in DEVICES:
+        raise SystemExit(f"terminus-mechvibes: unknown sound pack {pack_id!r}")
+    return device(pack_id)
+
+
+def master_percent(config):
+    """The shared volume: the keyboard volume, since the three are always set together."""
+    return round(config.get("volume", 1.0) * 100)
+
+
+def change_volume(direction):
+    """Move keyboard, mouse and mood volume together by one step (0..100%, snapped to the step)."""
+    if direction not in ("up", "down"):
+        raise SystemExit("terminus-mechvibes: volume up | down")
+    config = load()
+    level = round(master_percent(config) / STEP) * STEP + (STEP if direction == "up" else -STEP)
+    level = min(max(level, 0), 100)
+
+    def change(config):
+        for key in VOLUME_KEYS:
+            config[key] = level / 100
+
+    edit(change)
+    start()
+    mood_sync()
+    return level
+
+
+def known_mood(name):
+    sound = name.removeprefix("mood/")
+    if not name.startswith("mood/") or sound not in MOOD:
+        raise SystemExit(f"terminus-mechvibes: unknown mood sound {name!r}")
+    return sound
+
+
+def use(name, add=False):
+    """Choose a pack, a mood sound (alone, or added to the mix with add) or a volume, then start Mechvibes."""
+    if name.startswith("volume/"):
+        change_volume(name.removeprefix("volume/"))
+        return
+    if name.startswith("mood/"):
+        mood_set(known_mood(name), add)
+        return
+    if name.startswith("library/"):  # a pack from the online library: install it, then use it
+        name = install_pack(name.removeprefix("library/"))
+        kind = device(name)  # Mechvibes rescans its folders at start-up, so the pack list has no entry yet
+    else:
+        kind = known(name)
+
+    def change(config):
+        config[f"{kind}_soundpack"] = name
+        config["enable_sound"] = config[f"enable_{kind}_sound"] = True
+
+    edit(change)
+    start()
+
+
+def toggle(name):
+    """Pack: mute its device if it is already in use. Mood sound: add to / remove from the mix. Volume: set it."""
+    current = load()
+    if name.startswith("mood/"):
+        use(name, add=True)  # adds the sound to the mix, or removes it when it is already in it
+    elif name.startswith(("volume/", "library/")):
+        use(name)
+    else:
+        kind = known(name)
+        if running() and current.get(f"{kind}_soundpack") == name and current.get(f"enable_{kind}_sound", True):
+            edit(lambda config: config.__setitem__(f"enable_{kind}_sound", False))
+            start()
+        else:
+            use(name)
+
+
+def main(argv):
+    cmd, args = (argv[0] if argv else "list"), [a for a in argv[1:] if a != "--json"]
+    if cmd == "list":
+        data = list_packs()
+        if "--json" in argv:
+            print(json.dumps(data, ensure_ascii=False))
+        else:
+            for e in data["effects"]:
+                print(f" {'*' if e['active'] else ' '} {e['name']:<48} {e['label']}")
+    elif cmd in ("set", "toggle") and len(args) == 1:
+        (use if cmd == "set" else toggle)(args[0])
+    elif cmd == "remove" and len(args) == 1:
+        remove_pack(args[0])
+    elif cmd == "install" and len(args) == 1:  # mechvibes:// links from the website's Install button
+        pack = PACK_ID.search(args[0])
+        try:
+            use(f"library/{pack.group(0)}" if pack else install_pack(args[0]))
+        except SystemExit as error:
+            notify(str(error).removeprefix("terminus-mechvibes: "))
+            raise
+        notify("sound pack installed and in use")
+    elif cmd == "add" and len(args) == 1:
+        pack_id = install_pack(args[0])
+        edit(lambda config: None)
+        start()
+        print(f"installed {pack_id}; Mechvibes is scanning it (choose it in the picker once it shows up)")
+    elif cmd == "mood":
+        try:
+            mood_toggle()
+        except SystemExit as error:
+            notify(str(error).removeprefix("terminus-mechvibes: "))
+            raise
+        notify("mood playing" if mood_active() else "mood paused")
+    elif cmd == "volume" and len(args) == 1:
+        print(f"{change_volume(args[0])}%")
+    elif cmd == "on":
+        edit(lambda config: config.update(enable_sound=True))
+        start()
+        state = mood_load()
+        mood_save({**state, "playing": bool(state["sounds"])})
+        mood_sync()
+    elif cmd in ("off", "clear"):
+        stop()
+        mood_save({**mood_load(), "playing": False})
+        mood_sync()
+    elif cmd == "status":
+        print("on" if running() else "off")
+        return 0 if running() else 1
+    else:
+        print(__doc__, file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

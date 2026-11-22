@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Plain themed windows on a fixed schedule, filmed by terminus-motion-previews inside the sandbox.
+
+usage: terminus-motion-demo-windows cycle           open A, open B, close B, close A (about 3.4 s)
+       terminus-motion-demo-windows hold N SECONDS  open N windows, keep them for SECONDS
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from picker_style import read_theme  # noqa: E402
+
+import gi  # noqa: E402
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+
+CSS = """
+window.demo { background: @bg@; color: @fg@; font-family: '@font@', monospace; font-size: 13px; }
+.demo-title { color: @fg@; margin: 14px 16px 6px 16px; }
+.demo-line { background: @line@; min-height: 7px; margin: 5px 16px; }
+.demo-line.accent { background: @accent@; }
+"""
+# Line widths as fractions of the window, so every window looks like a different page of text.
+PAGES = [(0.55, 0.8, 0.72, 0.35, 0.64, 0.5), (0.7, 0.42, 0.6, 0.78, 0.3, 0.66), (0.4, 0.68, 0.52, 0.74, 0.58, 0.36)]
+
+
+class Demo(Gtk.Application):
+    def __init__(self, steps):
+        super().__init__(application_id="local.terminus.MotionDemo", flags=Gio.ApplicationFlags.NON_UNIQUE)
+        self.steps = steps
+        self.windows = []
+        self.connect("activate", self.start)
+
+    def start(self, _app):
+        self.hold()
+        provider = Gtk.CssProvider()
+        provider.load_from_data(read_theme(CSS)[0])
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        for seconds, action in self.steps:
+            GLib.timeout_add(int(seconds * 1000), action)
+
+    def open(self):
+        index = len(self.windows)
+        window = Gtk.ApplicationWindow(application=self, title=f"Motion demo {index + 1}", decorated=False)
+        window.add_css_class("demo")
+        window.set_default_size(420, 300)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        page.append(Gtk.Label(label=f"[ window {'abc'[index % 3]} ]", xalign=0, css_classes=["demo-title"]))
+        for row, width in enumerate(PAGES[index % len(PAGES)]):
+            line = Gtk.Box(css_classes=["demo-line", "accent"] if row == 1 else ["demo-line"], halign=Gtk.Align.START)
+            line.set_size_request(int(380 * width), -1)
+            page.append(line)
+        window.set_child(page)
+        window.present()
+        self.windows.append(window)
+        return False
+
+    def close(self):
+        if self.windows:
+            self.windows.pop().destroy()
+        return False
+
+    def finish(self):
+        self.quit()
+        return False
+
+
+def main(argv):
+    demo = Demo([])
+    if argv[:1] == ["cycle"]:
+        demo.steps = [(0.3, demo.open), (1.1, demo.open), (2.0, demo.close), (2.7, demo.close), (3.4, demo.finish)]
+    elif argv[:1] == ["hold"] and len(argv) == 3:
+        count, seconds = int(argv[1]), float(argv[2])
+        demo.steps = [(0.05 + 0.15 * i, demo.open) for i in range(count)] + [(seconds, demo.finish)]
+    else:
+        print(__doc__, file=sys.stderr)
+        return 2
+    return demo.run([sys.argv[0]])
+
+
+sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=local.terminus.Keysounds
+Exec=/usr/bin/systemctl --user start terminus-keysounds.service
+SystemdService=terminus-keysounds.service

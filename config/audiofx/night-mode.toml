@@ -1,0 +1,18 @@
+label = "Night mode"
+emoji = "🌙"
+category = "Tone"
+tags = ["night", "quiet", "neighbours", "late"]
+description = "Trims bass and sharp highs so it carries less through walls."
+order = 100
+
+[[band]]
+type = "lowshelf"
+freq = 120
+q = 0.7
+gain = -6
+
+[[band]]
+type = "highshelf"
+freq = 6000
+q = 0.7
+gain = -3

@@ -1,0 +1,19 @@
+label = "Gentle leveler"
+emoji = "⚖️"
+category = "Dynamics"
+tags = ["leveler", "compressor", "even", "volume", "smooth"]
+description = "Mild 2.5:1 compression to even out volume differences."
+order = 20
+headroom_db = -1
+
+[[plugin]]
+type = "compressor"
+mode = "Downward"
+threshold = -24.0
+ratio = 2.5
+attack = 20.0
+release = 300.0
+knee = -8.0
+makeup = 5.0
+dry = -80.01
+wet = 0.0

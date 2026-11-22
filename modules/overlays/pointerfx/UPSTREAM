@@ -1,0 +1,4 @@
+Original code (no upstream). Quickshell QML overlays plus a small pointer position helper.
+The candidates mhalo, crosshair, wl-find-cursor-reticle and xeyes-wayland were not used;
+the effects are implemented here as layer-shell surfaces with an empty input region.
+Licence: original.

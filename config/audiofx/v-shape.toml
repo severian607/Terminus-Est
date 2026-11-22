@@ -1,0 +1,25 @@
+label = "V-shape"
+emoji = "🎚️"
+category = "Tone"
+tags = ["v", "scoop", "bass", "treble", "fun"]
+description = "Boosted bass and treble with the mids scooped out."
+order = 80
+headroom_db = -7
+
+[[band]]
+type = "lowshelf"
+freq = 120
+q = 0.7
+gain = 5
+
+[[band]]
+type = "peaking"
+freq = 800
+q = 0.8
+gain = -3
+
+[[band]]
+type = "highshelf"
+freq = 7000
+q = 0.7
+gain = 5

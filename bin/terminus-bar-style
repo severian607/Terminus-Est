@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+# terminus:summary=Switch the Terminus-Bar design preset: list | current | set NAME | save NAME
+"""Terminus-Bar style presets.
+
+A preset (config/terminus-bar/presets/NAME.toml) holds the complete `bar` and `widget`
+tables. `set` swaps those two tables into the bar's live override file
+(~/.local/state/terminusbar/settings.toml); the running bar hot-reloads on the change.
+"""
+
+import os
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+
+import tomlkit
+
+ROOT = Path(__file__).resolve().parents[1]
+PRESETS = ROOT / "config" / "terminus-bar" / "presets"
+STATE = Path.home() / ".local" / "state" / "terminusbar" / "settings.toml"
+STYLE_DIR = Path.home() / ".local" / "state" / "terminus-est" / "bar-style"
+TABLES = ("bar", "widget")
+
+
+def fail(message):
+    print(f"terminus-bar-style: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+def valid_name(name):
+    if not name or not all(c.isalnum() or c in "-_" for c in name):
+        fail(f"invalid preset name: {name!r} (use letters, digits, - and _)")
+    return name
+
+
+def load_preset(name):
+    path = PRESETS / f"{valid_name(name)}.toml"
+    if not path.is_file():
+        fail(f"no preset named {name!r} (see: terminus-bar-style list)")
+    try:
+        doc = tomlkit.parse(path.read_text(encoding="utf-8"))
+    except Exception as error:
+        fail(f"{path} does not parse: {error}")
+    for table in TABLES:
+        if table not in doc:
+            fail(f"{path} has no [{table}] table")
+    return doc
+
+
+def load_state():
+    if not STATE.is_file():
+        fail(f"bar state file missing: {STATE}")
+    try:
+        return tomlkit.parse(STATE.read_text(encoding="utf-8"))
+    except Exception as error:
+        fail(f"{STATE} does not parse: {error}")
+
+
+def write_atomic(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def names():
+    return sorted(p.stem for p in PRESETS.glob("*.toml"))
+
+
+def current_name():
+    try:
+        return (STYLE_DIR / "current").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def matches(name):
+    try:
+        preset, state = load_preset(name), load_state()
+    except SystemExit:
+        return False
+    return all(preset[t].unwrap() == state.get(t, {}).unwrap() for t in TABLES if t in state)
+
+
+def cmd_list():
+    active = current_name()
+    for name in names():
+        print(f"{'*' if name == active else ' '} {name}")
+
+
+def cmd_current():
+    name = current_name()
+    if not name:
+        print("unknown")
+        return
+    print(name if matches(name) else f"{name} (modified)")
+
+
+def cmd_set(name):
+    preset = load_preset(name)
+    state = load_state()
+    STYLE_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(STATE, STYLE_DIR / "previous.toml")
+    for table in TABLES:
+        state[table] = tomlkit.parse(tomlkit.dumps({table: preset[table]}))[table]
+    write_atomic(STATE, tomlkit.dumps(state))
+    write_atomic(STYLE_DIR / "current", name + "\n")
+    print(f"bar style: {name}")
+
+
+def cmd_save(name):
+    valid_name(name)
+    state = load_state()
+    out = tomlkit.document()
+    out.add(tomlkit.comment(f"Terminus-Bar style preset '{name}': complete [bar] and [widget] tables."))
+    out.add(tomlkit.comment("Apply with: terminus-bar-style set " + name))
+    out.add(tomlkit.nl())
+    for table in TABLES:
+        if table not in state:
+            fail(f"live state has no [{table}] table")
+        out[table] = tomlkit.parse(tomlkit.dumps({table: state[table]}))[table]
+    PRESETS.mkdir(parents=True, exist_ok=True)
+    write_atomic(PRESETS / f"{name}.toml", tomlkit.dumps(out))
+    write_atomic(STYLE_DIR / "current", name + "\n")
+    print(f"saved {PRESETS / (name + '.toml')}")
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print("usage: terminus-bar-style list | current | set NAME | save NAME")
+        return 0 if argv else 2
+    cmd, args = argv[0], argv[1:]
+    if cmd == "list" and not args:
+        cmd_list()
+    elif cmd == "current" and not args:
+        cmd_current()
+    elif cmd == "set" and len(args) == 1:
+        cmd_set(args[0])
+    elif cmd == "save" and len(args) == 1:
+        cmd_save(args[0])
+    else:
+        fail("usage: terminus-bar-style list | current | set NAME | save NAME")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

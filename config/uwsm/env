@@ -1,0 +1,24 @@
+# Changes require a restart to take effect.
+
+# Ensure Terminus-Est bins are in the path
+export TERMINUS_PATH=$HOME/Projects/Terminus-Est
+# Private desktop helpers are separate from the integration project's commands.
+export TERMINUS_DESKTOP_PATH=$HOME/Projects/Terminus-Est/modules/desktop
+export PATH=$TERMINUS_PATH/bin:$HOME/.local/bin:$TERMINUS_DESKTOP_PATH/bin:$PATH
+
+# Let KDE applications discover Arch's installed application catalog.
+export XDG_MENU_PREFIX=arch-
+
+# Set default terminal and editor
+source ~/.config/terminus-est/uwsm/default
+
+# Cursor theme: chosen in Terminus-Motion (SUPER + A), stored as "NAME SIZE"; default is the sword at 36.
+read -r _cursor_theme _cursor_size < "$HOME/.local/state/terminus-est/cursor/theme" 2>/dev/null
+export HYPRCURSOR_THEME=${_cursor_theme:-terminus-est}
+export HYPRCURSOR_SIZE=${_cursor_size:-36}
+export XCURSOR_THEME=${_cursor_theme:-terminus-est}
+export XCURSOR_SIZE=${_cursor_size:-36}
+unset _cursor_theme _cursor_size
+
+# Activate mise if present on the system
+terminus compat cmd-present mise && eval "$(mise activate bash --shims)"

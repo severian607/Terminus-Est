@@ -1,0 +1,214 @@
+[
+  {
+    "bindings": {
+      "ctrl-k": null,
+      "alt-k": null
+    }
+  },
+  {
+    "bindings": {
+      "ctrl-k": "workspace::ToggleBottomDock",
+      "ctrl-j": "project_panel::ToggleFocus",
+      "ctrl-l": "agent::ToggleFocus",
+      "ctrl-shift-j": "workspace::ToggleLeftDock",
+      "ctrl-shift-k": "terminal_panel::Toggle",
+      "ctrl-shift-l": "workspace::ToggleRightDock",
+      "ctrl-'": "editor::SelectLine",
+      "ctrl-?": null,
+      "alt-left": "workspace::ActivatePaneLeft",
+      "alt-right": "workspace::ActivatePaneRight",
+      "alt-down": "terminal_panel::ToggleFocus",
+      "alt-up": "workspace::FocusCenterPane",
+      "ctrl-n": "file_finder::Toggle",
+      "ctrl-p": ["task::Spawn", { "task_name": "Copy current file path for shell" }],
+      "ctrl-q": "command_palette::Toggle",
+      "ctrl-1": ["pane::ActivateItem", 0],
+      "ctrl-2": ["pane::ActivateItem", 1],
+      "ctrl-3": ["pane::ActivateItem", 2],
+      "ctrl-4": ["pane::ActivateItem", 3],
+      "ctrl-5": ["pane::ActivateItem", 4],
+      "ctrl-6": ["pane::ActivateItem", 5],
+      "ctrl-7": ["pane::ActivateItem", 6],
+      "ctrl-8": ["pane::ActivateItem", 7],
+      "ctrl-9": "pane::ActivateLastItem"
+    }
+  },
+  {
+    "context": "Workspace",
+    "bindings": {
+      "ctrl-t": "workspace::NewFile"
+    }
+  },
+  {
+    "context": "Editor && mode == full",
+    "bindings": {
+      "ctrl-d": "editor::DeleteLine",
+      "ctrl-up": ["workspace::SendKeystrokes", "up up"],
+      "ctrl-down": ["workspace::SendKeystrokes", "down down"]
+    }
+  },
+  {
+    "context": "Editor && mode == full && showing_completions",
+    "bindings": {
+      "enter": "editor::Newline",
+      "shift-enter": "editor::Newline",
+      "tab": "editor::ConfirmCompletion"
+    }
+  },
+  {
+    "bindings": {
+      "alt-k ctrl-o": "workspace::Open"
+    }
+  },
+  {
+    "context": "Editor",
+    "bindings": {
+      "alt-k ctrl-q": "editor::Rewrap",
+      "alt-k q": "editor::Rewrap"
+    }
+  },
+  {
+    "context": "Editor && mode == full",
+    "bindings": {
+      "alt-k ctrl-z": "editor::ToggleSoftWrap",
+      "alt-k z": "editor::ToggleSoftWrap"
+    }
+  },
+  {
+    "context": "Editor && !agent_diff",
+    "bindings": {
+      "alt-k ctrl-r": "git::Restore"
+    }
+  },
+  {
+    "context": "Pane",
+    "bindings": {
+      "alt-k e": ["pane::CloseItemsToTheLeft", {"close_pinned": false}],
+      "alt-k t": ["pane::CloseItemsToTheRight", {"close_pinned": false}],
+      "alt-k u": ["pane::CloseCleanItems", {"close_pinned": false}],
+      "alt-k w": ["pane::CloseAllItems", {"close_pinned": false}],
+      "alt-k ctrl-w": "workspace::CloseAllItemsAndPanes",
+      "alt-k shift-enter": "pane::TogglePinTab"
+    }
+  },
+  {
+    "context": "Editor",
+    "bindings": {
+      "alt-k ctrl-d": ["editor::SelectNext", {"replace_newest": true}],
+      "alt-k ctrl-shift-d": ["editor::SelectPrevious", {"replace_newest": true}],
+      "alt-k ctrl-i": "editor::Hover",
+      "alt-k ctrl-b": "editor::BlameHover",
+      "alt-k ctrl-c": ["editor::ToggleComments", {"advance_downwards": false}],
+      "alt-k ctrl-/": "editor::ToggleBlockComments",
+      "alt-k ctrl-h": "call_hierarchy::ShowIncomingCalls",
+      "alt-k ctrl-l": "editor::ToggleFold",
+      "alt-k ctrl-[": "editor::FoldRecursive",
+      "alt-k ctrl-]": "editor::UnfoldRecursive",
+      "alt-k ctrl-1": "editor::FoldAtLevel_1",
+      "alt-k ctrl-2": "editor::FoldAtLevel_2",
+      "alt-k ctrl-3": "editor::FoldAtLevel_3",
+      "alt-k ctrl-4": "editor::FoldAtLevel_4",
+      "alt-k ctrl-5": "editor::FoldAtLevel_5",
+      "alt-k ctrl-6": "editor::FoldAtLevel_6",
+      "alt-k ctrl-7": "editor::FoldAtLevel_7",
+      "alt-k ctrl-8": "editor::FoldAtLevel_8",
+      "alt-k ctrl-9": "editor::FoldAtLevel_9",
+      "alt-k ctrl-0": "editor::FoldAll",
+      "alt-k ctrl-j": "editor::UnfoldAll",
+      "alt-k r": "editor::RevealInFileManager",
+      "alt-k p": "editor::CopyPath"
+    }
+  },
+  {
+    "context": "Editor && extension == md",
+    "use_key_equivalents": true,
+    "bindings": {
+      "alt-k v": "markdown::OpenPreviewToTheSide"
+    }
+  },
+  {
+    "context": "Editor && extension == svg",
+    "use_key_equivalents": true,
+    "bindings": {
+      "alt-k v": "svg::OpenPreviewToTheSide"
+    }
+  },
+  {
+    "context": "Editor && (extension == csv || extension == tsv || extension == ssv || extension == psv)",
+    "use_key_equivalents": true,
+    "bindings": {
+      "alt-k v": "tabular_data::OpenPreviewToTheSide"
+    }
+  },
+  {
+    "context": "Workspace",
+    "bindings": {
+      "alt-k s": "workspace::SaveWithoutFormat",
+      "alt-k ctrl-p": "workspace::ReopenLastPicker",
+      "alt-k ctrl-s": "zed::OpenKeymap",
+      "alt-k ctrl-t": "theme_selector::Toggle",
+      "alt-k ctrl-shift-t": "theme::ToggleMode",
+      "alt-k n": "encoding_selector::Toggle",
+      "alt-k m": "language_selector::Toggle",
+      "alt-k ctrl-m": "toolchain::AddToolchain",
+      "alt-k ctrl-left": "workspace::ActivatePaneLeft",
+      "alt-k ctrl-right": "workspace::ActivatePaneRight",
+      "alt-k ctrl-up": "workspace::ActivatePaneUp",
+      "alt-k ctrl-down": "workspace::ActivatePaneDown",
+      "alt-k shift-left": "workspace::SwapPaneLeft",
+      "alt-k shift-right": "workspace::SwapPaneRight",
+      "alt-k shift-up": "workspace::SwapPaneUp",
+      "alt-k shift-down": "workspace::SwapPaneDown"
+    }
+  },
+  {
+    "context": "Pane",
+    "bindings": {
+      "alt-k up": "pane::SplitUp",
+      "alt-k down": "pane::SplitDown",
+      "alt-k left": "pane::SplitLeft",
+      "alt-k right": "pane::SplitRight"
+    }
+  },
+  {
+    "context": "GitDiff > Editor",
+    "bindings": {
+      "alt-k ctrl-r": "git::RestoreAndNext"
+    }
+  },
+  {
+    "context": "CallHierarchyPicker > Picker > Editor",
+    "bindings": {
+      "alt-k ctrl-h": "call_hierarchy::ToggleDirection",
+      "alt-k right": "menu::SelectChild",
+      "alt-k left": "menu::SelectParent"
+    }
+  },
+  {
+    "context": "RecentProjects || (RecentProjects > Picker > Editor)",
+    "bindings": {
+      "alt-k": "recent_projects::ToggleActionsMenu",
+      "alt-k ctrl-o": "workspace::Open"
+    }
+  },
+  {
+    "context": "KeymapEditor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "alt-k": "keymap_editor::OpenCreateKeybindingModal"
+    }
+  },
+  {
+    "context": "GitBranchSelector || (GitBranchSelector > Picker > Editor)",
+    "use_key_equivalents": true,
+    "bindings": {
+      "alt-k": "branch_picker::ToggleFilterMenu"
+    }
+  },
+  {
+    "context": "ImageViewer",
+    "bindings": {
+      "alt-k r": "editor::RevealInFileManager"
+    }
+  }
+]

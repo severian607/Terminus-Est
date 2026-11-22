@@ -1,0 +1,9 @@
+label = "Right only"
+emoji = "▶️"
+category = "Stereo"
+tags = ["right", "channel", "one ear"]
+description = "Plays the right channel on both sides."
+order = 70
+
+[stereo]
+mode = "right"

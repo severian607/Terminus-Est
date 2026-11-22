@@ -1,0 +1,11 @@
+[Plymouth Theme]
+Name=Terminus-Est
+Description=Terminus-Est splash screen.
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/terminus-est
+ScriptFile=/usr/share/plymouth/themes/terminus-est/terminus-est.script
+ConsoleLogBackgroundColor=0x1a1b26
+MonospaceFont=Cantarell 11
+Font=Cantarell 11

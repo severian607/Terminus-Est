@@ -1,0 +1,12 @@
+url: https://github.com/VirtCode/hypr-dynamic-cursors
+commit: 2a8d0b735328d874a78ca93b2f201649f712a74a (master, 2026-10-05, "fix: use new render contexts")
+license: MIT (LICENSE.md, Copyright 2024 Virt)
+cloned: 2026-11-17; .git removed
+target: Hyprland 0.57.2 (commit 11cbc6c577b84ffb1edf4df3fc5b6128c3ae6947), g++ with the installed headers
+
+The upstream repository has no tag for 0.57.2; the newest master commit built and loaded unchanged.
+
+Local patches:
+  - Makefile and .gitignore: build output directory renamed from out/ to build/ (build/dynamic-cursors.so), to match
+    the other local plugins in modules/. No source files under src/ were changed.
+  - README.md renamed to README.upstream.md; README.md is the local build note.

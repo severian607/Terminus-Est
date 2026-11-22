@@ -1,0 +1,35 @@
+label = "Cassette tape"
+emoji = "📼"
+category = "Retro"
+tags = ["cassette", "tape", "warm", "dull", "analog"]
+description = "Rolled-off top, softer lows and a mild midrange bump like a worn tape deck."
+order = 80
+headroom_db = -3
+
+[[band]]
+type = "highpass"
+freq = 40
+q = 0.707
+
+[[band]]
+type = "lowshelf"
+freq = 100
+q = 0.7
+gain = 2
+
+[[band]]
+type = "peaking"
+freq = 1800
+q = 0.8
+gain = 2
+
+[[band]]
+type = "highshelf"
+freq = 7000
+q = 0.7
+gain = -8
+
+[[band]]
+type = "lowpass"
+freq = 13000
+q = 0.707

@@ -1,0 +1,10 @@
+#!/bin/bash
+
+# terminus:summary=Update user-installed git themes
+
+for dir in ~/.config/terminus-est/themes/*/; do
+  if [[ -d $dir ]] && [[ ! -L ${dir%/} ]] && [[ -d $dir/.git ]]; then
+    echo "Updating: $(basename "$dir")"
+    git -C "$dir" pull
+  fi
+done

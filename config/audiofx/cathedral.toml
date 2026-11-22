@@ -1,0 +1,17 @@
+label = "Cathedral"
+emoji = "⛪"
+category = "Space"
+tags = ["cathedral", "church", "reverb", "huge"]
+description = "Huge stone space: 6.5 s smooth tail, trimmed lows and highs."
+order = 40
+headroom_db = -4
+
+[[plugin]]
+type = "reverb"
+room-size = "Large/smooth"
+decay-time = 6.5
+amount = -8.0
+dry = 0.0
+predelay = 40.0
+bass-cut = 80.0
+treble-cut = 8000.0

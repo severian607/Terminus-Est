@@ -1,0 +1,5 @@
+#!/bin/sh
+# Native Terminus-Bar executable and bundled assets
+module="$(dirname "$(readlink -f "$0")")/../modules/terminus-bar"
+export TERMINUSBAR_ASSETS_DIR="$module/assets"
+exec "$module/build-release/terminusbar" "$@"

@@ -1,0 +1,12 @@
+# Editor used by CLI
+export SUDO_EDITOR="$EDITOR"
+export BAT_THEME=ansi
+
+# Color man pages with bat
+export MANROFFOPT="-c"
+export MANPAGER="sh -c 'col -bx | bat -l man -p'"
+
+# Duplicated from .config/uwsm/env so SSH works too
+export TERMINUS_PATH=$HOME/Projects/Terminus-Est
+export TERMINUS_DESKTOP_PATH=$HOME/.local/share/terminus-est
+export PATH=$TERMINUS_PATH/bin:$TERMINUS_DESKTOP_PATH/bin:$PATH:$HOME/.local/bin

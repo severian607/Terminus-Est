@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- eclipse ring behind the arrow -->
+  <circle cx="19.6" cy="21.4" r="7" fill="none" stroke="#0b0b0b" stroke-width="3.6"/>
+  <circle cx="19.6" cy="21.4" r="7" fill="none" stroke="{{ACC}}"
+          stroke-width="{{RING_W}}" opacity="{{RING_OP}}"/>
+  <!-- moving bright arc; circumference is 43.98 -->
+  <circle cx="19.6" cy="21.4" r="7" fill="none" stroke="#ffffff" stroke-width="1.6"
+          stroke-linecap="round" stroke-dasharray="{{ARC}}" stroke-dashoffset="{{ARC_OFF}}"
+          transform="rotate(-90 19.6 21.4)"/>
+  {{ARC2}}
+
+  <!-- arrow: outline pass, then fill pass, so the outline is one clean shape -->
+  <path d="M 2 2 L 2 24 L 7.2 19.4 L 9.2 24.6 L 10.8 21.8 L 12.8 25.8 L 15.8 24.4 L 11.8 17.8 L 17.8 17.6 Z"
+        fill="#0b0b0b" stroke="#0b0b0b" stroke-width="2.4" stroke-linejoin="round"/>
+  <path d="M 2 2 L 2 24 L 7.2 19.4 L 9.2 24.6 L 10.8 21.8 L 12.8 25.8 L 15.8 24.4 L 11.8 17.8 L 17.8 17.6 Z"
+        fill="#f6f5f2"/>
+  <!-- shaded facet -->
+  <path d="M 2 2 L 11.8 17.8 L 17.8 17.6 Z" fill="#cfccc6"/>
+  <!-- engraved inner line -->
+  <path d="M 3.6 6.4 L 3.6 19.8 L 7.6 16.2" fill="none" stroke="#a19d96" stroke-width="0.6"/>
+  <!-- notches on the left edge -->
+  <g stroke="#0b0b0b" stroke-width="0.9" stroke-linecap="round">
+    <path d="M 2 9 L 3.4 9.6"/>
+    <path d="M 2 12.4 L 3.4 13"/>
+    <path d="M 2 15.8 L 3.4 16.4"/>
+  </g>
+</svg>

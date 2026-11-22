@@ -1,0 +1,415 @@
+#!/bin/bash
+
+# Terminus-Screensaver: the owned non-authenticating Ghostty/TTE overlay.
+set -u
+umask 077
+readonly helper_path="$(readlink -f "${BASH_SOURCE[0]}")"
+readonly config_root="${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/terminus-est"
+readonly runtime_dir="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}/terminus-screensaver"
+readonly service_unit=terminus-screensaver.service
+
+# Runtime ownership and process identity
+[[ ! -L $runtime_dir ]] || { echo 'Invalid Terminus-Screensaver runtime symlink' >&2; exit 1; }
+mkdir -p "$runtime_dir" || exit 1
+[[ -d $runtime_dir && -O $runtime_dir && ! -L $runtime_dir ]] || exit 1
+chmod 700 "$runtime_dir" || exit 1
+
+# /proc entries can vanish between listing and reading; a missing entry is a
+# non-match and stays silent (the redirect order keeps open errors quiet too).
+helper_matches() {
+  local pid=$1 arg candidate found=false
+  [[ $pid =~ ^[1-9][0-9]*$ && -O /proc/$pid && -r /proc/$pid/cmdline ]] || return 1
+  {
+    while IFS= read -r -d '' arg; do
+      [[ $arg == */terminus-screensaver ]] || continue
+      candidate=$(readlink -f "$arg" 2>/dev/null) || continue
+      [[ $candidate == "$helper_path" ]] && found=true
+    done
+  } 2>/dev/null <"/proc/$pid/cmdline"
+  [[ $found == true ]]
+}
+
+renderer_matches() {
+  local pid=$1 arg
+  helper_matches "$pid" || return 1
+  {
+    while IFS= read -r -d '' arg; do
+      [[ $arg == --render ]] && return 0
+    done
+  } 2>/dev/null <"/proc/$pid/cmdline"
+  return 1
+}
+
+collect_renderers() {
+  local pid_file pid registered
+  renderer_pids=()
+  for pid_file in "$runtime_dir"/*.pid; do
+    [[ -e $pid_file || -L $pid_file ]] || continue
+    if [[ -L $pid_file || ! -f $pid_file || ! -O $pid_file ]]; then
+      continue
+    fi
+    pid=${pid_file##*/}
+    pid=${pid%.pid}
+    IFS= read -r registered <"$pid_file" || registered=
+    if [[ ! $pid =~ ^[1-9][0-9]*$ || $registered != "$pid" ]] || ! renderer_matches "$pid"; then
+      rm -f "$pid_file"
+      continue
+    fi
+    renderer_pids+=("$pid")
+  done
+}
+
+restore_cursor() {
+  hyprctl -q eval 'hl.config({ cursor = { invisible = false } })'
+}
+
+stop_renderers() {
+  local pid attempt alive
+  collect_renderers
+  for pid in "${renderer_pids[@]}"; do
+    renderer_matches "$pid" && kill -TERM "$pid" 2>/dev/null || true
+  done
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    alive=false
+    for pid in "${renderer_pids[@]}"; do
+      if renderer_matches "$pid"; then alive=true; break; fi
+    done
+    [[ $alive == false ]] && break
+    sleep 0.05
+  done
+  for pid in "${renderer_pids[@]}"; do
+    renderer_matches "$pid" && kill -KILL "$pid" 2>/dev/null || true
+  done
+  collect_renderers
+  local status=0
+  restore_cursor || status=1
+  hyprctl -q dispatch 'hl.dsp.submap("reset")' || status=1
+  return "$status"
+}
+
+# CLI contract
+monitor=
+artwork=
+action=launch
+force=false
+case ${1:-} in
+  '') ;;
+  launch) shift ;;
+  force) action=launch; force=true; shift ;;
+  --running) action=running; shift ;;
+  --stop) action=stop; shift ;;
+  --resume) action=resume; shift ;;
+  --render) action=render; shift ;;
+  --session) action=session; force=true; shift ;;
+  --cleanup) action=cleanup; shift ;;
+  *) echo 'Usage: terminus-screensaver [launch|force|--running|--stop|--render --monitor CONNECTOR]' >&2; exit 2 ;;
+esac
+if [[ $action == render && ${1:-} == --monitor && ( $# == 2 || ( $# == 4 && ${3:-} == --artwork ) ) ]]; then
+  monitor=$2
+  ((${#} == 4)) && artwork=$4
+  shift $#
+fi
+if (($#)) || [[ -n $artwork && ! $artwork =~ ^(owl|meow)$ ]] || { [[ $action == render ]] && [[ ! $monitor =~ ^[A-Za-z0-9_.:-]+$ ]]; }; then
+  echo 'Usage: terminus-screensaver [launch|force|--running|--stop|--render --monitor CONNECTOR]' >&2
+  exit 2
+fi
+case $action in
+  running) collect_renderers; ((${#renderer_pids[@]} > 0)); exit ;;
+  resume)
+    # hypridle reads the launcher's own monitor focus changes as user activity.
+    # Ignore resumes while a launch runs and briefly after it publishes ready.
+    if [[ -f $runtime_dir/launching && ! -L $runtime_dir/launching && -O $runtime_dir/launching ]]; then
+      IFS= read -r launcher <"$runtime_dir/launching" && helper_matches "$launcher" && exit 0
+    fi
+    if [[ -f $runtime_dir/ready && ! -L $runtime_dir/ready && -O $runtime_dir/ready ]]; then
+      IFS= read -r ready_at <"$runtime_dir/ready" || ready_at=
+      if [[ $ready_at =~ ^[0-9]+\.[0-9]+$ ]] && (( ${EPOCHREALTIME/./} - ${ready_at/./} < 1500000 )); then exit 0; fi
+    fi
+    exec "$helper_path" --stop
+    ;;
+  stop)
+    # The service manager waits for ExecStopPost, including after SIGKILL.
+    if systemctl --user cat "$service_unit" >/dev/null 2>&1; then
+      systemctl --user stop "$service_unit" || exit 1
+    fi
+    stop_renderers
+    exit $?
+    ;;
+  cleanup) stop_renderers; exit $? ;;
+esac
+
+# Generated settings are parsed as allowlisted data, never shell-sourced.
+enabled=true
+style=per-monitor
+fps=120
+idle_seconds=150
+if [[ -f $config_root/generated/screensaver.env ]]; then
+  declare -A seen=()
+  while IFS='=' read -r key value || [[ -n ${key:-} ]]; do
+    [[ -z $key || $key == \#* ]] && continue
+    [[ -z ${seen[$key]:-} ]] || { echo 'Duplicate saver setting' >&2; exit 1; }
+    seen[$key]=1
+    case $key in
+      TERMINUS_SCREENSAVER_ENABLED) [[ $value == true || $value == false ]] || exit 1; enabled=$value ;;
+      TERMINUS_SCREENSAVER_STYLE) [[ $value == per-monitor || $value == wordmark || $value == arcade ]] || exit 1; style=$value ;;
+      TERMINUS_SCREENSAVER_FPS) [[ $value =~ ^[1-9][0-9]{1,2}$ ]] && ((value >= 15 && value <= 144)) || exit 1; fps=$value ;;
+      TERMINUS_SCREENSAVER_IDLE_SECONDS) [[ $value =~ ^[1-9][0-9]{1,3}$ ]] && ((value >= 30 && value <= 7200)) || exit 1; idle_seconds=$value ;;
+      *) echo "Unknown Terminus-Screensaver setting: $key" >&2; exit 1 ;;
+    esac
+  done <"$config_root/generated/screensaver.env"
+  ((${#seen[@]} == 4)) || { echo 'Incomplete saver settings' >&2; exit 1; }
+else
+  echo 'Terminus-Screensaver settings missing; run terminus-settings render first.' >&2
+  exit 1
+fi
+for dependency in tte ghostty hyprctl jq systemd-run systemd-notify; do
+  command -v "$dependency" >/dev/null 2>&1 || { echo "Terminus-Screensaver requires $dependency" >&2; exit 1; }
+done
+
+# Serialize callers, but let systemd own the cursor lifetime independently of
+# Ghostty's terminal/process group. Renderers never change global cursor state.
+if [[ $action == launch ]]; then
+  [[ ! -L $runtime_dir/launch.lock ]] || exit 1
+  exec 9>"$runtime_dir/launch.lock"
+  flock -n 9 || exit 0
+  collect_renderers
+  if ((${#renderer_pids[@]})); then
+    if [[ $force == true ]]; then stop_renderers; else exit 0; fi
+  fi
+  [[ $enabled == true || $force == true ]] || exit 1
+  if systemctl --user is-active --quiet "$service_unit"; then
+    [[ $force == true ]] || exit 0
+  fi
+  if systemctl --user cat "$service_unit" >/dev/null 2>&1; then
+    systemctl --user stop "$service_unit" || exit 1
+  fi
+  exec systemd-run --user --quiet --collect --unit="$service_unit" \
+    --service-type=notify --property=NotifyAccess=all \
+    --property=TimeoutStartSec=30 --property=TimeoutStopSec=5 \
+    "--property=ExecStopPost=\"$helper_path\" --cleanup" \
+    --setenv=PATH --setenv=HYPRLAND_INSTANCE_SIGNATURE --setenv=WAYLAND_DISPLAY \
+    --setenv=XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}" \
+    "$helper_path" --session
+fi
+
+# Launch one dedicated terminal per connected monitor.
+if [[ $action == session ]]; then
+  [[ -n ${NOTIFY_SOCKET:-} ]] || { echo '--session requires its user service' >&2; exit 1; }
+  [[ -r $config_root/terminus-screensaver/ghostty.conf ]] || { echo 'Dedicated saver Ghostty configuration missing' >&2; exit 1; }
+  focused=$(hyprctl monitors -j | jq -r '.[] | select(.focused) | .name')
+  valid_connector() { [[ $1 =~ ^[A-Za-z0-9_.:-]+$ ]]; }
+  focus_monitor() {
+    valid_connector "$1" || return 1
+    hyprctl -q dispatch "hl.dsp.focus({ monitor = \"$1\" })"
+  }
+  launch_cleanup() {
+    local status=$?
+    trap - EXIT
+    trap '' SIGINT SIGTERM SIGHUP SIGQUIT
+    rm -f "$runtime_dir/launching"
+    [[ -n $focused ]] && focus_monitor "$focused" >/dev/null 2>&1 || true
+    exit "$status"
+  }
+  trap launch_cleanup EXIT
+  trap 'exit 1' SIGINT SIGTERM SIGHUP SIGQUIT
+  [[ ! -L $runtime_dir/launching ]] || exit 1
+  printf '%s\n' "$$" >"$runtime_dir/launching"
+  mapfile -t monitor_rows < <(hyprctl monitors -j | jq -r '.[] | [.name, .transform] | @tsv')
+  ((${#monitor_rows[@]} > 0)) || exit 1
+  monitors=()
+  declare -A monitor_transform=()
+  for row in "${monitor_rows[@]}"; do
+    IFS=$'\t' read -r monitor transform <<<"$row"
+    valid_connector "$monitor" && [[ $transform =~ ^[0-7]$ ]] || exit 1
+    monitors+=("$monitor")
+    monitor_transform[$monitor]=$transform
+  done
+  # A host with hosts/<hostname>/screensaver-art (the laptop) shows the owl, and the meow 1 time in 100.
+  # Drawn once per session so every monitor shows the same artwork.
+  art=
+  host=$(</etc/hostname) 2>/dev/null || host=
+  if [[ $host =~ ^[A-Za-z0-9._-]+$ && -f $config_root/hosts/$host/screensaver-art ]]; then
+    art=owl
+    while true; do draw=$RANDOM; ((draw < 32700)) && break; done
+    ((draw % 100 == 0)) && art=meow
+  fi
+  declare -A launched=()
+  for monitor in "${monitors[@]}"; do
+    valid_connector "$monitor" || exit 1
+    [[ -z ${launched[$monitor]:-} ]] || continue
+    launched[$monitor]=1
+    # Portrait monitors (transforms 1, 3, 5, 7) get the larger font.
+    font_size=18
+    case ${monitor_transform[$monitor]} in 1|3|5|7) font_size=28 ;; esac
+    if [[ -n $art ]]; then
+      # Host artwork scales with logical height; the 31-line meow gets a smaller font so its footer stays visible.
+      font_size=$(hyprctl monitors -j | jq -er --arg monitor "$monitor" --arg artwork "$art" '
+        .[] | select(.name == $monitor)
+        | ((if (.transform % 2) == 1 then .width else .height end) / .scale) as $height
+        | if $artwork == "meow" then
+            (($height / 60) | round | if . < 16 then 16 elif . > 32 then 32 else . end)
+          else
+            (($height / 50) | round | if . < 18 then 18 elif . > 40 then 40 else . end)
+          end
+      ') || exit 1
+    fi
+    focus_monitor "$monitor" || exit 1
+    argv=(ghostty --class=org.terminus.screensaver "--config-file=$config_root/terminus-screensaver/ghostty.conf" "--font-size=$font_size" -e "$helper_path" --render --monitor "$monitor")
+    [[ -z $art ]] || argv+=(--artwork "$art")
+    printf -v command '%q ' "${argv[@]}"
+    # Paths may contain Lua long-string delimiters; use a JSON-escaped Lua string.
+    escaped=$(printf '%s' "$command" | jq -Rs .) || exit 1
+    hyprctl -q dispatch "hl.dsp.exec_cmd($escaped)" || exit 1
+    mapped=false
+    for ((attempt = 0; attempt < 50; attempt++)); do
+      monitor_id=$(hyprctl monitors -j | jq -r --arg monitor "$monitor" '.[] | select(.name == $monitor) | .id')
+      if [[ $monitor_id =~ ^[0-9]+$ ]] && hyprctl clients -j | jq -e --argjson monitor "$monitor_id" 'any(.[]; .class == "org.terminus.screensaver" and .monitor == $monitor)' >/dev/null; then
+        mapped=true
+        break
+      fi
+      sleep 0.1
+    done
+    [[ $mapped == true ]] || exit 1
+  done
+  ((${#launched[@]} == ${#monitors[@]})) || exit 1
+  # Mapping precedes renderer initialization; don't publish readiness or hide
+  # the pointer until every renderer has registered.
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    collect_renderers
+    ((${#renderer_pids[@]} == ${#monitors[@]})) && break
+    sleep 0.1
+  done
+  ((${#renderer_pids[@]} == ${#monitors[@]})) || exit 1
+  hyprctl -q dispatch 'hl.dsp.submap("screensaver")' || exit 1
+  hyprctl -q eval 'hl.config({ cursor = { invisible = true } })' || exit 1
+  [[ -n $focused ]] && focus_monitor "$focused" >/dev/null 2>&1 || true
+  focused=
+  printf '%s\n' "$EPOCHREALTIME" >"$runtime_dir/ready"
+  rm -f "$runtime_dir/launching"
+  systemd-notify --ready || exit 1
+  # Once ready, a stop request (SIGTERM from systemctl stop) is a normal dismissal.
+  trap 'exit 0' SIGINT SIGTERM SIGHUP SIGQUIT
+  while true; do
+    collect_renderers
+    ((${#renderer_pids[@]} == ${#monitors[@]})) || break
+    sleep 0.2
+  done
+  exit 0
+fi
+
+# Portrait monitors (transforms 1, 3, 5, 7) get the arcade art under per-monitor;
+# every monitor's frame rate is capped at its own refresh rate.
+monitor_info=$(hyprctl monitors -j | jq -r --arg monitor "$monitor" '.[] | select(.name == $monitor) | [.transform, (.refreshRate | round)] | @tsv') || exit 1
+IFS=$'\t' read -r transform refresh <<<"$monitor_info"
+[[ $transform =~ ^[0-7]$ && $refresh =~ ^[0-9]+$ ]] || { echo "Terminus-Screensaver cannot read monitor properties: $monitor" >&2; exit 1; }
+portrait=false
+case $transform in 1|3|5|7) portrait=true ;; esac
+frame_rate=$fps
+((refresh > 0 && frame_rate > refresh)) && frame_rate=$refresh
+input="$config_root/terminus-screensaver/terminus-wordmark.txt"
+if [[ $style == arcade || ( $style == per-monitor && $portrait == true ) ]]; then
+  input="$config_root/terminus-screensaver/space-invader.txt"
+fi
+[[ -z $artwork ]] || input="$config_root/terminus-screensaver/$artwork.txt"
+[[ -r $input ]] || { echo "Terminus-Screensaver artwork unreadable: $input" >&2; exit 1; }
+readonly renderer_pid=$$
+readonly pid_file="$runtime_dir/$renderer_pid.pid"
+readonly renderer_tty="$(tty 2>/dev/null)"
+[[ $renderer_tty == /dev/pts/* || $renderer_tty == /dev/tty* ]] || { echo 'Terminus-Screensaver renderer requires a terminal' >&2; exit 1; }
+tte_pid=
+
+tte_is_owned() {
+  local child_tty arg key value parent=
+  [[ -n $tte_pid && -O /proc/$tte_pid && -r /proc/$tte_pid/cmdline ]] || return 1
+  child_tty=$(readlink -f "/proc/$tte_pid/fd/0" 2>/dev/null) || return 1
+  [[ $child_tty == "$renderer_tty" ]] || return 1
+  while IFS=: read -r key value; do
+    [[ $key == PPid ]] && parent=${value//[[:space:]]/}
+  done <"/proc/$tte_pid/status"
+  [[ $parent == "$renderer_pid" ]] || return 1
+  while IFS= read -r -d '' arg; do
+    [[ $arg == tte || $arg == */tte ]] && return 0
+  done <"/proc/$tte_pid/cmdline"
+  return 1
+}
+
+cleanup_renderer() {
+  local status=$? attempt registered
+  trap - EXIT
+  trap '' SIGINT SIGTERM SIGHUP SIGQUIT
+  if tte_is_owned; then
+    kill -TERM "$tte_pid" 2>/dev/null || true
+    for ((attempt = 0; attempt < 20; attempt++)); do
+      tte_is_owned || break
+      sleep 0.05
+    done
+    tte_is_owned && kill -KILL "$tte_pid" 2>/dev/null || true
+    wait "$tte_pid" 2>/dev/null || true
+  fi
+  if [[ -f $pid_file && ! -L $pid_file && -O $pid_file ]]; then
+    registered=
+    IFS= read -r registered <"$pid_file" || true
+    [[ $registered == "$renderer_pid" ]] && rm -f "$pid_file"
+  fi
+  exit "$status"
+}
+
+launch_in_progress() {
+  local launcher
+  [[ -f $runtime_dir/launching && ! -L $runtime_dir/launching && -O $runtime_dir/launching ]] || return 1
+  IFS= read -r launcher <"$runtime_dir/launching" || return 1
+  helper_matches "$launcher"
+}
+
+screensaver_in_focus() {
+  launch_in_progress && return 0
+  hyprctl activewindow -j | jq -e '.class == "org.terminus.screensaver"' >/dev/null 2>&1
+}
+
+tte_is_running() {
+  local key value
+  tte_is_owned || return 1
+  while IFS=: read -r key value; do
+    if [[ $key == State ]]; then [[ $value != *Z* ]]; return; fi
+  done <"/proc/$tte_pid/status"
+  return 1
+}
+
+trap cleanup_renderer EXIT
+trap 'exit 0' SIGINT SIGTERM SIGHUP SIGQUIT
+[[ ! -e $pid_file && ! -L $pid_file ]] || exit 1
+printf '%s\n' "$renderer_pid" >"$pid_file"
+printf '\033]11;rgb:00/00/00\007'
+while true; do
+  nice -n 19 tte -i "$input" --frame-rate "$frame_rate" --canvas-width 0 --canvas-height 0 --reuse-canvas \
+    --anchor-canvas c --anchor-text c --random-effect --no-eol --no-restore-cursor <"$renderer_tty" &
+  tte_pid=$!
+  # Bash gives asynchronous jobs /dev/null unless stdin is explicitly retained.
+  # Wait through fork/exec before applying the TTE identity/terminal checks.
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    tte_is_owned && break
+    kill -0 "$tte_pid" 2>/dev/null || break
+    sleep 0.01
+  done
+  while tte_is_running; do
+    if read -rsn1 -t 1 || ! screensaver_in_focus; then
+      "$helper_path" --stop >/dev/null 2>&1 &
+      exit 0
+    fi
+  done
+  wait "$tte_pid"
+  result=$?
+  tte_pid=
+  if ((result != 0)); then
+    echo "Terminus-Screensaver TTE effect exited with status $result" >&2
+    "$helper_path" --stop >/dev/null 2>&1 &
+    exit "$result"
+  fi
+  # Leave the completed artwork visible (idle, ~0% CPU) for a minute, still accepting dismissal.
+  for ((hold = 0; hold < 60; hold++)); do
+    if read -rsn1 -t 1 || ! screensaver_in_focus; then
+      "$helper_path" --stop >/dev/null 2>&1 &
+      exit 0
+    fi
+  done
+done

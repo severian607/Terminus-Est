@@ -1,0 +1,9 @@
+# Publish the generated Strata stylesheet with icon rules for the current sidebar
+[Unit]
+Description=Update the Strata stylesheet sidebar icons
+# Strata rewrites its settings often; never trip the start limit.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/Projects/Terminus-Est/lib/skin_strata.py deploy

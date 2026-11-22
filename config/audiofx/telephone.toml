@@ -1,0 +1,23 @@
+label = "Telephone"
+emoji = "📞"
+category = "Filters & Character"
+tags = ["phone", "call", "narrowband"]
+description = "350-3400 Hz band with a nasal 1.5 kHz bump."
+order = 10
+headroom_db = -2
+
+[[band]]
+type = "highpass"
+freq = 350
+q = 0.707
+
+[[band]]
+type = "lowpass"
+freq = 3400
+q = 0.707
+
+[[band]]
+type = "peaking"
+freq = 1500
+q = 1.0
+gain = 4

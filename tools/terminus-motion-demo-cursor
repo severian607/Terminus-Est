@@ -1,0 +1,63 @@
+#!/bin/bash
+
+# Moves the terminal cursor around for about 3 seconds, so a cursor shader has something to animate:
+# types a few lines character by character, then jumps between distant positions with ANSI escapes.
+# Run it inside a terminal; the preview recorder uses it as the demo command.
+
+set -euo pipefail
+
+type_text() {
+  local text="$1" i
+  for ((i = 0; i < ${#text}; i++)); do
+    printf '%s' "${text:i:1}"
+    sleep 0.025
+  done
+}
+
+move_to() {
+  printf '\e[%d;%dH' "$1" "$2"
+}
+
+cleanup() {
+  printf '\e[0 q\e[?25h\e[%d;1H\n' "${LINES:-24}"
+}
+trap cleanup EXIT
+
+rows=$(tput lines 2>/dev/null || echo 24)
+cols=$(tput cols 2>/dev/null || echo 80)
+
+printf '\e[2J\e[H\e[?25h'
+move_to 2 3
+type_text "cursor motion preview"
+move_to 3 3
+type_text "typing a second line..."
+move_to 4 3
+type_text "and a third one"
+sleep 0.2
+
+# Jumps between distant positions: corners, centre, and back along diagonals.
+jumps=(
+  "$((rows - 2)) $((cols - 4))"
+  "2 $((cols - 4))"
+  "$((rows - 2)) 3"
+  "$((rows / 2)) $((cols / 2))"
+  "2 3"
+  "$((rows - 2)) $((cols / 2))"
+  "$((rows / 2)) $((cols - 4))"
+  "5 $((cols / 3))"
+)
+# The cursor shape alternates between bar and block on every jump: shaders that react to a cursor width
+# change (ripple, boom) only fire on that.
+shapes=(6 2)
+index=0
+for jump in "${jumps[@]}"; do
+  printf '\e[%d q' "${shapes[index % 2]}"
+  # shellcheck disable=SC2086
+  move_to $jump
+  index=$((index + 1))
+  sleep 0.2
+done
+
+move_to 6 3
+type_text "done"
+sleep 0.3

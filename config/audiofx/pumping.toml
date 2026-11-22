@@ -1,0 +1,19 @@
+label = "Pumping squash"
+emoji = "🫁"
+category = "Dynamics"
+tags = ["compressor", "pump", "squash", "edm", "dance"]
+description = "Very hard, fast compression that breathes with the beat."
+order = 40
+headroom_db = -3
+
+[[plugin]]
+type = "compressor"
+mode = "Downward"
+threshold = -38.0
+ratio = 12.0
+attack = 2.0
+release = 90.0
+knee = -2.0
+makeup = 18.0
+dry = -80.01
+wet = 0.0

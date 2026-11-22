@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""Laptop saver dispatcher and sole compositor-acknowledged lock supervisor."""
+import fcntl
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import select
+import signal
+import socket
+import stat
+import subprocess
+import sys
+
+PROJECT = Path(__file__).resolve().parents[1]
+OVERLAY = PROJECT / "bin/terminus-screensaver"
+UNIT = "terminus-lock.service"
+
+
+def run(*args, **kwargs):
+    return subprocess.run(args, check=True, **kwargs)
+
+
+def session():
+    runtime = Path(os.environ["XDG_RUNTIME_DIR"])
+    info = runtime.stat()
+    if not runtime.is_absolute() or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RuntimeError("Untrusted session runtime directory")
+    if os.environ.get("WAYLAND_SOCKET"):
+        raise RuntimeError("Inherited Wayland socket is not supported")
+    display = Path(os.environ["WAYLAND_DISPLAY"])
+    if not display.is_absolute():
+        display = runtime / display
+    info = display.stat()
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+        raise RuntimeError("Cannot establish compositor ownership")
+    signature = os.environ["HYPRLAND_INSTANCE_SIGNATURE"]
+    if not signature:
+        raise RuntimeError("Missing Hyprland session signature")
+    return [signature, str(display.resolve()), info.st_dev, info.st_ino]
+
+
+def state_dir():
+    root = Path(os.environ["XDG_RUNTIME_DIR"]) / "terminus-lock"
+    root.mkdir(mode=0o700, exist_ok=True)
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RuntimeError("Untrusted lock state directory")
+    return root
+
+
+def stock_pam():
+    """Require the installed Arch package's exact PAM file; never write policy."""
+    pam = Path("/etc/pam.d/hyprlock")
+    info = pam.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise RuntimeError("The root-owned stock /etc/pam.d/hyprlock is required")
+    digest = hashlib.sha256(pam.read_bytes()).hexdigest()
+    for metadata in Path("/var/lib/pacman/local").glob("hyprlock-*/mtree"):
+        info = metadata.stat()
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            continue
+        with gzip.open(metadata, "rt") as source:
+            for line in source:
+                fields = line.split()
+                if fields and fields[0] == "./etc/pam.d/hyprlock" and "sha256digest=" + digest in fields:
+                    return
+    raise RuntimeError("Install Arch hyprlock and retain its unmodified stock PAM file")
+
+
+def active():
+    return subprocess.run(["systemctl", "--user", "is-active", "--quiet", UNIT]).returncode == 0
+
+
+def acknowledged(identity):
+    try:
+        return active() and json.loads((state_dir() / "ready.json").read_text()) == identity
+    except (OSError, ValueError):
+        return False
+
+
+def lock():
+    identity = session()
+    root = state_dir()
+    fd = os.open(root / "request.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        stock_pam()
+        if active() and not acknowledged(identity):
+            raise RuntimeError("An acknowledged lock belongs to a different graphical session")
+        # Never let a lingering user manager supply yesterday's display socket.
+        run("systemctl", "--user", "import-environment", "WAYLAND_DISPLAY",
+            "HYPRLAND_INSTANCE_SIGNATURE", "XDG_RUNTIME_DIR", "PATH")
+        run("systemctl", "--user", "start", UNIT)
+        if session() != identity or not acknowledged(identity):
+            raise RuntimeError("Lock exited or session changed before acknowledgement")
+    finally:
+        os.close(fd)
+
+
+def supervise():
+    if not os.environ.get("NOTIFY_SOCKET") or not os.environ.get("INVOCATION_ID"):
+        raise RuntimeError("Lock supervision requires its Type=notify user unit")
+    identity = session()
+    stock_pam()
+    root = state_dir()
+    marker = root / "ready.json"
+    marker.unlink(missing_ok=True)
+    binary = Path.home() / "Projects/Hyprlock-Amaterasu/build/hyprlock"
+    config = PROJECT / "config/hyprlock/hyprlock.conf"
+    read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
+    child_env = dict(os.environ)
+    child_env.pop("NOTIFY_SOCKET", None)
+    child_env.pop("WATCHDOG_PID", None)
+    signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+    child = None
+    try:
+        child = subprocess.Popen([str(binary), "--config", str(config), "--ready-fd", str(write_fd)],
+                                 pass_fds=(write_fd,), env=child_env)
+        os.close(write_fd)
+        write_fd = -1
+        if not select.select([read_fd], [], [], 20)[0] or os.read(read_fd, 2) != b"\n":
+            raise RuntimeError("Hyprlock did not acknowledge the compositor session lock")
+        if child.poll() is not None or session() != identity:
+            raise RuntimeError("Locker exited or compositor changed during startup")
+        marker.write_text(json.dumps(identity))
+        if child.poll() is not None:
+            raise RuntimeError("Locker exited before readiness notification")
+        address = os.environ["NOTIFY_SOCKET"]
+        if address.startswith("@"):
+            address = "\0" + address[1:]
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as notify:
+            notify.connect(address)
+            notify.sendall(b"READY=1\nSTATUS=Compositor acknowledged secure lock")
+        # The secure lock is ready. Decorative overlay cleanup must never hold
+        # suspend readiness or tear down the authenticated session lock.
+        try:
+            run(str(OVERLAY), "--stop", timeout=10)
+        except (OSError, subprocess.SubprocessError) as error:
+            print("Terminus-Lock: overlay cleanup failed: " + str(error), file=sys.stderr)
+        return child.wait()
+    finally:
+        marker.unlink(missing_ok=True)
+        os.close(read_fd)
+        if write_fd >= 0:
+            os.close(write_fd)
+        # A failed owner must not leave an unmanaged locker. The compositor's
+        # session-lock protocol remains fail-closed if its locker dies.
+        if child is not None and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+
+
+def main():
+    args = sys.argv[1:]
+    if args in ([], ["launch"], ["--stop"]):
+        if args != ["--stop"] and active():
+            return 0
+        os.execv(str(OVERLAY), [str(OVERLAY), *args])
+    if args == ["--running"]:
+        return 0 if acknowledged(session()) else 1
+    if args == ["--supervise"]:
+        return supervise()
+    if args in (["force"], ["--suspend"]):
+        lock()
+        if args == ["--suspend"]:
+            # Blocking Type=notify start plus session-bound marker, not process existence.
+            if not acknowledged(session()):
+                raise RuntimeError("Refusing suspend without an acknowledged lock")
+            run("systemctl", "suspend")
+        return 0
+    raise RuntimeError("Usage: terminus-lock [launch|force|--stop|--running|--suspend]")
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, RuntimeError, KeyError, subprocess.SubprocessError) as error:
+        print("Terminus-Lock: " + str(error), file=sys.stderr)
+        raise SystemExit(1)

@@ -1,0 +1,546 @@
+#!/usr/bin/env python3
+# terminus:summary=Build and switch the Terminus Est sword cursor: apply ACCENT | build ACCENT | use THEME SIZE | preview ACCENT DIR
+"""Terminus Est cursor theme.
+
+Every cursor is laid out like the MiSide cursor: a pixel pointer at the top left (arrow, link hand,
+text I-beam) with the painted sword from template.svg standing beside it. The sword is vector art,
+rendered at each size; the pointers are pixel sprites drawn at whole-pixel scale, so they stay
+crisp. Frames are rasterised to PNG and packed into a hyprcursor theme and an XCursor export.
+Colours are computed here and substituted into the template as plain hex.
+
+  terminus-cursor apply ACCENT          build if not cached, then switch (the recolour hook)
+  terminus-cursor build ACCENT          build into the cache only
+  terminus-cursor use THEME SIZE        choose the cursor theme; terminus-est builds for the current accent
+  terminus-cursor preview ACCENT DIR    render one frame of every shape at every size, install nothing
+"""
+
+import argparse
+import colorsys
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+import fcntl
+import hashlib
+import math
+import os
+from pathlib import Path
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+
+HERE = Path(__file__).resolve().parent
+TEMPLATE = (HERE / "template.svg").read_text()
+NAME = "terminus-est"
+# The layout is designed at BASE px, the default size. Every size has its own images, so none is
+# resampled; the pixel sprites scale by whole pixels (1x up to 48 px, 2x at 64 and 72).
+BASE = 36
+SIZES = (32, 36, 48, 64, 72)
+DEFAULT_SIZE = 36
+HOME = Path.home()
+CACHE = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "terminus-est" / "cursor"
+ICONS = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "icons"
+STATE = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "terminus-est" / "cursor"
+FALLBACK_THEME = "Mita"  # shapes this theme does not design yet are taken from here
+ECLIPSE = "terminus-eclipse"  # built by the sibling module, which this script delegates to
+ECLIPSE_CURSOR = HERE.parent / "terminus-eclipse-cursor/terminus-eclipse-cursor"
+
+BLACK = (0x0B, 0x0B, 0x0B)
+WHITE = (0xFF, 0xFF, 0xFF)
+
+# The opal is accent-coloured, so the glint is a white spark with an accent halo.
+GLINT = (
+    '<circle cx="0" cy="101" r="9" filter="url(#wash)" fill="{ACC}" opacity="{GLINT}"/>'
+    '<circle cx="-1" cy="100" r="4" filter="url(#soft)" fill="#ffffff" opacity="{GLINT}"/>')
+
+VIEWBOX = 'viewBox="0 0 100 100"'
+TILT = "translate(11,11) rotate(-45)"  # the template's own group transform, replaced per shape and size
+MARK_A = "<!-- STATE LAYER A goes here (pointer only) -->"
+MARK_B = "<!-- STATE LAYER B goes here (default glint / pointer bloom) -->"
+assert all(part in TEMPLATE for part in (VIEWBOX, TILT, MARK_A, MARK_B)), "template.svg changed shape"
+# The rune strokes, reused for their glow: (transform, rune index, path data).
+RUNE_PATHS = re.findall(r'<path transform="([^"]+)"\s+stroke="\{\{RUNE_(\d)\}\}" d="([^"]+)"/>', TEMPLATE)
+assert len(RUNE_PATHS) == 7, "template.svg changed shape"
+
+# Sword placement at the base size: blade top (px), template units to px, and the gap (px) between
+# the pointer's widest point and the blade.
+SWORD_TOP = 1.0
+SWORD_SCALE = 0.28
+SWORD_GAP = 2.0
+BLADE_HALF = 6  # template units
+
+# Pixel sprites: "#" outline, "W" white, "a"/"b" off-white, "l"/"d" blue shade, "L" light shade.
+PALETTE = {"#": "#000000", "W": "#ffffff", "a": "#f3f3f3", "b": "#faf6f7", "l": "#6c7cb6", "d": "#49507f",
+           "L": "#c3cbe6"}
+# The MiSide cursor's arrow, pixel for pixel.
+ARROW = (
+    "##.......",
+    "#W#......",
+    "#WW#.....",
+    "#WWW#....",
+    "#WWWW#...",
+    "#WWWWW#..",
+    "#WWWWWW#.",
+    "#WWWWWWW#",
+    "#WWWWWWW#",
+    "#WWWWWWl#",
+    "#WWWWWd#.",
+    "#llldW#..",
+    ".###la#..",
+    "....#ab#.",
+    "....#ll#.",
+    ".....##..",
+)
+# A pointing hand in the arrow's style, the size of the MiSide link hand.
+HAND = (
+    "....##......",
+    "...#WW#.....",
+    "...#WW#.....",
+    "...#WW###...",
+    "...#WW#WW##.",
+    "...#WW#WW#W#",
+    ".###WW#WW#W#",
+    "#WWLWWLWWLW#",
+    "#WWLWWWWWWW#",
+    "#WWWWWWWWWW#",
+    ".#WWWWWWWWW#",
+    ".#WWWWWWWWl#",
+    "..#lllllll#.",
+    "...#######..",
+)
+# The MiSide link hand taps twice per 1.2 s loop: sprite offset (px down) per 100 ms frame.
+TAP = (0, 1, 2, 4, 3, 1) * 2
+# The MiSide I-beam spins about its stem once per 1.2 s loop: bar width (px) per 100 ms frame.
+SPIN = (9, 9, 7, 5, 3, 5, 7, 9, 9, 9, 9, 9)
+
+
+def ibeam(width):
+    """The MiSide I-beam (9 x 18) with bars WIDTH px wide."""
+    pad = "." * ((9 - width) // 2)
+    half = "#" * ((width - 1) // 2)
+    bar = ("#" * width, "#" + "W" * (width - 2) + "#", half + "W" + half)
+    return (tuple(pad + row + pad for row in bar) + ("...#W#...",) * 12
+            + tuple(pad + row + pad for row in reversed(bar)))
+
+
+@dataclass(frozen=True)
+class Frame:
+    rows: tuple        # the pixel sprite
+    runes: tuple       # stroke colour per rune, tip to hilt
+    delay: int = 0     # ms
+    layer_a: str = ""  # state layer under the runes
+    layer_b: str = ""  # state layer over the runes
+    dy: int = 0        # sprite offset, sprite pixels
+
+
+@dataclass(frozen=True)
+class Shape:
+    frames: tuple
+    hot: tuple         # the sprite pixel the hotspot sits on
+    origin: tuple      # the sprite's top left at the base size, px
+    overrides: tuple
+
+    @property
+    def hotspot(self):
+        """Fraction of the image, shared by every size (consumers use round(size * fraction))."""
+        return tuple((o + h) / BASE for o, h in zip(self.origin, self.hot))
+
+    @property
+    def width(self):
+        """The widest sprite row over all frames, sprite pixels."""
+        return max(len(row.rstrip(".")) for frame in self.frames for row in frame.rows)
+
+
+def parse_hex(value):
+    m = re.fullmatch(r"#?([0-9a-fA-F]{6})", value.strip())
+    if not m:
+        sys.exit(f"terminus-cursor: not a #rrggbb colour: {value!r}")
+    h = m.group(1)
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def to_hex(rgb):
+    return "#%02x%02x%02x" % tuple(max(0, min(255, round(c))) for c in rgb)
+
+
+def mix(a, b, t):
+    """t of a, (1 - t) of b, per sRGB channel."""
+    return tuple(t * x + (1 - t) * y for x, y in zip(a, b))
+
+
+def lerp(a, b, t):
+    return tuple(x + (y - x) * t for x, y in zip(a, b))
+
+
+def glow(color, opacity, y, height, width, blur="soft"):
+    """A soft rounded bar down the blade axis; goes in state layer A, under the crisp runes."""
+    return (f'<rect x="{-width / 2:g}" y="{y:.1f}" width="{width}" height="{height}" rx="4" '
+            f'filter="url(#{blur})" fill="{color}" opacity="{clamp(opacity):.3f}"/>')
+
+
+def clamp(value):
+    return max(0.0, min(1.0, value))
+
+
+def tone(rgb, lightness):
+    """RGB's hue and saturation, no lighter than LIGHTNESS (HLS, 0..1)."""
+    h, l, s = colorsys.rgb_to_hls(*(c / 255 for c in rgb))
+    return tuple(c * 255 for c in colorsys.hls_to_rgb(h, min(l, lightness), s))
+
+
+def breath(t, period):
+    """0 at t = 0, rising to 1 at half the period and back: one cosine breath per PERIOD seconds."""
+    return 0.5 - 0.5 * math.cos(2 * math.pi * t / period)
+
+
+def rune_glow(color, levels):
+    """A blurred copy of the runes, under the crisp strokes: glow strength per rune, tip to hilt."""
+    paths = "".join(f'<path transform="{t}" stroke-opacity="{clamp(levels[int(k)]):.3f}" d="{d}"/>'
+                    for t, k, d in RUNE_PATHS)
+    return (f'<g fill="none" stroke="{color}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" '
+            f'filter="url(#runeglow)">{paths}</g>')
+
+
+def lit_runes(glow_rgb, levels):
+    """Rune stroke colours for glow levels 0..1: the glow colour, heating to near white."""
+    hot = mix(glow_rgb, WHITE, 0.3)
+    return tuple(to_hex(lerp(glow_rgb, hot, v)) for v in levels)
+
+
+def pixel_scale(size):
+    return max(1, round(size / BASE))
+
+
+def sprite_origin(shape, size):
+    """The sprite's top left at SIZE, placed so its hot pixel lands on round(size * hotspot)."""
+    k = pixel_scale(size)
+    return tuple(max(0, round(size * f) - h * k) for f, h in zip(shape.hotspot, shape.hot))
+
+
+def sword_transform(shape, size):
+    """The sword stands upright, SWORD_GAP to the right of the sprite's widest point."""
+    f = size / BASE
+    right = sprite_origin(shape, size)[0] + shape.width * pixel_scale(size)
+    x = right + (SWORD_GAP + BLADE_HALF * SWORD_SCALE) * f
+    return f"translate({x:.3f},{SWORD_TOP * f:.3f}) scale({SWORD_SCALE * f:.5f})"
+
+
+def sprite_svg(frame, origin, k):
+    """The sprite as whole-pixel rects, one per run of a colour in a row."""
+    ox, oy = origin
+    out = []
+    for y, row in enumerate(frame.rows):
+        x = 0
+        while x < len(row):
+            n = 1
+            while x + n < len(row) and row[x + n] == row[x]:
+                n += 1
+            if row[x] != ".":
+                out.append(f'<rect x="{ox + x * k}" y="{oy + (y + frame.dy) * k}" width="{n * k}" height="{k}" '
+                           f'fill="{PALETTE[row[x]]}"/>')
+            x += n
+    return '<g shape-rendering="crispEdges">' + "".join(out) + "</g>"
+
+
+def frame_svg(acc, shape, frame, size):
+    """One cursor image, SIZE px square, in pixel units: the painted sword, then the sprite on top."""
+    acc_hex = to_hex(acc)
+    svg = (TEMPLATE.replace(VIEWBOX, f'viewBox="0 0 {size} {size}"')
+           .replace("{{ACC}}", acc_hex).replace("{{GRIP}}", to_hex(mix(acc, BLACK, 0.38)))
+           .replace("{{OPAL}}", acc_hex))  # the opal is the accent in every state
+    for k, color in enumerate(frame.runes):
+        svg = svg.replace("{{RUNE_%d}}" % k, color)
+    svg = svg.replace(MARK_A, frame.layer_a).replace(MARK_B, frame.layer_b).replace(TILT, sword_transform(shape, size))
+    svg = svg.replace("</svg>", sprite_svg(frame, sprite_origin(shape, size), pixel_scale(size)) + "\n</svg>")
+    assert "{{" not in svg, "unsubstituted placeholder"
+    return svg
+
+
+def shapes(acc):
+    """Shape name -> Shape for this accent."""
+    acc_hex = to_hex(acc)
+    glow_rgb = tone(acc, 0.74)  # the accent's hue, deep enough to show on the pale steel
+    glow_hex = to_hex(glow_rgb)
+    out = {}
+
+    def glowing_runes(t, loop, breaths=1, lift=0.0, levels=None):
+        """The runes T seconds into a LOOP-second loop: (stroke colours, blurred glow layer), BREATHS
+        breaths per loop. LEVELS is the glow per rune (tip to hilt, 0..1); by default a wave of light runs
+        from the hilt to the tip. LIFT brightens the glow."""
+        period = loop / breaths
+        if levels is None:
+            levels = tuple(breath(t - (6 - k) / 12 * period, period) for k in range(7))
+        return lit_runes(glow_rgb, levels), rune_glow(glow_hex, tuple(0.4 + 0.55 * v + lift for v in levels))
+
+    # default: the arrow. The runes glow in two waves per 3.2 s loop; at its end the opal glints and
+    # light washes the blade.
+    frames = []
+    for i in range(32):
+        t = i * 0.1
+        runes, rune_layer = glowing_runes(t, 3.2, breaths=2)
+        glint = 0.95 * math.sin(math.pi * (t - 2.1) / 1.1) ** 2 if t >= 2.1 else 0.0
+        frames.append(Frame(
+            ARROW, runes, 100,
+            layer_a=(glow(acc_hex, 0.4 * glint, 0, 70, 22, "wash") + glow("#ffffff", 0.25 * glint, 3, 64, 7)
+                     + rune_layer),
+            layer_b=GLINT.replace("{ACC}", acc_hex).replace("{GLINT}", f"{glint:.3f}")))
+    out["left_ptr"] = Shape(tuple(frames), hot=(0, 0), origin=(0, 0), overrides=("arrow", "default"))
+
+    # links: the hand taps; the runes glow brighter and the opal blooms, one breath per 1.2 s loop
+    frames = []
+    for i, dy in enumerate(TAP):
+        t = i * 0.1
+        runes, rune_layer = glowing_runes(t, 1.2, lift=0.15)
+        bloom = 0.475 - 0.225 * math.cos(2 * math.pi * t / 1.2)  # 0.25 .. 0.7
+        frames.append(Frame(
+            HAND, runes, 100, dy=dy,
+            layer_a=glow(acc_hex, 0.1 + 0.3 * bloom, 0, 70, 22, "wash") + rune_layer,
+            layer_b=(f'<circle cx="0" cy="101" r="16" filter="url(#wash)" fill="{acc_hex}" '
+                     f'opacity="{min(1, 0.9 * bloom):.4f}"/>'
+                     f'<circle cx="0" cy="101" r="7" filter="url(#soft)" fill="#ffffff" '
+                     f'opacity="{min(1, 0.7 * bloom):.4f}"/>')))
+    out["pointer"] = Shape(tuple(frames), hot=(4, 1), origin=(1, 0),
+                           overrides=("hand1", "hand2", "pointing_hand", "hand"))
+
+    # wait: the arrow; a bright pulse runs up the runes from hilt to tip with a glow up the blade, 1.4 s loop
+    frames = []
+    for i in range(14):
+        t = i * 0.1
+        levels = tuple(max(0.0, 1 - ((t - (6 - k) * 0.12) % 1.4) / 1.4 / 0.3) for k in range(7))
+        q = t / 1.4
+        centre = 66 - 62 * q
+        sweep = math.sin(math.pi * q)
+        runes, rune_layer = glowing_runes(t, 1.4, levels=levels)
+        frames.append(Frame(
+            ARROW, runes, 100,
+            layer_a=(glow(acc_hex, 0.4 * sweep, centre - 11, 22, 24, "wash")
+                     + glow("#ffffff", 0.3 * sweep, centre - 8, 16, 9) + rune_layer)))
+    out["wait"] = Shape(tuple(frames), hot=(0, 0), origin=(0, 0), overrides=("progress", "watch", "left_ptr_watch"))
+
+    # text: the I-beam spins like MiSide's while the runes glow, one wave per 1.2 s loop
+    frames = []
+    for i, width in enumerate(SPIN):
+        runes, rune_layer = glowing_runes(i * 0.1, 1.2)
+        frames.append(Frame(ibeam(width), runes, 100, layer_a=rune_layer))
+    out["text"] = Shape(tuple(frames), hot=(4, 8), origin=(1, 1), overrides=("xterm", "ibeam"))
+    return out
+
+
+def render(svg, size, dest):
+    subprocess.run(["rsvg-convert", "-w", str(size), "-h", str(size), "-o", str(dest), "/dev/stdin"],
+                   input=svg.encode(), check=True)
+
+
+def frame_file(name, size, i):
+    return f"{name}_{size}_{i:02d}.png"
+
+
+def meta_hl(name, shape):
+    hx, hy = shape.hotspot
+    # Every size has its own images; "none" never resamples the pixel sprites (another size uses the nearest).
+    lines = ["resize_algorithm = none", f"hotspot_x = {hx:.6f}", f"hotspot_y = {hy:.6f}"]
+    lines += [f"define_override = {o}" for o in shape.overrides]
+    multi = len(shape.frames) > 1
+    for size in sorted(SIZES, reverse=True):
+        for i, frame in enumerate(shape.frames):
+            lines.append(f"define_size = {size}, {frame_file(name, size, i)}" + (f", {frame.delay}" if multi else ""))
+    return "\n".join(lines) + "\n"
+
+
+def read_rgba(png, size):
+    raw = subprocess.run(["magick", str(png), "-depth", "8", "rgba:-"], capture_output=True, check=True).stdout
+    assert len(raw) == size * size * 4
+    return raw
+
+
+def xcursor_bytes(images):
+    """images: [(size, hot_x, hot_y, delay_ms, rgba bytes)] -> Xcursor file, premultiplied ARGB."""
+    ntoc = len(images)
+    header = struct.pack("<4sIII", b"Xcur", 16, 0x10000, ntoc)
+    pos = 16 + 12 * ntoc
+    toc, body = b"", b""
+    for size, hx, hy, delay, rgba in images:
+        px = bytearray(len(rgba))
+        for o in range(0, len(rgba), 4):
+            r, g, b, a = rgba[o:o + 4]
+            px[o:o + 4] = bytes(((b * a + 127) // 255, (g * a + 127) // 255, (r * a + 127) // 255, a))
+        chunk = struct.pack("<IIIIIIIII", 36, 0xFFFD0002, size, 1, size, size, hx, hy, delay) + bytes(px)
+        toc += struct.pack("<III", 0xFFFD0002, size, pos + len(body))
+        body += chunk
+    return header + toc + body
+
+
+def build_theme(acc, out):
+    """Write the whole theme (hyprcursor + XCursor) into OUT (a fresh directory)."""
+    work = out / "work"
+    shape_dirs = work / "hyprcursors"
+    shape_dirs.mkdir(parents=True)
+    (work / "manifest.hl").write_text(
+        f"name = {NAME}\ndescription = Terminus Est sword cursor\nversion = 1.0\ncursors_directory = hyprcursors\n")
+    xcur = out / NAME / "cursors"
+    xcur.mkdir(parents=True)
+    table = shapes(acc)
+    renders = []
+    for name, shape in table.items():
+        (shape_dirs / name).mkdir()
+        (shape_dirs / name / "meta.hl").write_text(meta_hl(name, shape))
+        for size in SIZES:
+            for i, frame in enumerate(shape.frames):
+                renders.append((frame_svg(acc, shape, frame, size), size, shape_dirs / name / frame_file(name, size, i)))
+    with ThreadPoolExecutor() as pool:
+        list(pool.map(render, *zip(*renders)))
+        for name, shape in table.items():
+            hx, hy = shape.hotspot
+            keys = [(size, i) for size in SIZES for i in range(len(shape.frames))]
+            pixels = pool.map(read_rgba, [shape_dirs / name / frame_file(name, size, i) for size, i in keys],
+                              [size for size, _ in keys])
+            images = [(size, round(size * hx), round(size * hy), shape.frames[i].delay, rgba)
+                      for (size, i), rgba in zip(keys, pixels)]
+            (xcur / name).write_bytes(xcursor_bytes(images))
+            for alias in shape.overrides:
+                (xcur / alias).symlink_to(name)
+    covered = set(table) | {alias for shape in table.values() for alias in shape.overrides}
+    # shapes not designed yet: XCursor falls through Inherits=; hyprcursor gets Mita's compiled shapes
+    fallback = ICONS / FALLBACK_THEME / "hyprcursors"
+    missing = []
+    if fallback.is_dir():
+        missing = [hlc.stem for hlc in sorted(fallback.glob("*.hlc")) if hlc.stem not in covered]
+    (out / "uncovered.txt").write_text("\n".join(missing) + "\n")
+
+    theme = out / NAME
+    (out / "compiled").mkdir()
+    subprocess.run(["hyprcursor-util", "--create", str(work), "--output", str(out / "compiled")],
+                   check=True, capture_output=True)
+    compiled = out / "compiled" / f"theme_{NAME}"
+    if not compiled.is_dir():
+        compiled = next((out / "compiled").glob("theme_*"))
+    shutil.copytree(compiled, theme / "x", dirs_exist_ok=False)
+    for item in (theme / "x").iterdir():
+        item.rename(theme / item.name)
+    (theme / "x").rmdir()
+    for name in missing:
+        target = theme / "hyprcursors" / f"{name}.hlc"
+        if not target.exists():
+            shutil.copy2(fallback / f"{name}.hlc", target)
+    (theme / "index.theme").write_text(
+        f"[Icon Theme]\nName={NAME}\nComment=Terminus Est sword cursor\nInherits={FALLBACK_THEME}\n")
+    shutil.rmtree(work)
+    shutil.rmtree(out / "compiled")
+
+
+def cached(acc_hex):
+    # The key includes the generator's own content, so editing the template or script rebuilds.
+    digest = hashlib.sha1(TEMPLATE.encode() + Path(__file__).read_bytes()).hexdigest()[:8]
+    return CACHE / f"{acc_hex.lstrip('#').lower()}-{digest}"
+
+
+def ensure_built(acc_hex):
+    acc = parse_hex(acc_hex)
+    target = cached(acc_hex)
+    if (target / NAME / "manifest.hl").is_file():
+        return target
+    CACHE.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=".build-", dir=CACHE))
+    try:
+        build_theme(acc, tmp)
+        if target.exists():
+            shutil.rmtree(target)
+        tmp.rename(target)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return target
+
+
+def read_choice():
+    """(theme, size) last chosen with `use`; the sword at the default size until then."""
+    try:
+        theme, size = (STATE / "theme").read_text().split()
+        return theme, int(size)
+    except (OSError, ValueError):
+        return NAME, DEFAULT_SIZE
+
+
+def write_choice(theme, size):
+    (STATE / "theme").write_text(f"{theme} {size}\n")
+
+
+def set_cursor(theme, size):
+    if shutil.which("hyprctl"):
+        subprocess.run(["hyprctl", "setcursor", theme, str(size)], check=False, capture_output=True)
+
+
+def install(acc_hex):
+    """Point the icon theme at this accent's build; switch to it unless another theme was chosen."""
+    target = cached(acc_hex)
+    link = ICONS / NAME
+    ICONS.mkdir(parents=True, exist_ok=True)
+    if link.exists() and not link.is_symlink():
+        sys.exit(f"terminus-cursor: {link} exists and is not a symlink; refusing to replace it")
+    tmp = ICONS / f".{NAME}.tmp"
+    tmp.unlink(missing_ok=True)
+    tmp.symlink_to(target / NAME)
+    os.replace(tmp, link)
+    theme, size = read_choice()
+    if theme == NAME:
+        set_cursor(NAME, size)
+
+
+def cmd_preview(acc_hex, dest):
+    """Render the middle frame of every shape at every size into DEST; installs nothing."""
+    acc = parse_hex(acc_hex)
+    dest.mkdir(parents=True, exist_ok=True)
+    for name, shape in shapes(acc).items():
+        frame = shape.frames[len(shape.frames) // 2]
+        for size in SIZES:
+            render(frame_svg(acc, shape, frame, size), size, dest / f"{name}_{size}.png")
+
+
+def read_accent():
+    text = (HOME / ".config/terminus-est/generated/appearance.lua").read_text()
+    m = re.search(r'^\s*accent\s*=\s*"(#[0-9a-fA-F]{6})"', text, re.M)
+    if not m:
+        sys.exit("terminus-cursor: no accent in generated/appearance.lua")
+    return m.group(1)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="terminus-cursor")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name in ("apply", "build"):
+        p = sub.add_parser(name)
+        p.add_argument("accent")
+    p = sub.add_parser("use", help="choose the cursor theme (terminus-est or another installed theme)")
+    p.add_argument("theme")
+    p.add_argument("size", type=int)
+    p = sub.add_parser("preview")
+    p.add_argument("accent")
+    p.add_argument("dir", type=Path)
+    args = ap.parse_args()
+    if args.cmd == "preview":
+        cmd_preview(args.accent, args.dir)
+        return
+    STATE.mkdir(parents=True, exist_ok=True)
+    with open(STATE / "lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if args.cmd == "use":
+            write_choice(args.theme, args.size)
+            if args.theme == NAME:
+                accent = read_accent()
+                ensure_built(accent)
+                install(accent)
+            elif args.theme == ECLIPSE:
+                subprocess.run([str(ECLIPSE_CURSOR), "use", str(args.size)], check=True)
+            else:
+                set_cursor(args.theme, args.size)
+            return
+        ensure_built(args.accent)
+        if args.cmd == "apply":
+            install(args.accent)
+        # The eclipse theme follows the same accent; it switches only when it is the chosen theme.
+        subprocess.run([str(ECLIPSE_CURSOR), args.cmd, args.accent], check=True)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,9 @@
+label = "Narrow"
+emoji = "🎯"
+category = "Stereo"
+tags = ["narrow", "centre", "center", "focus"]
+description = "Pulls both sides halfway toward the centre."
+order = 40
+
+[stereo]
+base = -0.5

@@ -1,0 +1,32 @@
+label = "AM car radio"
+emoji = "🚗"
+category = "Retro"
+tags = ["car", "radio", "am", "drive", "cheap"]
+description = "Band-limited with an exciter bite, like a car AM radio at night."
+order = 100
+headroom_db = -4
+
+[[band]]
+type = "highpass"
+freq = 120
+q = 0.707
+
+[[band]]
+type = "lowpass"
+freq = 5500
+q = 0.9
+
+[[band]]
+type = "peaking"
+freq = 2500
+q = 1.0
+gain = 3
+
+[[plugin]]
+type = "exciter"
+amount = 3.0
+harmonics = 6.0
+scope = 3500.0
+blend = 0.0
+ceil = 9000.0
+ceil-active = true

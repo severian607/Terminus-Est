@@ -1,0 +1,7 @@
+label = "Vintage speaker"
+emoji = "🔉"
+category = "Retro"
+tags = ["speaker", "cabinet", "wooden", "hifi", "warm"]
+description = "Small wooden cabinet speaker with a boxy low-mid resonance and a rolled-off top."
+order = 30
+ir = "vintage-speaker"

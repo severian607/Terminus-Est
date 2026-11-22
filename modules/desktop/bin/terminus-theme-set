@@ -1,0 +1,102 @@
+#!/bin/bash
+
+# terminus:summary=Apply an Terminus-Est theme
+# terminus:args=<theme-name>
+# terminus:examples=terminus theme list | terminus theme set "Graphite Phosphor"
+#
+# A theme supplies the neutrals (background, foreground, muted, alert) through
+# its colors.toml. They are handed to terminus-settings, which re-renders every
+# skin and reloads Hyprland and the terminal. The accent is NOT set here: it
+# follows the wallpaper.
+
+set -o pipefail
+
+if [[ -z $1 ]]; then
+  echo "Usage: terminus-theme-set <theme-name>"
+  exit 1
+fi
+
+TERMINUS_ROOT="$HOME/.config/terminus-est"
+CURRENT_THEME_PATH="$TERMINUS_ROOT/current/theme"
+NEXT_THEME_PATH="$TERMINUS_ROOT/current/next-theme"
+USER_THEMES_PATH="$TERMINUS_ROOT/themes"
+TERMINUS_THEMES_PATH="$TERMINUS_DESKTOP_PATH/themes"
+
+THEME_NAME=$(echo "$1" | sed -E 's/<[^>]+>//g' | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+
+if [[ ! -d $TERMINUS_THEMES_PATH/$THEME_NAME ]] && [[ ! -d $USER_THEMES_PATH/$THEME_NAME ]]; then
+  echo "Theme '$THEME_NAME' does not exist"
+  exit 1
+fi
+
+# Value of a key in colors.toml: color_value <file> <key>
+color_value() {
+  sed -nE "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*[\"']([^\"']*)[\"'].*/\1/p" "$1" | head -n 1
+}
+
+# Build the next theme directory (swapped in atomically below)
+rm -rf "$NEXT_THEME_PATH"
+mkdir -p "$NEXT_THEME_PATH" || exit 1
+
+# Copy official theme first, then overlay user customizations on top
+for src in "$TERMINUS_THEMES_PATH/$THEME_NAME" "$USER_THEMES_PATH/$THEME_NAME"; do
+  [[ -d $src ]] || continue
+  cp -r "$src/." "$NEXT_THEME_PATH/" || { echo "Failed to copy theme from $src" >&2; exit 1; }
+done
+
+# Generate colors.toml from alacritty.toml if theme is missing colors.toml
+if [[ ! -f $NEXT_THEME_PATH/colors.toml && -f $NEXT_THEME_PATH/alacritty.toml ]]; then
+  terminus-theme-colors-from-alacritty "$NEXT_THEME_PATH" || exit 1
+fi
+
+COLORS_FILE="$NEXT_THEME_PATH/colors.toml"
+if [[ ! -f $COLORS_FILE ]]; then
+  echo "Theme '$THEME_NAME' has no colors.toml" >&2
+  exit 1
+fi
+
+background=$(color_value "$COLORS_FILE" background)
+foreground=$(color_value "$COLORS_FILE" foreground)
+muted=$(color_value "$COLORS_FILE" color7)
+alert=$(color_value "$COLORS_FILE" color1)
+for pair in background:"$background" foreground:"$foreground" color7:"$muted" color1:"$alert"; do
+  if [[ -z ${pair#*:} ]]; then
+    echo "Theme '$THEME_NAME': colors.toml is missing ${pair%%:*}" >&2
+    exit 1
+  fi
+  if [[ ! ${pair#*:} =~ ^#[0-9a-fA-F]{6}$ ]]; then
+    echo "Theme '$THEME_NAME': colors.toml ${pair%%:*} is not #RRGGBB: ${pair#*:}" >&2
+    exit 1
+  fi
+done
+
+# Generate dynamic configs
+terminus-theme-set-templates || exit 1
+
+# Swap next theme in as current; remember whether Ghostty's colours change
+ghostty_changed=0
+cmp -s "$NEXT_THEME_PATH/ghostty.conf" "$CURRENT_THEME_PATH/ghostty.conf" || ghostty_changed=1
+rm -rf "$CURRENT_THEME_PATH"
+mv "$NEXT_THEME_PATH" "$CURRENT_THEME_PATH" || exit 1
+
+# Store theme name for reference
+echo "$THEME_NAME" >"$TERMINUS_ROOT/current/theme.name"
+
+# Hand the neutrals to the tokens: one call re-renders every skin and reloads
+if ! terminus-settings set \
+  appearance.background "\"$background\"" \
+  appearance.foreground "\"$foreground\"" \
+  appearance.muted "\"$muted\"" \
+  appearance.alert "\"$alert\"" >/dev/null; then
+  echo "Theme '$THEME_NAME': theme files were switched but the settings could not be updated." >&2
+  exit 1
+fi
+
+# The settings call only reloads Ghostty when its own override changed
+if ((ghostty_changed)); then
+  python3 "${TERMINUS_PATH:-$HOME/Projects/Terminus-Est}/lib/appearance.py" reload-ghostty ||
+    echo "Warning: could not reload running Ghostty terminals." >&2
+fi
+
+terminus-theme-set-gnome
+terminus-hook theme-set "$THEME_NAME" >/dev/null

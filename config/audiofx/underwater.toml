@@ -1,0 +1,17 @@
+label = "Underwater"
+emoji = "🌊"
+category = "Filters & Character"
+tags = ["water", "pool", "submerged", "dark"]
+description = "Steep resonant low pass at 450 Hz."
+order = 40
+headroom_db = -3
+
+[[band]]
+type = "lowpass"
+freq = 450
+q = 1.4
+
+[[band]]
+type = "lowpass"
+freq = 900
+q = 0.707

@@ -1,0 +1,5 @@
+#!/bin/bash
+
+# terminus:summary=Print the installed Terminus-Est version
+
+cat $TERMINUS_DESKTOP_PATH/version

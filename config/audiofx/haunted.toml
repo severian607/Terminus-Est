@@ -1,0 +1,26 @@
+label = "Haunted"
+emoji = "👻"
+category = "Voice & Pitch"
+tags = ["ghost", "haunted", "spooky", "pitch", "reverb"]
+description = "Slightly flat pitch drowned in a cold cathedral tail."
+order = 70
+headroom_db = -4
+
+[[band]]
+type = "highpass"
+freq = 150
+q = 0.707
+
+[[plugin]]
+type = "pitch"
+dry = -100.0
+wet = 0.0
+semitones = -2.0
+
+[[plugin]]
+type = "reverb"
+room-size = "Large/smooth"
+decay-time = 6.0
+amount = -4.0
+dry = -3.0
+predelay = 50.0

@@ -1,0 +1,1479 @@
+diff --git a/ly-ui/src/components/generic.zig b/ly-ui/src/components/generic.zig
+index 0a76c4f..63f0163 100644
+--- a/ly-ui/src/components/generic.zig
++++ b/ly-ui/src/components/generic.zig
+@@ -116,14 +116,17 @@ pub fn CyclableLabel(comptime ItemType: type, comptime ChangeItemType: type) typ
+             if (self.list.items.len == 0) return;
+             if (self.width < 2) return;
+ 
+-            var left_arrow = Cell.init('<', self.fg, self.bg);
+-            var right_arrow = Cell.init('>', self.fg, self.bg);
+-
+-            left_arrow.put(self.component_pos.x, self.component_pos.y);
+-            right_arrow.put(
+-                self.component_pos.x + self.width - 1,
+-                self.component_pos.y,
+-            );
++            // Arrows only hint at something to switch to; hide them for a single item.
++            if (self.list.items.len > 1) {
++                var left_arrow = Cell.init('<', self.fg, self.bg);
++                var right_arrow = Cell.init('>', self.fg, self.bg);
++
++                left_arrow.put(self.component_pos.x, self.component_pos.y);
++                right_arrow.put(
++                    self.component_pos.x + self.width - 1,
++                    self.component_pos.y,
++                );
++            }
+ 
+             const current_item = self.list.items[self.current];
+             const x = self.component_pos.x + 2;
+diff --git a/res/config.ini b/res/config.ini
+index 86f44b4..d667185 100644
+--- a/res/config.ini
++++ b/res/config.ini
+@@ -25,6 +25,7 @@ allow_empty_password = true
+ # colormix -> Color mixing shader
+ # gameoflife -> John Conway's Game of Life
+ # dur_file -> .dur file format (https://github.com/cmang/durdraw/tree/master)
++# terminus -> Terminus-Est night sky: drifting stars, shooting stars, scan band and a boot-log ticker
+ animation = none
+ 
+ # Delay between each animation frame in milliseconds
+@@ -42,6 +43,13 @@ animation_timeout_sec = 0
+ # Note: you can use a # by escaping it like so: \#
+ asterisk = *
+ 
++# How the password is shown while typing
++# asterisk      -> One masked character (see `asterisk`) per typed character
++# constellation -> One star per typed character in the sky around the box. On success lines
++#                  are drawn between the stars and the constellation blinks; on failure the
++#                  stars flash in the error color and fall. The `asterisk` and F7 reveal are ignored.
++password_style = asterisk
++
+ # The number of failed authentications before a special animation is played... ;)
+ # If set to 0, the animation will never be played
+ auth_fails = 10
+diff --git a/src/Constellation.zig b/src/Constellation.zig
+new file mode 100644
+index 0000000..dcbea65
+--- /dev/null
++++ b/src/Constellation.zig
+@@ -0,0 +1,460 @@
++// Terminus-Est: constellation password indicator.
++//
++// Every typed character adds one star to a constellation in the sky around the
++// login box. Star positions come from a PRNG that is seeded once per Ly start
++// and indexed by character position only: nothing here ever looks at the
++// content of the password, only at how many characters the field holds.
++//
++// The widget is presentation only. The success animation (lines joining the
++// stars, then a blink) is driven from main.zig, see `startSuccess`.
++const std = @import("std");
++
++const ly_ui = @import("ly-ui");
++const Cell = ly_ui.Cell;
++const TerminalBuffer = ly_ui.TerminalBuffer;
++const Widget = ly_ui.Widget;
++const Text = ly_ui.Text;
++const Box = ly_ui.Box;
++
++const common = @import("terminus_common.zig");
++
++pub const max_stars = 96;
++
++/// Total length of the success animation: lines, blinks, short hold.
++pub const success_total_ms: i64 = 1250;
++
++const lines_ms: i64 = 500;
++const blink_cycle_ms: i64 = 200;
++const blink_on_ms: i64 = 120;
++const blink_end_ms: i64 = 1100;
++const fail_ms: i64 = 400;
++const birth_flash_ms: i64 = 120;
++const birth_total_ms: i64 = 360;
++
++// Minimum distance between two stars, in cell widths (a row counts as two).
++const min_distance: f32 = 5.0;
++const step_min: f32 = 5.0;
++const step_max: f32 = 15.0;
++
++const glyph_birth: u21 = 0x2726; // ✦
++const glyph_set = [_]u21{ 0x2726, 0x2727, 0x22C6, 0x00B7, '*', 0x2727, 0x22C6 };
++
++pub const Colors = struct {
++    fg: u32,
++    bg: u32,
++    accent: u32,
++    err: u32,
++    full_color: bool,
++};
++
++const Star = struct {
++    x: i32 = 0,
++    y: i32 = 0,
++    glyph: u21 = '*',
++};
++
++const Mode = enum { idle, success };
++
++const Constellation = @This();
++
++instance: ?Widget = null,
++io: std.Io,
++buffer: *TerminalBuffer,
++password: *Text,
++box: *Box,
++colors: Colors,
++/// Keep clear of the boot-log ticker of the "terminus" animation.
++avoid_ticker: bool,
++seed: u64,
++
++stars: [max_stars]Star = [_]Star{.{}} ** max_stars,
++born: [max_stars]i64 = [_]i64{0} ** max_stars,
++shown: usize = 0,
++layout_sig: u64 = 0,
++
++// Box exclusion rectangle (half open), in cells.
++ex0: i32 = 0,
++ey0: i32 = 0,
++ex1: i32 = 0,
++ey1: i32 = 0,
++
++mode: Mode = .idle,
++mode_start: i64 = 0,
++
++ghost: [max_stars]Star = [_]Star{.{}} ** max_stars,
++ghost_n: usize = 0,
++ghost_start: i64 = 0,
++ghost_fall: bool = false,
++ghost_active: bool = false,
++
++pub fn init(
++    io: std.Io,
++    buffer: *TerminalBuffer,
++    password: *Text,
++    box: *Box,
++    colors: Colors,
++    avoid_ticker: bool,
++    seed: u64,
++) Constellation {
++    return .{
++        .io = io,
++        .buffer = buffer,
++        .password = password,
++        .box = box,
++        .colors = colors,
++        .avoid_ticker = avoid_ticker,
++        .seed = seed,
++    };
++}
++
++pub fn widget(self: *Constellation) *Widget {
++    if (self.instance) |*instance| return instance;
++    self.instance = Widget.init(
++        "Constellation",
++        null,
++        self,
++        null,
++        null,
++        draw,
++        null,
++        null,
++        calculateTimeout,
++    );
++    return &self.instance.?;
++}
++
++/// Number of stars currently on screen. Only the length of the field is read.
++pub fn starCount(self: *const Constellation) usize {
++    return @min(self.password.text.items.len, max_stars);
++}
++
++/// Begin the success animation (lines, then blink). Called in the forked
++/// presentation process only.
++pub fn startSuccess(self: *Constellation, now: i64) void {
++    self.mode = .success;
++    self.mode_start = now;
++}
++
++/// Authentication failed: flash the current stars in the error colour. With
++/// `falling` they also drop and fade (used when the field is about to be
++/// cleared). Call this before the password field is cleared.
++pub fn fail(self: *Constellation, falling: bool) void {
++    const n = self.starCount();
++    if (n == 0) return;
++    self.ensureLayout();
++    @memcpy(self.ghost[0..n], self.stars[0..n]);
++    self.ghost_n = n;
++    self.ghost_start = common.nowMs(self.io);
++    self.ghost_fall = falling;
++    self.ghost_active = true;
++}
++
++fn calculateTimeout(self: *Constellation, _: *anyopaque) !?usize {
++    if (self.ghost_active or self.mode == .success) return 33;
++    if (self.starCount() > 0) return 70;
++    return null;
++}
++
++// ---------------------------------------------------------------- layout
++
++fn layoutSignature(self: *const Constellation) u64 {
++    var hasher = std.hash.Wyhash.init(0);
++    const vals = [_]usize{
++        self.buffer.width,
++        self.buffer.height,
++        self.box.left_pos.x,
++        self.box.left_pos.y,
++        self.box.right_pos.x,
++        self.box.right_pos.y,
++        @intFromBool(self.avoid_ticker),
++    };
++    for (vals) |v| hasher.update(std.mem.asBytes(&v));
++    return hasher.final();
++}
++
++fn ensureLayout(self: *Constellation) void {
++    const sig = self.layoutSignature();
++    if (sig == self.layout_sig) return;
++    self.layout_sig = sig;
++    self.generate();
++}
++
++fn inBox(self: *const Constellation, x: i32, y: i32) bool {
++    return x >= self.ex0 and x < self.ex1 and y >= self.ey0 and y < self.ey1;
++}
++
++fn bottomLimit(self: *const Constellation) i32 {
++    const h: i32 = @intCast(self.buffer.height);
++    const reserved: i32 = if (self.avoid_ticker) @intCast(common.tickerRows(self.buffer.height) + 1) else 0;
++    return h - 1 - reserved;
++}
++
++/// The sky is the top right of the screen, away from the sun on the left: stars gather
++/// above and beside the login box in that corner.
++fn isFree(self: *const Constellation, x: i32, y: i32) bool {
++    const w: i32 = @intCast(self.buffer.width);
++    const x0 = @divTrunc(w * 45, 100);
++    const bottom = self.bottomLimit();
++    const y1 = @divTrunc(bottom * 55, 100);
++    if (x < x0 or x > w - 1 - @max(1, @divTrunc(w, 20)) or y < 1 or y > y1) return false;
++    return !self.inBox(x, y);
++}
++
++fn visualDistance(ax: i32, ay: i32, bx: i32, by: i32) f32 {
++    const dx: f32 = @floatFromInt(ax - bx);
++    const dy: f32 = @floatFromInt((ay - by) * 2);
++    return @sqrt(dx * dx + dy * dy);
++}
++
++fn farFromAll(self: *const Constellation, count: usize, x: i32, y: i32) bool {
++    for (self.stars[0..count]) |s| {
++        if (visualDistance(s.x, s.y, x, y) < min_distance) return false;
++    }
++    return true;
++}
++
++fn segmentClear(self: *const Constellation, ax: i32, ay: i32, bx: i32, by: i32) bool {
++    const steps: i32 = @intCast(@max(@max(@abs(bx - ax), @abs(by - ay)), 1));
++    var i: i32 = 0;
++    while (i <= steps) : (i += 1) {
++        const x = ax + @divTrunc((bx - ax) * i, steps);
++        const y = ay + @divTrunc((by - ay) * i, steps);
++        if (self.inBox(x, y)) return false;
++    }
++    return true;
++}
++
++fn generate(self: *Constellation) void {
++    const w: i32 = @intCast(self.buffer.width);
++    const h: i32 = @intCast(self.buffer.height);
++
++    // Exclusion rectangle: box, its border, its titles and a margin.
++    const lx: i32 = @intCast(self.box.left_pos.x);
++    const ly: i32 = @intCast(self.box.left_pos.y);
++    const rx: i32 = @intCast(self.box.right_pos.x);
++    const ry: i32 = @intCast(self.box.right_pos.y);
++    self.ex0 = lx - 2;
++    self.ey0 = ly - 1;
++    self.ex1 = rx + 2;
++    self.ey1 = ry + 1;
++
++    var prng = std.Random.DefaultPrng.init(self.seed);
++    const rand = prng.random();
++
++    const limit = self.bottomLimit();
++
++    var i: usize = 0;
++    while (i < max_stars) : (i += 1) {
++        var px: i32 = 0;
++        var py: i32 = 0;
++        var placed = false;
++
++        // 1. Walk on from the previous star: a constellation is a chain.
++        if (i > 0) {
++            const prev = self.stars[i - 1];
++            var tries: usize = 0;
++            while (tries < 30 and !placed) : (tries += 1) {
++                const angle = rand.float(f32) * std.math.tau;
++                const dist = step_min + rand.float(f32) * (step_max - step_min);
++                const cx = prev.x + @as(i32, @intFromFloat(@round(@cos(angle) * dist)));
++                const cy = prev.y + @as(i32, @intFromFloat(@round(@sin(angle) * dist * 0.5)));
++                if (!self.isFree(cx, cy)) continue;
++                if (!self.farFromAll(i, cx, cy)) continue;
++                if (!self.segmentClear(prev.x, prev.y, cx, cy)) continue;
++                px = cx;
++                py = cy;
++                placed = true;
++            }
++        }
++
++        // 2. Jump to a fresh free spot that keeps its distance from the others.
++        var tries: usize = 0;
++        while (!placed and tries < 160) : (tries += 1) {
++            if (w < 3 or limit < 3) break;
++            const cx: i32 = 1 + @as(i32, @intCast(rand.uintLessThan(u32, @intCast(w - 2))));
++            const cy: i32 = 1 + @as(i32, @intCast(rand.uintLessThan(u32, @intCast(limit - 1))));
++            if (!self.isFree(cx, cy)) continue;
++            if (!self.farFromAll(i, cx, cy)) continue;
++            px = cx;
++            py = cy;
++            placed = true;
++        }
++
++        // 3. Any free spot, distance be damned.
++        tries = 0;
++        while (!placed and tries < 160) : (tries += 1) {
++            if (w < 3 or limit < 3) break;
++            const cx: i32 = 1 + @as(i32, @intCast(rand.uintLessThan(u32, @intCast(w - 2))));
++            const cy: i32 = 1 + @as(i32, @intCast(rand.uintLessThan(u32, @intCast(limit - 1))));
++            if (!self.isFree(cx, cy)) continue;
++            px = cx;
++            py = cy;
++            placed = true;
++        }
++
++        // 4. Tiny terminal: stay in bounds, accept overlap.
++        if (!placed) {
++            px = @intCast(@min(i, @as(usize, @intCast(@max(w - 1, 0)))));
++            py = 0;
++        }
++
++        self.stars[i] = .{
++            .x = px,
++            .y = py,
++            .glyph = glyph_set[rand.uintLessThan(usize, glyph_set.len)],
++        };
++    }
++
++    _ = h;
++}
++
++// ---------------------------------------------------------------- drawing
++
++fn put(self: *const Constellation, x: i32, y: i32, ch: u21, fg: u32) void {
++    if (self.inBox(x, y)) return;
++    self.buffer.setCellBoundsChecked(x, y, Cell.init(ch, fg, self.colors.bg & 0x00FFFFFF));
++}
++
++fn baseColor(self: *const Constellation, i: usize, now: i64) u32 {
++    const c = self.colors;
++    const phase: f32 = @floatFromInt(@mod(now + @as(i64, @intCast(i)) * 397, 100000));
++    const shimmer = @sin(phase / 650.0);
++    const body = common.mix(c.fg & 0x00FFFFFF, c.accent & 0x00FFFFFF, 0.4);
++    return common.shade(c.full_color, c.bg & 0x00FFFFFF, body, 0.72 + 0.12 * shimmer);
++}
++
++fn brightColor(self: *const Constellation) u32 {
++    return common.mix(self.colors.fg & 0x00FFFFFF, 0x00FFFFFF, 0.6);
++}
++
++fn drawStars(self: *const Constellation, n: usize, now: i64, accent_mode: bool) void {
++    for (self.stars[0..n], 0..) |s, i| {
++        if (accent_mode) {
++            self.put(s.x, s.y, s.glyph, common.mix(self.colors.accent & 0x00FFFFFF, 0x00FFFFFF, 0.25));
++            continue;
++        }
++        const age = now - self.born[i];
++        const base = self.baseColor(i, now);
++        if (age < birth_flash_ms) {
++            self.put(s.x, s.y, glyph_birth, self.brightColor());
++        } else if (age < birth_total_ms) {
++            const t = 1.0 - @as(f32, @floatFromInt(age - birth_flash_ms)) / @as(f32, @floatFromInt(birth_total_ms - birth_flash_ms));
++            self.put(s.x, s.y, s.glyph, common.mix(base, self.brightColor(), t));
++        } else {
++            self.put(s.x, s.y, s.glyph, base);
++        }
++    }
++}
++
++fn segmentGlyph(dx: i32, dy: i32) u21 {
++    const vx: f32 = @floatFromInt(@abs(dx));
++    const vy: f32 = @floatFromInt(@abs(dy) * 2); // a cell is twice as tall as wide
++    const deg = std.math.radiansToDegrees(std.math.atan2(vy, vx));
++    if (deg < 14.0) return 0x2500; // ─
++    if (deg < 32.0) return 0x00B7; // ·
++    if (deg < 58.0) return if ((dx >= 0) == (dy >= 0)) 0x2572 else 0x2571; // ╲ ╱
++    if (deg < 76.0) return 0x00B7;
++    return 0x2502; // │
++}
++
++fn segmentCells(ax: i32, ay: i32, bx: i32, by: i32) usize {
++    const n: i32 = @intCast(@max(@abs(bx - ax), @abs(by - ay)));
++    return if (n > 1) @intCast(n - 1) else 0;
++}
++
++fn totalLineCells(self: *const Constellation, n: usize) usize {
++    var total: usize = 0;
++    var k: usize = 1;
++    while (k < n) : (k += 1) {
++        total += segmentCells(self.stars[k - 1].x, self.stars[k - 1].y, self.stars[k].x, self.stars[k].y);
++    }
++    return total;
++}
++
++/// Draw the first `budget` line cells in typing order.
++fn drawLines(self: *const Constellation, n: usize, budget_in: usize, color: u32, head_color: u32) void {
++    var budget = budget_in;
++    var k: usize = 1;
++    while (k < n) : (k += 1) {
++        const a = self.stars[k - 1];
++        const b = self.stars[k];
++        const dx = b.x - a.x;
++        const dy = b.y - a.y;
++        const steps: i32 = @intCast(@max(@abs(dx), @abs(dy)));
++        const glyph = segmentGlyph(dx, dy);
++        var i: i32 = 1;
++        while (i < steps) : (i += 1) {
++            if (budget == 0) return;
++            budget -= 1;
++            const x = a.x + @as(i32, @intFromFloat(@round(@as(f32, @floatFromInt(dx * i)) / @as(f32, @floatFromInt(steps)))));
++            const y = a.y + @as(i32, @intFromFloat(@round(@as(f32, @floatFromInt(dy * i)) / @as(f32, @floatFromInt(steps)))));
++            self.put(x, y, glyph, if (budget < 2) head_color else color);
++        }
++    }
++}
++
++fn drawSuccess(self: *const Constellation, n: usize, now: i64) void {
++    const e = now - self.mode_start;
++    const accent = self.colors.accent & 0x00FFFFFF;
++    if (e < lines_ms) {
++        const total = self.totalLineCells(n);
++        const frac = @as(f32, @floatFromInt(e)) / @as(f32, @floatFromInt(lines_ms));
++        const budget: usize = @intFromFloat(@floor(frac * @as(f32, @floatFromInt(total))));
++        const line_col = common.shade(self.colors.full_color, self.colors.bg & 0x00FFFFFF, accent, 0.6);
++        self.drawLines(n, budget, line_col, self.brightColor());
++        self.drawStars(n, now, false);
++        return;
++    }
++    if (e < blink_end_ms) {
++        const phase = @mod(e - lines_ms, blink_cycle_ms);
++        if (phase >= blink_on_ms) return; // dark half of the blink
++    }
++    self.drawLines(n, std.math.maxInt(usize), accent, accent);
++    self.drawStars(n, now, true);
++}
++
++fn drawGhost(self: *Constellation, now: i64) void {
++    const t = now - self.ghost_start;
++    if (t >= fail_ms) {
++        self.ghost_active = false;
++        return;
++    }
++    const err = self.colors.err & 0x00FFFFFF;
++    const bg = self.colors.bg & 0x00FFFFFF;
++    const tf: f32 = @floatFromInt(t);
++    // Solid error colour for the first 100 ms (the flash), then fade out.
++    const fade: f32 = if (t < 100) 1.0 else 1.0 - (tf - 100.0) / @as(f32, @floatFromInt(fail_ms - 100));
++    const col = common.shade(self.colors.full_color, bg, err, fade);
++    const frac = tf / @as(f32, @floatFromInt(fail_ms));
++    for (self.ghost[0..self.ghost_n], 0..) |s, i| {
++        var y = s.y;
++        if (self.ghost_fall) {
++            const speed: f32 = @floatFromInt(3 + (i % 4));
++            y += @intFromFloat(@floor(frac * frac * speed * 2.0));
++        }
++        if (!self.ghost_fall or fade > 0.0) self.put(s.x, y, s.glyph, col);
++    }
++}
++
++fn draw(self: *Constellation) void {
++    self.ensureLayout();
++
++    const now = common.nowMs(self.io);
++    const n = self.starCount();
++
++    // Stars born since the last frame start their twinkle now. Only the count
++    // matters: position, glyph and brightness never depend on the typed key.
++    if (n > self.shown) {
++        for (self.shown..n) |i| self.born[i] = now;
++    }
++    self.shown = n;
++
++    if (n > 0) {
++        switch (self.mode) {
++            .idle => self.drawStars(n, now, false),
++            .success => self.drawSuccess(n, now),
++        }
++    }
++
++    if (self.ghost_active) self.drawGhost(now);
++}
+diff --git a/src/animations/Terminus.zig b/src/animations/Terminus.zig
+new file mode 100644
+index 0000000..d2aa478
+--- /dev/null
++++ b/src/animations/Terminus.zig
+@@ -0,0 +1,660 @@
++// Terminus-Est background animation: a terminal-aesthetic night sky.
++//
++//  * sparse dim stars (. · ˙) that twinkle and drift very slowly
++//  * an occasional shooting star
++//  * a faint horizontal scan band travelling down the screen (CRT refresh)
++//  * a dim boot-log ticker at the bottom rows that types out lines and scrolls
++//
++// All colours are derived from the configured fg / border_fg (accent) / bg.
++// Everything is a function of the clock, so the cost per frame is bounded by
++// the screen size and does not depend on the frame delay.
++const std = @import("std");
++const Allocator = std.mem.Allocator;
++
++const ly_ui = @import("ly-ui");
++const Cell = ly_ui.Cell;
++const TerminalBuffer = ly_ui.TerminalBuffer;
++const Widget = ly_ui.Widget;
++
++const ly_core = ly_ui.ly_core;
++const interop = ly_core.interop;
++const TimeOfDay = interop.TimeOfDay;
++
++const common = @import("../terminus_common.zig");
++
++const Terminus = @This();
++
++const BgStar = struct {
++    x0: f32,
++    y: u16,
++    speed: f32, // cells per second, leftwards
++    phase: f32,
++    rate: f32, // twinkle, radians per second
++    glyph: u21,
++    peak: f32, // peak intensity 0..1
++};
++
++const line_cap = 120;
++const ring_rows = 8;
++
++const LineKind = enum { kernel, ok };
++
++const Line = struct {
++    buf: [line_cap]u8 = undefined,
++    len: usize = 0,
++    kind: LineKind = .kernel,
++    prefix_len: usize = 0, // bytes of timestamp / status prefix
++};
++
++const band_strength = [_]f32{ 0.10, 0.06, 0.035, 0.015 };
++const band_period_ms: i64 = 8000;
++
++const kernel_msgs = [_][]const u8{
++    "acpi: pci root bridge [pci0000:00] ready",
++    "nvme nvme0: 16/0/0 default/read/poll queues",
++    "usb 1-3: new high-speed usb device number 4",
++    "snd_hda_intel 0000:2d:00.4: bound 0000:2d:00.0",
++    "random: crng init done",
++    "btrfs (nvme0n1p2): using crc32c checksum algorithm",
++    "systemd[1]: detected architecture x86-64",
++    "pci 0000:00:01.1: pme: signaling with irq 26",
++    "input: logitech usb receiver as /devices/pci0000:00",
++    "xhci_hcd 0000:2c:00.3: xhci host controller ready",
++    "nvidia-modeset: loaded kernel module",
++    "bluetooth: hci0: firmware timestamp loaded",
++    "r8169 0000:27:00.0 enp39s0: link is up - 1000mbps/full",
++    "snd_hda_codec_hdmi: hdmi jack plugged",
++    "kmscon: seat0 vt2 activated",
++    "audit: type=1130 audit: pid=1 uid=0 msg='unit=ly'",
++};
++
++const ok_msgs = [_][]const u8{
++    "reached target basic system",
++    "started network manager",
++    "started user login management",
++    "mounted /boot",
++    "started pipewire audio server",
++    "listening on d-bus system message bus socket",
++    "started bluetooth service",
++    "reached target network is online",
++    "started display manager",
++    "started terminus-est session bootstrap",
++    "reached target graphical interface",
++    "started polkit authorization manager",
++};
++
++allocator: Allocator,
++io: std.Io,
++terminal_buffer: *TerminalBuffer,
++rng: std.Random.DefaultPrng,
++instance: ?Widget = null,
++full_color: bool,
++fg: u32,
++bg: u32,
++accent: u32,
++animate: *bool,
++timeout_sec: u12,
++frame_delay: u16,
++start_time: TimeOfDay,
++start_ms: i64,
++
++stars: []BgStar = &.{},
++
++// shooting star
++shoot_active: bool = false,
++shoot_start: i64 = 0,
++shoot_next: i64 = 0,
++shoot_x: f32 = 0,
++shoot_y: f32 = 0,
++shoot_vx: f32 = 0, // cells per ms
++shoot_vy: f32 = 0,
++
++// boot log ticker
++lines: [ring_rows]Line = [_]Line{.{}} ** ring_rows,
++line_count: usize = 0, // number of valid entries, the newest is the last
++current_shown: usize = 0,
++current_target: usize = 0,
++ticker_next: i64 = 0,
++typing: bool = false,
++kernel_ms: u64 = 0,
++last_msg: usize = 0,
++last_kind: LineKind = .kernel,
++
++pub fn init(
++    allocator: Allocator,
++    io: std.Io,
++    terminal_buffer: *TerminalBuffer,
++    fg: u32,
++    accent: u32,
++    full_color: bool,
++    animate: *bool,
++    timeout_sec: u12,
++    frame_delay: u16,
++) !Terminus {
++    var seed: u64 = undefined;
++    io.random(std.mem.asBytes(&seed));
++
++    const now = common.nowMs(io);
++    var self: Terminus = .{
++        .allocator = allocator,
++        .io = io,
++        .terminal_buffer = terminal_buffer,
++        .rng = std.Random.DefaultPrng.init(seed),
++        .full_color = full_color,
++        .fg = fg & 0x00FFFFFF,
++        .bg = terminal_buffer.bg & 0x00FFFFFF,
++        .accent = accent & 0x00FFFFFF,
++        .animate = animate,
++        .timeout_sec = timeout_sec,
++        .frame_delay = frame_delay,
++        .start_time = try interop.getTimeOfDay(),
++        .start_ms = now,
++    };
++
++    self.kernel_ms = 800 + self.rng.random().uintLessThan(u64, 2500);
++    self.shoot_next = now + 2500 + @as(i64, @intCast(self.rng.random().uintLessThan(u32, 4000)));
++    self.ticker_next = now + 300;
++    try self.generateStars();
++    return self;
++}
++
++pub fn widget(self: *Terminus) *Widget {
++    if (self.instance) |*instance| return instance;
++    self.instance = Widget.init(
++        "Terminus",
++        null,
++        self,
++        deinit,
++        realloc,
++        draw,
++        update,
++        null,
++        calculateTimeout,
++    );
++    return &self.instance.?;
++}
++
++fn deinit(self: *Terminus) void {
++    self.allocator.free(self.stars);
++    self.stars = &.{};
++}
++
++fn realloc(self: *Terminus) !void {
++    try self.generateStars();
++}
++
++fn generateStars(self: *Terminus) !void {
++    const w = self.terminal_buffer.width;
++    const h = self.terminal_buffer.height;
++
++    self.allocator.free(self.stars);
++    self.stars = &.{};
++
++    const count = std.math.clamp(w * h / 140, 8, 700);
++    const stars = try self.allocator.alloc(BgStar, count);
++    const rand = self.rng.random();
++    const glyphs = [_]u21{ '.', 0x00B7, 0x02D9 };
++
++    for (stars) |*s| {
++        s.* = .{
++            .x0 = rand.float(f32) * @as(f32, @floatFromInt(w)),
++            .y = @intCast(rand.uintLessThan(usize, @max(h, 1))),
++            // Mostly nearly still, a few faster: slow parallax.
++            .speed = if (rand.uintLessThan(u8, 4) == 0) 0.0 else 0.25 + rand.float(f32) * 0.9,
++            .phase = rand.float(f32) * std.math.tau,
++            .rate = 0.4 + rand.float(f32) * 1.6,
++            .glyph = glyphs[rand.uintLessThan(usize, glyphs.len)],
++            .peak = 0.35 + rand.float(f32) * 0.65,
++        };
++    }
++    self.stars = stars;
++}
++
++fn update(self: *Terminus, _: *anyopaque) !void {
++    const time = try interop.getTimeOfDay();
++
++    if (self.timeout_sec > 0 and time.seconds - self.start_time.seconds > self.timeout_sec) {
++        self.animate.* = false;
++    }
++}
++
++fn calculateTimeout(self: *Terminus, _: *anyopaque) !?usize {
++    if (!self.animate.*) return null;
++    return self.frame_delay;
++}
++
++// ---------------------------------------------------------------- helpers
++
++fn bgAt(self: *const Terminus, y: i32, band_head: i32) u32 {
++    if (!self.full_color) return self.bg;
++    const d = band_head - y;
++    if (d < 0 or d >= band_strength.len) return self.bg;
++    return common.mix(self.bg, self.accent, band_strength[@intCast(d)]);
++}
++
++fn put(self: *const Terminus, x: i32, y: i32, ch: u21, fg: u32, bg: u32) void {
++    self.terminal_buffer.setCellBoundsChecked(x, y, Cell.init(ch, fg, bg));
++}
++
++fn dimmed(self: *const Terminus, color: u32, t: f32) u32 {
++    return common.shade(self.full_color, self.bg, color, t);
++}
++
++// ---------------------------------------------------------------- ticker
++
++fn pickLine(self: *Terminus) void {
++    const rand = self.rng.random();
++    var line = Line{};
++
++    const want_ok = rand.uintLessThan(u8, 100) < 45;
++    var kind: LineKind = if (want_ok) .ok else .kernel;
++    // Never the same kind more than twice in a row: reads more like a real log.
++    if (kind == self.last_kind and rand.uintLessThan(u8, 3) == 0) {
++        kind = if (kind == .ok) .kernel else .ok;
++    }
++    self.last_kind = kind;
++
++    const msgs: []const []const u8 = if (kind == .ok) &ok_msgs else &kernel_msgs;
++    var idx = rand.uintLessThan(usize, msgs.len);
++    if (idx == self.last_msg) idx = (idx + 1) % msgs.len;
++    self.last_msg = idx;
++
++    self.kernel_ms += 1 + rand.uintLessThan(u64, 240);
++
++    const text = switch (kind) {
++        .ok => std.fmt.bufPrint(&line.buf, "[  ok  ] {s}", .{msgs[idx]}) catch line.buf[0..0],
++        .kernel => std.fmt.bufPrint(&line.buf, "[{d:>5}.{d:0>6}] {s}", .{
++            self.kernel_ms / 1000,
++            (self.kernel_ms % 1000) * 1000 + rand.uintLessThan(u64, 1000),
++            msgs[idx],
++        }) catch line.buf[0..0],
++    };
++    line.len = text.len;
++    line.kind = kind;
++    line.prefix_len = if (kind == .ok) 8 else @min(text.len, 14);
++
++    if (self.line_count == ring_rows) {
++        std.mem.copyForwards(Line, self.lines[0 .. ring_rows - 1], self.lines[1..ring_rows]);
++        self.line_count -= 1;
++    }
++    self.lines[self.line_count] = line;
++    self.line_count += 1;
++    self.current_shown = 0;
++    self.current_target = line.len;
++    self.typing = true;
++}
++
++fn advanceTicker(self: *Terminus, now: i64) void {
++    // Resume cleanly after a stall instead of replaying the backlog.
++    if (now - self.ticker_next > 2000) self.ticker_next = now;
++
++    var guard: usize = 0;
++    while (self.ticker_next <= now and guard < 400) : (guard += 1) {
++        const rand = self.rng.random();
++        if (!self.typing) {
++            self.pickLine();
++            self.ticker_next += 60;
++            continue;
++        }
++        if (self.current_shown < self.current_target) {
++            self.current_shown += 1;
++            // Quick bursts with an occasional hitch.
++            self.ticker_next += 10 + @as(i64, @intCast(rand.uintLessThan(u32, 30)));
++            if (rand.uintLessThan(u8, 40) == 0) self.ticker_next += 120;
++        } else {
++            self.typing = false;
++            self.ticker_next += 180 + @as(i64, @intCast(rand.uintLessThan(u32, 800)));
++        }
++    }
++}
++
++fn drawTicker(self: *Terminus, now: i64, band_head: i32) void {
++    const w: i32 = @intCast(self.terminal_buffer.width);
++    const h: i32 = @intCast(self.terminal_buffer.height);
++    const rows: i32 = @intCast(common.tickerRows(self.terminal_buffer.height));
++    if (rows == 0 or w < 12) return;
++
++    self.advanceTicker(now);
++
++    const text_col = self.dimmed(common.mix(self.fg, self.accent, 0.15), 0.32);
++    const stamp_col = self.dimmed(self.fg, 0.2);
++    const ok_col = self.dimmed(self.accent, 0.75);
++
++    const bottom: i32 = h - 2; // last row stays free for the key hints / version
++    var r: i32 = 0;
++    while (r < rows) : (r += 1) {
++        const li: i32 = @as(i32, @intCast(self.line_count)) - 1 - r;
++        if (li < 0) break;
++        const line = &self.lines[@intCast(li)];
++        const y = bottom - r;
++        const is_current = r == 0 and self.typing;
++        const len = if (r == 0) @min(self.current_shown, line.len) else line.len;
++        const bg = self.bgAt(y, band_head);
++
++        // Older lines fade a little towards the top.
++        const fade: f32 = 1.0 - @as(f32, @floatFromInt(r)) * 0.09;
++
++        var x: i32 = 2;
++        for (line.buf[0..len], 0..) |ch, i| {
++            if (x >= w - 2) break;
++            var col = if (i < line.prefix_len) stamp_col else text_col;
++            if (line.kind == .ok and i >= 3 and i < 5) col = ok_col;
++            if (self.full_color and fade < 1.0) col = common.mix(bg, col, fade);
++            self.put(x, y, ch, col, bg);
++            x += 1;
++        }
++
++        // Blinking block cursor while a line is being typed.
++        if (r == 0 and x < w - 2 and (is_current or @mod(@divTrunc(now, 500), 2) == 0)) {
++            self.put(x, y, 0x2588, self.dimmed(self.accent, 0.55), bg);
++        }
++    }
++}
++
++// ---------------------------------------------------------------- shooting star
++
++fn updateShootingStar(self: *Terminus, now: i64) void {
++    const w: f32 = @floatFromInt(self.terminal_buffer.width);
++    const h: f32 = @floatFromInt(self.terminal_buffer.height);
++    const rand = self.rng.random();
++
++    if (!self.shoot_active) {
++        if (now < self.shoot_next) return;
++        self.shoot_active = true;
++        self.shoot_start = now;
++        const rightwards = rand.boolean();
++        const speed = (28.0 + rand.float(f32) * 22.0) / 1000.0; // cells per ms
++        self.shoot_vx = if (rightwards) speed else -speed;
++        self.shoot_vy = speed * (0.22 + rand.float(f32) * 0.25);
++        self.shoot_x = if (rightwards) rand.float(f32) * w * 0.5 else w * 0.5 + rand.float(f32) * w * 0.5;
++        self.shoot_y = rand.float(f32) * h * 0.35;
++        return;
++    }
++
++    const t: f32 = @floatFromInt(now - self.shoot_start);
++    const hx = self.shoot_x + self.shoot_vx * t;
++    const hy = self.shoot_y + self.shoot_vy * t;
++    const out = hx < -12 or hx > w + 12 or hy > h + 2 or t > 2500;
++    if (out) {
++        self.shoot_active = false;
++        self.shoot_next = now + 6000 + @as(i64, @intCast(rand.uintLessThan(u32, 9000)));
++    }
++}
++
++fn drawShootingStar(self: *const Terminus, now: i64, band_head: i32) void {
++    if (!self.shoot_active) return;
++    const t: f32 = @floatFromInt(now - self.shoot_start);
++    const trail = 9;
++    var k: i32 = 0;
++    while (k < trail) : (k += 1) {
++        const tk = t - @as(f32, @floatFromInt(k)) * 22.0;
++        if (tk < 0) break;
++        const x: i32 = @intFromFloat(@round(self.shoot_x + self.shoot_vx * tk));
++        const y: i32 = @intFromFloat(@round(self.shoot_y + self.shoot_vy * tk));
++        const level = 1.0 - @as(f32, @floatFromInt(k)) / @as(f32, trail);
++        const glyph: u21 = if (k == 0) '*' else if (k < 4) 0x00B7 else '.';
++        const col = if (k == 0)
++            self.dimmed(common.mix(self.fg, 0x00FFFFFF, 0.4), 0.95)
++        else
++            self.dimmed(common.mix(self.fg, self.accent, 0.5), 0.15 + 0.6 * level);
++        if (!self.full_color and k > 2) continue;
++        self.put(x, y, glyph, col, self.bgAt(y, band_head));
++    }
++}
++
++// ---------------------------------------------------------------- scene
++//
++// A dying sun bleeding into the sky, and a grass field with the Terminus-Est
++// sword planted in it. Both sit behind the login box.
++
++const Scene = struct {
++    /// First grass row.
++    horizon: i32,
++    /// Last grass row (the ticker rows and the key-hint row stay below).
++    ground_bottom: i32,
++};
++
++const blood: u32 = 0x007A3028;
++const grass_green: u32 = 0x006E8C5A;
++const sword_hilt: u32 = 0x009F5A51;
++const sword_gem: u32 = 0x00E09687;
++const sword_steel: u32 = 0x008C919B;
++
++// Hilt of the sword from the fastfetch logo, blade pointing down. Column 14 is the axis.
++const hilt_rows = [_][]const u8{
++    "             _",
++    "            .' '.",
++    "           ( (O) )",
++    "             '._.'",
++    "             )=(",
++    "             |/|",
++    "             |\\|",
++    "             |/|",
++    "             |\\|",
++    "     __.---./###\\.---.__",
++    " (@=====-----\\#/-----=====@)",
++};
++const blade_letters = "TERMINUS:EST::";
++const sword_axis: i32 = 14;
++
++fn scene(self: *const Terminus) ?Scene {
++    const h: i32 = @intCast(self.terminal_buffer.height);
++    const w: i32 = @intCast(self.terminal_buffer.width);
++    if (h < 24 or w < 60) return null;
++    const tr: i32 = @intCast(common.tickerRows(self.terminal_buffer.height));
++    const ground_bottom = h - 2 - tr;
++    const gh = std.math.clamp(@divTrunc(h, 6), 3, 9);
++    return .{ .ground_bottom = ground_bottom, .horizon = ground_bottom - gh + 1 };
++}
++
++fn hash2(x: i32, y: i32) u32 {
++    var v: u32 = (@as(u32, @bitCast(x)) *% 0x9E3779B1) ^ (@as(u32, @bitCast(y)) *% 0x85EBCA6B);
++    v ^= v >> 15;
++    v *%= 0x2C1B3C6D;
++    v ^= v >> 12;
++    return v;
++}
++
++/// `color` over `base` at strength `t`. Without truecolor: all or nothing.
++fn blend(self: *const Terminus, base: u32, color: u32, t: f32) u32 {
++    if (self.full_color) return common.mix(base, color, t);
++    return if (t >= 0.4) color & 0x00FFFFFF else base;
++}
++
++fn sunGeometry(self: *const Terminus, sc: Scene) struct { cx: i32, cy: i32, ry: i32 } {
++    const w: i32 = @intCast(self.terminal_buffer.width);
++    const h: i32 = @intCast(self.terminal_buffer.height);
++    const ry = std.math.clamp(@divTrunc(h, 7), 3, 8);
++    const lift = @max(3, @divTrunc(h, 9));
++    return .{ .cx = @divTrunc(w * 22, 100), .cy = sc.horizon - ry - lift, .ry = ry };
++}
++
++/// The sun: a dull disc that breathes, flickers and never quite goes out.
++fn drawSun(self: *const Terminus, sc: Scene, t_ms: i64, t_s: f32, band_head: i32) void {
++    const g = self.sunGeometry(sc);
++    var life: f32 = 0.78 + 0.14 * @sin(t_s * 0.9) + 0.08 * @sin(t_s * 3.7 + 1.3);
++    if (@mod(t_ms, 9000) < 160) life *= 0.6;
++
++    const ryf: f32 = @floatFromInt(g.ry);
++    const rx = g.ry * 2;
++    var y = g.cy - g.ry * 2 - 1;
++    while (y <= g.cy + g.ry * 2 + 1) : (y += 1) {
++        if (y < 0 or y >= sc.horizon) continue;
++        var x = g.cx - rx * 2 - 2;
++        while (x <= g.cx + rx * 2 + 2) : (x += 1) {
++            const dx = @as(f32, @floatFromInt(x - g.cx)) / 2.0;
++            const dy: f32 = @floatFromInt(y - g.cy);
++            const d = @sqrt(dx * dx + dy * dy) / ryf;
++            var k: f32 = 0;
++            if (d <= 1.0) {
++                k = life * (0.78 - 0.26 * d);
++            } else if (d < 2.4 and self.full_color) {
++                const f = 1.0 - (d - 1.0) / 1.4;
++                k = 0.14 * life * f * f;
++            }
++            if (k < 0.02) continue;
++            const base = self.bgAt(y, band_head);
++            self.put(x, y, ' ', base, self.blend(base, self.accent, k));
++        }
++    }
++}
++
++/// Blood running from the lower rim of the sun down to the grass.
++fn drawBleed(self: *const Terminus, sc: Scene, t_ms: i64, band_head: i32) void {
++    if (!self.full_color) return;
++    const g = self.sunGeometry(sc);
++    const rx: f32 = @floatFromInt(g.ry * 2);
++    const ryf: f32 = @floatFromInt(g.ry);
++
++    var i: i32 = 0;
++    while (i < 7) : (i += 1) {
++        const hv = hash2(i, 77);
++        const frac: f32 = @as(f32, @floatFromInt(hv % 1000)) / 1000.0;
++        const off: i32 = @intFromFloat((frac - 0.5) * 1.7 * rx);
++        const rim = @sqrt(@max(0.0, 1.0 - (@as(f32, @floatFromInt(off)) / rx) * (@as(f32, @floatFromInt(off)) / rx)));
++        const start_y = g.cy + @as(i32, @intFromFloat(@floor(ryf * rim)));
++        const max_len = sc.horizon - 1 - start_y;
++        if (max_len < 2) continue;
++
++        const period: i64 = 9000 + @as(i64, (hv >> 10) % 6000);
++        const u: f32 = @as(f32, @floatFromInt(@mod(t_ms + @as(i64, hv % 4000), period))) / @as(f32, @floatFromInt(period));
++        const grow = @min(u / 0.7, 1.0);
++        const eased = 1.0 - (1.0 - grow) * (1.0 - grow);
++        const len: i32 = @intFromFloat(eased * @as(f32, @floatFromInt(max_len)));
++        const fade: f32 = if (u > 0.85) (1.0 - u) / 0.15 else 1.0;
++
++        const x = g.cx + off;
++        var j: i32 = 0;
++        while (j < len) : (j += 1) {
++            const y = start_y + 1 + j;
++            const fall = @as(f32, @floatFromInt(j)) / @as(f32, @floatFromInt(@max(len, 1)));
++            const k = 0.55 * (1.0 - 0.5 * fall) * fade;
++            const base = self.bgAt(y, band_head);
++            const glyph: u21 = if (j == len - 1 and u < 0.7) 0x2022 else 0x2502;
++            self.put(x, y, glyph, common.mix(base, blood, k), base);
++        }
++    }
++}
++
++/// The sword from the fastfetch logo, planted blade-down in the field.
++fn drawSword(self: *const Terminus, sc: Scene, t_ms: i64, band_head: i32) void {
++    const w: i32 = @intCast(self.terminal_buffer.width);
++    const hilt: i32 = hilt_rows.len;
++    var blade: i32 = blade_letters.len;
++    // Shorten the blade to fit under the top of the screen.
++    while (blade >= 4 and sc.ground_bottom + 1 - (hilt + blade) < 2) blade -= 1;
++    if (blade < 4) return;
++
++    const y0 = sc.ground_bottom + 1 - (hilt + blade);
++    const x0 = @divTrunc(w * 77, 100) - sword_axis;
++    const glint: i32 = @intCast(@divTrunc(@mod(t_ms, 7000), @divTrunc(7000, blade + 4)));
++
++    for (hilt_rows, 0..) |row, ri| {
++        const y = y0 + @as(i32, @intCast(ri));
++        for (row, 0..) |ch, ci| {
++            if (ch == ' ') continue;
++            const gem = ch == 'O' or ch == '@';
++            const c = if (gem) sword_gem else sword_hilt;
++            const base = self.bgAt(y, band_head);
++            self.put(x0 + @as(i32, @intCast(ci)), y, ch, self.blend(base, c, 0.62), base);
++        }
++    }
++
++    var bi: i32 = 0;
++    while (bi < blade) : (bi += 1) {
++        const y = y0 + hilt + bi;
++        const base = self.bgAt(y, band_head);
++        const letter = blade_letters[@intCast(bi)];
++        const glinting = glint == bi;
++        const steel = self.blend(base, sword_steel, if (glinting) 0.95 else 0.55);
++        const lc = self.blend(base, sword_gem, if (glinting) 1.0 else 0.62);
++        const ax = x0 + sword_axis;
++        self.put(ax - 2, y, '|', steel, base);
++        self.put(ax + 2, y, '|', steel, base);
++        self.put(ax, y, letter, lc, base);
++    }
++}
++
++/// Grass, thin at the horizon and dense towards the bottom, swaying in a slow wind.
++fn drawGrass(self: *const Terminus, sc: Scene, t_s: f32, band_head: i32) void {
++    const w: i32 = @intCast(self.terminal_buffer.width);
++    const rows = sc.ground_bottom - sc.horizon + 1;
++    var y = sc.horizon;
++    while (y <= sc.ground_bottom) : (y += 1) {
++        const depth: f32 = @as(f32, @floatFromInt(y - sc.horizon)) / @as(f32, @floatFromInt(@max(rows - 1, 1)));
++        const base = self.bgAt(y, band_head);
++        var x: i32 = 0;
++        while (x < w) : (x += 1) {
++            const hv = hash2(x, y);
++            const chance: u32 = if (y == sc.ground_bottom) 100 else @intFromFloat(28.0 + 62.0 * depth);
++            if (hv % 100 >= chance) continue;
++            const sway = @sin(@as(f32, @floatFromInt(x)) * 0.31 + t_s * 1.2 + @as(f32, @floatFromInt(y)) * 0.5);
++            const glyph: u21 = switch ((hv >> 8) % 8) {
++                0 => '\'',
++                1 => ',',
++                else => if (sway > 0.4) '/' else if (sway < -0.4) '\\' else '|',
++            };
++            const jitter: f32 = @as(f32, @floatFromInt((hv >> 16) % 100)) / 100.0 * 0.12;
++            const k = 0.2 + 0.38 * depth + jitter;
++            self.put(x, y, glyph, self.blend(base, grass_green, k), base);
++        }
++    }
++}
++
++// ---------------------------------------------------------------- draw
++
++fn draw(self: *Terminus) void {
++    if (!self.animate.*) return;
++
++    const now = common.nowMs(self.io);
++    const t_ms = now - self.start_ms;
++    const t_s: f32 = @as(f32, @floatFromInt(@mod(t_ms, 3_600_000))) / 1000.0;
++    const w: i32 = @intCast(self.terminal_buffer.width);
++    const h: i32 = @intCast(self.terminal_buffer.height);
++    if (w < 4 or h < 4) return;
++
++    // Scan band: bright leading row with a fading trail above it.
++    var band_head: i32 = -100;
++    if (self.full_color) {
++        const p = @as(f32, @floatFromInt(@mod(t_ms, band_period_ms))) / @as(f32, @floatFromInt(band_period_ms));
++        band_head = @as(i32, @intFromFloat(p * @as(f32, @floatFromInt(h + @as(i32, band_strength.len))))) - 1;
++        var d: i32 = 0;
++        while (d < band_strength.len) : (d += 1) {
++            const y = band_head - d;
++            if (y < 0 or y >= h) continue;
++            const bg = self.bgAt(y, band_head);
++            var x: i32 = 0;
++            while (x < w) : (x += 1) self.put(x, y, ' ', bg, bg);
++        }
++    }
++
++    const sc = self.scene();
++    if (sc) |s| {
++        self.drawSun(s, t_ms, t_s, band_head);
++        self.drawBleed(s, t_ms, band_head);
++    }
++
++    // Background stars.
++    const wf: f32 = @floatFromInt(w);
++    for (self.stars) |s| {
++        const x: i32 = @intFromFloat(@mod(s.x0 - s.speed * t_s, wf));
++        const y: i32 = s.y;
++        if (sc) |c| {
++            if (y >= c.horizon) continue;
++        }
++        const tw = 0.5 + 0.5 * @sin(s.phase + s.rate * t_s);
++        const level = s.peak * (0.25 + 0.75 * tw);
++        if (!self.full_color and level < 0.55) continue;
++        const col = self.dimmed(common.mix(self.fg, self.accent, 0.3), 0.08 + 0.42 * level);
++        self.put(x, y, s.glyph, col, self.bgAt(y, band_head));
++    }
++
++    if (sc) |s| {
++        self.drawSword(s, t_ms, band_head);
++        self.drawGrass(s, t_s, band_head);
++    }
++
++    self.updateShootingStar(now);
++    self.drawShootingStar(now, band_head);
++    self.drawTicker(now, band_head);
++}
+diff --git a/src/auth.zig b/src/auth.zig
+index 62fd37d..ab7c955 100644
+--- a/src/auth.zig
++++ b/src/auth.zig
+@@ -24,6 +24,8 @@ pub const AuthOptions = struct {
+     x_vt: ?u8,
+     session_pid: std.posix.pid_t,
+     use_kmscon_vt: bool,
++    /// Terminus-Est: presentation-only callback, run once PAM accepted the account.
++    on_accepted: ?*const fn () void,
+ };
+ 
+ var xorg_pid: std.posix.pid_t = 0;
+@@ -96,6 +98,8 @@ pub fn authenticate(allocator: std.mem.Allocator, io: std.Io, log_file: *LogFile
+     status = interop.pam.pam_acct_mgmt(handle, 0);
+     if (status != interop.pam.PAM_SUCCESS) return pamDiagnose(status);
+ 
++    if (options.on_accepted) |on_accepted| on_accepted();
++
+     try log_file.info(io, "auth/pam", "setting credentials", .{});
+     status = interop.pam.pam_setcred(handle, interop.pam.PAM_ESTABLISH_CRED);
+     if (status != interop.pam.PAM_SUCCESS) return pamDiagnose(status);
+diff --git a/src/config/Config.zig b/src/config/Config.zig
+index 2233cb4..48bfa2c 100644
+--- a/src/config/Config.zig
++++ b/src/config/Config.zig
+@@ -2,6 +2,7 @@ const build_options = @import("build_options");
+ 
+ const enums = @import("../enums.zig");
+ const Animation = enums.Animation;
++const PasswordStyle = enums.PasswordStyle;
+ const Input = enums.Input;
+ const ViMode = enums.ViMode;
+ const Bigclock = enums.Bigclock;
+@@ -12,6 +13,7 @@ animation: Animation = .none,
+ animation_frame_delay: u16 = 5,
+ animation_timeout_sec: u12 = 0,
+ asterisk: ?u32 = '*',
++password_style: PasswordStyle = .asterisk,
+ auth_fails: u64 = 10,
+ battery_id: ?[]const u8 = null,
+ auto_login_service: [:0]const u8 = "ly-autologin",
+diff --git a/src/enums.zig b/src/enums.zig
+index 47771da..63b3484 100644
+--- a/src/enums.zig
++++ b/src/enums.zig
+@@ -7,6 +7,12 @@ pub const Animation = enum {
+     colormix,
+     gameoflife,
+     dur_file,
++    terminus,
++};
++
++pub const PasswordStyle = enum {
++    asterisk,
++    constellation,
+ };
+ 
+ pub const DisplayServer = enum {
+diff --git a/src/main.zig b/src/main.zig
+index f9f4a51..01cc107 100644
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -29,6 +29,9 @@ const Doom = @import("animations/Doom.zig");
+ const DurFile = @import("animations/DurFile.zig");
+ const GameOfLife = @import("animations/GameOfLife.zig");
+ const Matrix = @import("animations/Matrix.zig");
++const Terminus = @import("animations/Terminus.zig");
++const Constellation = @import("Constellation.zig");
++const terminus_common = @import("terminus_common.zig");
+ const auth = @import("auth.zig");
+ const InfoLine = @import("components/InfoLine.zig");
+ const Session = @import("components/Session.zig");
+@@ -130,6 +133,68 @@ const UiState = struct {
+ var shutdown = false;
+ var restart = false;
+ 
++// Terminus-Est: constellation password style. The hook below runs in the
++// forked authentication process, right after PAM accepted the account.
++const SuccessHook = struct {
++    state: *UiState,
++    constellation: *Constellation,
++    layers: [][]*Widget,
++};
++var success_hook: ?SuccessHook = null;
++var constellation_ptr: ?*Constellation = null;
++
++fn playSuccess(hook: SuccessHook) void {
++    const io = hook.state.io;
++    const t0 = terminus_common.nowMs(io);
++    hook.constellation.startSuccess(t0);
++    while (terminus_common.nowMs(io) - t0 < Constellation.success_total_ms) {
++        TerminalBuffer.clearScreen(false) catch {};
++        for (hook.layers) |layer| {
++            for (layer) |w| {
++                w.update(hook.state) catch {};
++                w.draw();
++            }
++        }
++        TerminalBuffer.presentBuffer();
++        io.sleep(.fromMilliseconds(30), .awake) catch {};
++    }
++}
++
++/// Presentation only. The animation runs in a throw-away grandchild so that a
++/// crash in it cannot fail the login, and the wait is hard-capped at 1.5 s.
++fn onPasswordAccepted() void {
++    const hook = success_hook orelse return;
++    if (hook.constellation.starCount() == 0) return;
++    const io = hook.state.io;
++
++    const pid = std.posix.system.fork();
++    if (pid < 0) return;
++    if (pid == 0) {
++        playSuccess(hook);
++        std.c._exit(0);
++    }
++
++    const deadline = terminus_common.nowMs(io) + 1500;
++    var status: c_int = 0;
++    while (true) {
++        const r = std.posix.system.waitpid(pid, &status, std.posix.W.NOHANG);
++        if (r != 0) {
++            if (r < 0 and std.posix.errno(r) == .INTR) continue;
++            return;
++        }
++        if (terminus_common.nowMs(io) >= deadline) {
++            _ = std.c.kill(pid, std.posix.SIG.KILL);
++            while (true) {
++                const rr = std.posix.system.waitpid(pid, &status, 0);
++                if (rr < 0 and std.posix.errno(rr) == .INTR) continue;
++                break;
++            }
++            return;
++        }
++        io.sleep(.fromMilliseconds(10), .awake) catch {};
++    }
++}
++
+ pub fn main(init: std.process.Init) !void {
+     var shutdown_cmd: []const u8 = undefined;
+     var restart_cmd: []const u8 = undefined;
+@@ -1003,6 +1068,7 @@ pub fn main(init: std.process.Init) !void {
+ 
+     // Initialize the animation, if any
+     var animation: ?*Widget = null;
++    var terminus_anim: Terminus = undefined;
+     switch (state.config.animation) {
+         .none => {},
+         .doom => {
+@@ -1077,6 +1143,20 @@ pub fn main(init: std.process.Init) !void {
+             );
+             animation = dur.widget();
+         },
++        .terminus => {
++            terminus_anim = try Terminus.init(
++                state.allocator,
++                state.io,
++                &state.buffer,
++                state.config.fg,
++                state.config.border_fg,
++                state.config.full_color,
++                &state.animate,
++                state.config.animation_timeout_sec,
++                state.config.animation_frame_delay,
++            );
++            animation = terminus_anim.widget();
++        },
+     }
+     defer if (animation) |a| a.deinit();
+ 
+@@ -1127,11 +1207,37 @@ pub fn main(init: std.process.Init) !void {
+     var widgets: std.ArrayList([]*Widget) = .empty;
+     defer widgets.deinit(state.allocator);
+ 
+-    // Layer 1
++    // Layer 1 (background animation, then the constellation above it)
++    var layer1_buf: [2]*Widget = undefined;
++    var layer1_len: usize = 0;
++    var constellation: Constellation = undefined;
+     if (animation) |a| {
+-        var layer1 = [_]*Widget{a};
+-        try widgets.append(state.allocator, &layer1);
++        layer1_buf[layer1_len] = a;
++        layer1_len += 1;
++    }
++    if (state.config.password_style == .constellation) {
++        var cseed: u64 = undefined;
++        state.io.random(std.mem.asBytes(&cseed));
++        constellation = Constellation.init(
++            state.io,
++            &state.buffer,
++            state.password,
++            &state.box,
++            .{
++                .fg = state.config.fg,
++                .bg = state.config.bg,
++                .accent = state.config.border_fg,
++                .err = state.config.error_fg,
++                .full_color = state.config.full_color,
++            },
++            state.config.animation == .terminus,
++            cseed,
++        );
++        layer1_buf[layer1_len] = constellation.widget();
++        layer1_len += 1;
++        constellation_ptr = &constellation;
+     }
++    if (layer1_len > 0) try widgets.append(state.allocator, layer1_buf[0..layer1_len]);
+ 
+     // Layer 2
+     var layer2: std.ArrayList(*Widget) = .empty;
+@@ -1296,6 +1402,10 @@ pub fn main(init: std.process.Init) !void {
+         );
+     }
+ 
++    if (state.config.password_style == .constellation) {
++        success_hook = .{ .state = &state, .constellation = &constellation, .layers = widgets.items };
++    }
++
+     if (state.is_autologin) _ = try authenticate(&state);
+ 
+     const active_widget = switch (default_input) {
+@@ -1411,7 +1521,6 @@ fn viMoveCursorDown(ptr: *anyopaque) !bool {
+ 
+ fn togglePasswordMask(ptr: *anyopaque) !bool {
+     var state: *UiState = @ptrCast(@alignCast(ptr));
+-
+     state.password.toggleMask();
+     state.buffer.drawNextFrame(true);
+     return false;
+@@ -1554,6 +1663,7 @@ fn authenticate(ptr: *anyopaque) !bool {
+                 .x_vt = state.config.x_vt,
+                 .session_pid = session_pid,
+                 .use_kmscon_vt = state.use_kmscon_vt,
++                .on_accepted = if (state.config.password_style == .constellation) &onPasswordAccepted else null,
+             };
+ 
+             // Signal action to give up control on the TTY
+@@ -1614,7 +1724,9 @@ fn authenticate(ptr: *anyopaque) !bool {
+             .{@errorName(err)},
+         );
+ 
+-        if (state.config.clear_password or err != error.PamAuthError) state.password.clear();
++        const will_clear = state.config.clear_password or err != error.PamAuthError;
++        if (constellation_ptr) |c| c.fail(will_clear);
++        if (will_clear) state.password.clear();
+     } else {
+         if (state.config.logout_cmd) |logout_cmd| execute_cmd: {
+             var process = std.process.spawn(state.io, .{
+diff --git a/src/terminus_common.zig b/src/terminus_common.zig
+new file mode 100644
+index 0000000..2c385de
+--- /dev/null
++++ b/src/terminus_common.zig
+@@ -0,0 +1,35 @@
++// Shared helpers for the Terminus-Est presentation additions
++// (password constellation and the "terminus" background animation).
++const std = @import("std");
++
++/// Monotonic milliseconds. Presentation timing only, never used for security decisions.
++pub fn nowMs(io: std.Io) i64 {
++    return std.Io.Timestamp.now(io, .awake).toMilliseconds();
++}
++
++/// Blend `a` towards `b` by `t` (0..1) in 24-bit RGB. Style bits are dropped.
++pub fn mix(a: u32, b: u32, t: f32) u32 {
++    const tt = std.math.clamp(t, 0.0, 1.0);
++    var out: u32 = 0;
++    inline for ([_]u5{ 16, 8, 0 }) |shift| {
++        const ca: f32 = @floatFromInt((a >> shift) & 0xFF);
++        const cb: f32 = @floatFromInt((b >> shift) & 0xFF);
++        const c: u32 = @intFromFloat(@round(ca + (cb - ca) * tt));
++        out |= (c & 0xFF) << shift;
++    }
++    return out;
++}
++
++/// Colour of `color` at intensity `t` over `bg`. Without truecolor there is no
++/// way to dim, so the plain colour is returned.
++pub fn shade(full_color: bool, bg: u32, color: u32, t: f32) u32 {
++    if (!full_color) return color & 0x00FFFFFF;
++    return mix(bg, color, t);
++}
++
++/// Number of rows the "terminus" boot-log ticker occupies at the bottom of the
++/// screen (above the very last row). The constellation keeps clear of them.
++pub fn tickerRows(height: usize) usize {
++    if (height < 14) return 0;
++    return @min(6, height / 8);
++}

@@ -1,0 +1,11 @@
+#!/bin/bash
+
+# terminus:summary=Log out after closing application windows
+# terminus:examples=terminus logout | terminus system logout
+# terminus:aliases=terminus logout
+
+nohup bash -c "sleep 2 && uwsm stop" >/dev/null 2>&1 &
+
+# Now close all windows
+terminus-hyprland-window-close-all
+sleep 1 # Allow apps like Chrome to shutdown correctly

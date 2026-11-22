@@ -1,0 +1,17 @@
+[Unit]
+Description=Terminus-Est compositor-acknowledged secure laptop lock
+Documentation=man:hyprlock(1)
+Requisite=graphical-session.target
+BindsTo=graphical-session.target
+After=graphical-session.target
+RefuseManualStop=yes
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=%h/Projects/Terminus-Est/bin/terminus-lock --supervise
+TimeoutStartSec=40
+TimeoutStopSec=5
+KillMode=control-group
+Restart=no
+UMask=0077

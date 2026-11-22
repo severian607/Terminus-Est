@@ -1,0 +1,9 @@
+label = "Vocal remover"
+emoji = "🚫"
+category = "Stereo"
+tags = ["karaoke", "instrumental", "vocals", "remove"]
+description = "Turns the centre-panned mid channel (usually the lead vocal) all the way down."
+order = 50
+
+[stereo]
+middle_level = -36

@@ -1,0 +1,19 @@
+label = "Warm"
+emoji = "☕"
+category = "Tone"
+tags = ["warm", "soft", "smooth"]
+description = "Fuller lows, softer highs."
+order = 40
+headroom_db = -3
+
+[[band]]
+type = "lowshelf"
+freq = 200
+q = 0.7
+gain = 3
+
+[[band]]
+type = "highshelf"
+freq = 7000
+q = 0.7
+gain = -3

@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+# Bring a machine in line with the laptop's light/dark setup. Run after `git pull`; safe to run twice.
+#
+# Applies what lives outside this repository: Zed (dark/light themes, Modus extension, font weight, Catppuccin
+# syntax colours for the dark theme), the Obsidian light palette, the Ghostty light include and the Skwd scheme
+# check. Everything it rewrites is copied first to ~/Backups/<D.M.YY>/light-mode-install/.
+# The Super+Ctrl+L binding, the toggle script, the bar palette and the Strata skin come with the repository.
+import datetime
+import json
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+HOME = Path.home()
+ROOT = Path(__file__).resolve().parents[1]
+BACKUP = HOME / 'Backups' / datetime.date.today().strftime('%-d.%-m.%y') / 'light-mode-install'
+
+
+def backup(path: Path) -> None:
+    target = BACKUP / str(path).lstrip('/')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        shutil.copy2(path, target)
+
+
+def say(step: str, message: str) -> None:
+    print('%-9s %s' % (step, message))
+
+
+def zed() -> None:
+    settings = HOME / '.config/zed/settings.json'
+    if not settings.is_file():
+        return say('zed', 'no settings.json, skipped')
+    text = settings.read_text()
+    original = text
+    match = re.search(r'"theme":\s*"([^"]+)"', text)
+    dark = match.group(1) if match else None
+    if match:
+        text = text.replace(match.group(0), '"theme": {"mode": "dark", "dark": "%s", "light": "Modus Operandi Tinted"}' % dark, 1)
+    elif not re.search(r'"theme":\s*\{', text):
+        return say('zed', 'theme setting not recognised, skipped')
+    else:
+        dark = (re.search(r'"theme":\s*\{[^}]*"dark":\s*"([^"]+)"', text) or [None, None])[1]
+    text = re.sub(r'"buffer_font_weight":\s*\d+', '"buffer_font_weight": 500', text, count=1)
+    block = re.search(r'"auto_install_extensions":\s*\{([^}]*)\}', text)
+    if not block:
+        # No block yet: add one after the opening brace so Zed installs the themes on its next start.
+        text = text.replace('{', '{\n  "auto_install_extensions": {"modus-themes": true, "solarized": true},', 1)
+    else:
+        body = block.group(1)
+        for name in ('solarized', 'modus-themes'):
+            if '"%s"' % name not in body:
+                body = body.rstrip() + (',' if body.strip() and not body.rstrip().endswith(',') else '') + '\n    "%s": true' % name
+        text = text.replace(block.group(0), '"auto_install_extensions": {%s\n  }' % body.rstrip().rstrip('\n'), 1) if body != block.group(1) else text
+    if text != original:
+        backup(settings)
+        settings.write_text(text)
+        say('zed', 'settings: dark/light themes, weight 500, Modus + Solarized extensions (install on next Zed start)')
+    else:
+        say('zed', 'settings already set')
+    # Catppuccin Mocha syntax colours for the dark theme file, when it is a plain local file.
+    syntax = json.loads((ROOT / 'config/light-mode/zed-dark-syntax.json').read_text())
+    for theme_file in (HOME / '.config/zed/themes').glob('*.json'):
+        if theme_file.is_symlink():
+            continue
+        data = json.loads(theme_file.read_text())
+        for theme in data.get('themes', []):
+            if theme.get('name') == dark and theme.get('appearance') == 'dark':
+                if theme['style'].get('syntax') == syntax:
+                    return say('zed', 'dark syntax colours already set')
+                backup(theme_file)
+                theme['style']['syntax'] = syntax
+                theme_file.write_text(json.dumps(data, indent=2) + '\n')
+                return say('zed', 'dark theme "%s": Catppuccin Mocha syntax colours' % dark)
+    say('zed', 'dark theme "%s" is not a local theme file; its syntax colours were left alone' % dark)
+
+
+OBSIDIAN_LIGHT = {
+    '#f8f8f8': '#fbf7f0', '#f0efea': '#efe9dd', 'rgb(31 31 29 / 0.04)': 'rgb(0 0 0 / 0.04)', '#e7e7e2': '#efe9dd',
+    '--ep-text: #1f1f1d': '--ep-text: #000000', '--ep-text-bright: #0f0f0e': '--ep-text-bright: #000000',
+    '#66655f': '#595959', '--ep-text-faint: #bdbbb3': '--ep-text-faint: #c4bab1',
+    '--ep-accent: #5b3cc4': '--ep-accent: #0031a9', '91 60 196': '0 49 169', '91, 60, 196': '0, 49, 169',
+    '#7a5fd0': '#193668', 'rgb(226 180 60 / 0.38)': 'rgb(240 220 150 / 0.55)',
+    '--ep-border: #dcdbd5': '--ep-border: #d0c6bc', '--ep-border-strong: #bdbbb3': '--ep-border-strong: #9f9690',
+    'rgb(31 31 29 / 0.06)': 'rgb(0 0 0 / 0.06)',
+}
+
+
+def obsidian() -> None:
+    try:
+        vaults = json.loads((HOME / '.config/obsidian/obsidian.json').read_text())['vaults'].values()
+    except (OSError, ValueError, KeyError):
+        return say('obsidian', 'no Obsidian config, skipped')
+    done = False
+    for vault in vaults:
+        css = Path(vault['path']) / '.obsidian/snippets/editor-polish.css'
+        if not css.is_file():
+            continue
+        text = css.read_text()
+        start = text.find('body.theme-light {\n  --ep-bg:')
+        end = text.find('/* Inter when installed', start)
+        if start < 0 or end < 0:
+            say('obsidian', '%s: light block not found, skipped' % css)
+            continue
+        block = text[start:end]
+        if '#fbf7f0' in block:
+            say('obsidian', '%s: already Modus light' % css.parent.parent.parent.name)
+            done = True
+            continue
+        for old, new in OBSIDIAN_LIGHT.items():
+            block = block.replace(old, new)
+        text = text[:start] + block + text[end:]
+        text = text.replace('--nav-item-background-active: #fbfbfa;', '--nav-item-background-active: #fbf7f0;')
+        text = text.replace('--nav-item-background-selected: #fbfbfa;', '--nav-item-background-selected: #fbf7f0;')
+        backup(css)
+        css.write_text(text)
+        say('obsidian', '%s: light palette is Modus Operandi Tinted' % css.parent.parent.parent.name)
+        done = True
+    if not done:
+        say('obsidian', 'no vault with editor-polish.css, skipped')
+
+
+def ghostty() -> None:
+    config = HOME / '.config/ghostty/config'
+    include = 'config-file = ?"~/.config/terminus-est/generated/ghostty-mode.conf"'
+    mode = HOME / '.config/terminus-est/generated/ghostty-mode.conf'
+    mode.parent.mkdir(parents=True, exist_ok=True)
+    if not mode.exists():
+        mode.write_text('# Written by terminus-theme-toggle; empty in dark mode.\n')
+    if not config.is_file():
+        return say('ghostty', 'no Ghostty config, skipped')
+    text = config.read_text()
+    if include in text:
+        return say('ghostty', 'include already present')
+    backup(config)
+    config.write_text(text.rstrip('\n') + '\n\n# Light mode colours, written by terminus-theme-toggle (last include wins)\n' + include + '\n')
+    say('ghostty', 'light-mode include added')
+
+
+def wallpapers() -> None:
+    folder = HOME / 'Pictures/Wallpapers/Light mode'
+    count = len([p for p in folder.glob('*') if p.is_file()]) if folder.is_dir() else 0
+    if count:
+        say('wallpaper', '%d wallpapers in "Light mode"' % count)
+    else:
+        say('wallpaper', 'NO "Light mode" wallpapers at %s; light mode will keep the current wallpaper' % folder)
+
+
+def palette() -> None:
+    script = ROOT / 'tools/terminus-skwd-palette'
+    if (HOME / '.cache/skwd-wall-v2/scheme.json').is_file():
+        result = subprocess.run([sys.executable, str(script)], capture_output=True, text=True)
+        say('palette', 'bar palette regenerated' if result.returncode == 0 else 'palette sync failed: ' + result.stderr.strip())
+    else:
+        say('palette', 'no Skwd scheme yet; the palette is built on the next wallpaper change')
+
+
+if __name__ == '__main__':
+    for step in (zed, obsidian, ghostty, wallpapers, palette):
+        try:
+            step()
+        except (OSError, ValueError, KeyError) as error:
+            say(step.__name__, 'failed: %r' % error)
+    print('\nBackups: %s\nRestart Zed once so it installs the Modus extension. Toggle with Super+Ctrl+L.' % BACKUP)

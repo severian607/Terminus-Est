@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <filter id="paint" x="-30%" y="-30%" width="160%" height="160%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.035" numOctaves="3" seed="4" result="n"/>
+      <feDisplacementMap in="SourceGraphic" in2="n" scale="4" result="d"/>
+      <feTurbulence type="fractalNoise" baseFrequency="0.6" numOctaves="2" seed="9" result="g"/>
+      <feColorMatrix in="g" type="matrix"
+        values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -1.1 1.3" result="ga"/>
+      <feComposite in="d" in2="ga" operator="in"/>
+    </filter>
+    <filter id="wash" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3"/>
+    </filter>
+    <filter id="soft" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="1.6"/>
+    </filter>
+    <!-- the runes' glow: region in the sword's units, so nothing is clipped -->
+    <filter id="runeglow" filterUnits="userSpaceOnUse" x="-14" y="0" width="28" height="76">
+      <feGaussianBlur stdDeviation="1.3"/>
+    </filter>
+  </defs>
+
+  <g transform="translate(11,11) rotate(-45)">
+    <!-- dark wash for contrast on bright wallpapers -->
+    <g filter="url(#wash)" opacity="0.75" fill="#0b0b0b">
+      <rect x="-8" y="-2" width="16" height="74"/>
+      <rect x="-19" y="68" width="38" height="10"/>
+      <rect x="-5" y="76" width="10" height="22"/>
+      <circle cx="0" cy="101" r="8"/>
+    </g>
+    <!-- accent bleed around the blade -->
+    <rect x="-10" y="6" width="20" height="60" filter="url(#wash)" fill="{{ACC}}" opacity="0.2"/>
+
+    <g filter="url(#paint)">
+      <!-- blade -->
+      <rect x="-6" y="0" width="12" height="70" fill="#d3d9e1" opacity="0.92"/>
+      <rect x="-6" y="0" width="12" height="70" fill="none" stroke="#77818e" stroke-width="1.3" opacity="0.75"/>
+      <rect x="-6" y="0" width="12" height="2.5" fill="#77818e" opacity="0.55"/>
+      <rect x="-6" y="58" width="12" height="12" fill="#8e97a5" opacity="0.4"/>
+      <rect x="-3.4" y="5" width="6.8" height="62" fill="#9aa3b0" opacity="0.5"/>
+      <line x1="-4.8" y1="3" x2="-4.8" y2="68" stroke="#ffffff" stroke-width="0.8" opacity="0.55"/>
+      <!-- guard -->
+      <rect x="-17" y="70" width="34" height="6" rx="3" fill="{{ACC}}" opacity="0.9"/>
+      <rect x="-17" y="73" width="34" height="3" rx="1.5" fill="#0b0b0b" opacity="0.25"/>
+      <!-- grip -->
+      <rect x="-4" y="76" width="8" height="20" fill="{{GRIP}}" opacity="0.97"/>
+      <rect x="-4" y="76" width="8" height="20" fill="none" stroke="{{ACC}}" stroke-width="0.7" opacity="0.45"/>
+      <line x1="-4" y1="80" x2="4" y2="83" stroke="{{ACC}}" stroke-width="1" opacity="0.6"/>
+      <line x1="-4" y1="86" x2="4" y2="89" stroke="{{ACC}}" stroke-width="1" opacity="0.6"/>
+      <line x1="-4" y1="92" x2="4" y2="95" stroke="{{ACC}}" stroke-width="1" opacity="0.6"/>
+      <!-- opal pommel -->
+      <circle cx="0" cy="101" r="6" fill="{{OPAL}}" opacity="0.95"/>
+      <circle cx="0" cy="101" r="6" fill="none" stroke="#8a8480" stroke-width="1" opacity="0.6"/>
+    </g>
+
+    <!-- STATE LAYER A goes here (pointer only) -->
+
+    <!-- runes: not filtered, so they stay crisp -->
+    <g fill="none" stroke-width="0.95" stroke-linecap="round" stroke-linejoin="round">
+      <path transform="translate(0,9.0)"  stroke="{{RUNE_0}}" d="M0,0 L0,5 M0,0 L2,1.5 L0,3"/>
+      <path transform="translate(0,17.2)" stroke="{{RUNE_1}}" d="M-2,0 L2,5 M2,0 L-2,5"/>
+      <path transform="translate(0,25.4)" stroke="{{RUNE_2}}" d="M0,0 L0,5 M-2,1.5 L0,0 L2,1.5"/>
+      <path transform="translate(0,33.6)" stroke="{{RUNE_3}}" d="M-2,0 L-2,5 M-2,0 L2,2.5 L-2,5"/>
+      <path transform="translate(0,41.8)" stroke="{{RUNE_4}}" d="M-2,5 L0,0 L2,5"/>
+      <path transform="translate(0,50.0)" stroke="{{RUNE_5}}" d="M-2,0 L-2,5 M2,0 L2,5 M-2,1 L2,4"/>
+      <path transform="translate(0,58.2)" stroke="{{RUNE_6}}" d="M0,0 L0,5 M-2,3.5 L0,2 L2,3.5"/>
+    </g>
+
+    <!-- STATE LAYER B goes here (default glint / pointer bloom) -->
+  </g>
+</svg>

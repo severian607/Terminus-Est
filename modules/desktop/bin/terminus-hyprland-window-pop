@@ -1,0 +1,42 @@
+#!/bin/bash
+
+# terminus:summary=Toggle to pop-out a tile to stay fixed on a display basis.
+# terminus:args=[width height x y]
+
+width=${1:-1300}
+height=${2:-900}
+x=${3:-}
+y=${4:-}
+
+if [[ ! $width =~ ^[0-9]+$ || ! $height =~ ^[0-9]+$ ]]; then
+  echo "Width and height must be positive integers" >&2
+  exit 2
+fi
+if [[ -n $x && ! $x =~ ^-?[0-9]+$ ]] || [[ -n $y && ! $y =~ ^-?[0-9]+$ ]]; then
+  echo "X and Y must be integers" >&2
+  exit 2
+fi
+
+active=$(hyprctl activewindow -j)
+pinned=$(echo "$active" | jq ".pinned")
+addr=$(echo "$active" | jq -r ".address")
+window="address:$addr"
+
+if [[ $pinned == "true" ]]; then
+  hyprctl -q dispatch "hl.dsp.window.pin({ action = \"toggle\", window = \"$window\" })"
+  hyprctl -q dispatch "hl.dsp.window.float({ action = \"toggle\", window = \"$window\" })"
+  hyprctl -q dispatch "hl.dsp.window.tag({ tag = \"-pop\", window = \"$window\" })"
+elif [[ -n $addr ]]; then
+  hyprctl -q dispatch "hl.dsp.window.float({ action = \"toggle\", window = \"$window\" })"
+  hyprctl -q dispatch "hl.dsp.window.resize({ x = $width, y = $height, window = \"$window\" })"
+
+  if [[ -n $x && -n $y ]]; then
+    hyprctl -q dispatch "hl.dsp.window.move({ x = $x, y = $y, window = \"$window\" })"
+  else
+    hyprctl -q dispatch "hl.dsp.window.center({ window = \"$window\" })"
+  fi
+
+  hyprctl -q dispatch "hl.dsp.window.pin({ action = \"toggle\", window = \"$window\" })"
+  hyprctl -q dispatch "hl.dsp.window.alter_zorder({ mode = \"top\", window = \"$window\" })"
+  hyprctl -q dispatch "hl.dsp.window.tag({ tag = \"+pop\", window = \"$window\" })"
+fi

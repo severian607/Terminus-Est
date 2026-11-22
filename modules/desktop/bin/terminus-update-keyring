@@ -1,0 +1,7 @@
+#!/bin/bash
+
+# terminus:summary=Refresh the Arch Linux package signing keyring
+# terminus:requires-sudo=true
+
+set -e
+sudo pacman -Sy --needed --noconfirm archlinux-keyring

@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Screen shader effects: terminus-screenfx <name> | set|toggle|remove NAME... | off | list | status | check."""
+
+import json
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+import screenfx  # noqa: E402
+
+USAGE = """usage: terminus-screenfx NAME               toggle one effect exclusively (hotkey form)
+       terminus-screenfx set NAME...        replace the stack
+       terminus-screenfx toggle NAME        add or remove an effect in the stack
+       terminus-screenfx remove NAME        remove an effect from the stack
+       terminus-screenfx off | clear        remove all effects
+       terminus-screenfx list [--json]      list effects
+       terminus-screenfx status [--json]    show the active stack
+       terminus-screenfx check [NAME...]    validate effect shaders with glslangValidator"""
+
+
+def table(data):
+    for cat in data["categories"]:
+        rows = [e for e in data["effects"] if e["category"] == cat]
+        if not rows:
+            continue
+        print(cat)
+        for e in rows:
+            mark = "*" if e["active"] else " "
+            note = " (shadowed)" if e["shadowed"] else ""
+            print(f" {mark} {e['name']:<14} {e['emoji']} {e['label']:<22} {e['description']}{note}")
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(USAGE, file=sys.stderr if not argv else sys.stdout)
+        return 2 if not argv else 0
+    cmd, args = argv[0], argv[1:]
+    js = "--json" in args
+    args = [a for a in args if a != "--json"]
+    try:
+        effects = screenfx.load_effects()
+        if cmd == "list":
+            data = screenfx.list_effects(effects)
+            if js:
+                print(json.dumps(data, ensure_ascii=False))
+            else:
+                table(data)
+        elif cmd == "status":
+            data = screenfx.status(effects)
+            if js:
+                print(json.dumps(data))
+            else:
+                print("active: " + (", ".join(data["active"]) or "none"))
+                if data["shadowed"]:
+                    print("shadowed: " + ", ".join(data["shadowed"]))
+                print("damage tracking: " + ("off" if data["damage_tracking_off"] else "on"))
+        elif cmd == "check":
+            ok, msgs = screenfx.check(args, effects)
+            print("\n".join(msgs))
+            return 0 if ok else 1
+        elif cmd in ("off", "clear"):
+            screenfx.apply([], effects)
+        elif cmd in ("set", "toggle", "remove"):
+            if not args and cmd != "set":
+                print(USAGE, file=sys.stderr)
+                return 2
+            screenfx.apply(screenfx.build_stack(screenfx.read_stack(effects), args, effects, cmd), effects)
+        else:  # legacy hotkey form: terminus-screenfx NAME
+            if args:
+                print(USAGE, file=sys.stderr)
+                return 2
+            screenfx.known([cmd], effects)
+            screenfx.apply([] if screenfx.read_stack(effects) == [cmd] else [cmd], effects)
+    except screenfx.FxError as err:
+        print(f"terminus-screenfx: {err}", file=sys.stderr)
+        return 2
+    return 0
+
+
+sys.exit(main(sys.argv[1:]))

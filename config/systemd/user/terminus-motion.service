@@ -1,0 +1,15 @@
+[Unit]
+Description=Standalone motion picker (window animations, window effects, cursors)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=local.terminus.Motion
+ExecStart=/usr/bin/python3 %h/Projects/Terminus-Est/lib/shader_panel.py motion
+Restart=on-failure
+RestartSec=1
+TimeoutStopSec=5
+
+[Install]
+WantedBy=graphical-session.target

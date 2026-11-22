@@ -1,0 +1,332 @@
+# Terminus-Bar style preset 'deck': an instrument deck. A slim top bar (launcher, ¹ws, clock,
+# media/weather) and a slim bottom status bar of numbered, captioned boxes (²sys graphs and gauges,
+# ³net, ⁴snd). Apply with: terminus-bar-style set deck
+
+[bar]
+order = ["default", "status"]
+
+[bar.default]
+position = "top"
+thickness = 28
+background_opacity = 1.0
+border_width = 0.0
+radius = 0
+radius_top_left = 0
+radius_top_right = 0
+radius_bottom_left = 0
+radius_bottom_right = 0
+concave_edge_corners = false
+margin_ends = 0
+margin_edge = 0
+padding = 8
+widget_spacing = 8
+shadow = false
+reserve_space = true
+hover_highlight = false
+font_weight = 500
+color = "on_surface"
+icon_color = "on_surface_variant"
+capsule = false
+capsule_fill = "surface"
+capsule_foreground = "on_surface"
+capsule_radius = 0.0
+capsule_padding = 8.0
+capsule_opacity = 1.0
+capsule_border = "outline"
+capsule_border_width = 1.0
+capsule_thickness = 0.8
+start = ["launcher-deck", "group:g-ws", "clipboard-shortcut"]
+center = ["clock"]
+end = ["group:g-info"]
+
+    [bar.default.monitor.HDMI-A-1]
+    enabled = false
+
+[[bar.default.capsule_group]]
+id = "g-ws"
+members = ["cap-ws", "workspaces"]
+fill = "surface"
+border = "outline"
+border_width = 1.0
+padding = 8.0
+radius = 0.0
+opacity = 1.0
+widget_spacing = 8
+
+[[bar.default.capsule_group]]
+id = "g-info"
+members = ["cap-info", "weather", "media", "audio-visualizer", "tray"]
+fill = "surface"
+border = "outline"
+border_width = 1.0
+padding = 8.0
+radius = 0.0
+opacity = 1.0
+widget_spacing = 10
+
+[bar.status]
+position = "bottom"
+thickness = 30
+background_opacity = 1.0
+border_width = 0.0
+radius = 0
+radius_top_left = 0
+radius_top_right = 0
+radius_bottom_left = 0
+radius_bottom_right = 0
+concave_edge_corners = false
+margin_ends = 0
+margin_edge = 0
+padding = 8
+widget_spacing = 8
+shadow = false
+reserve_space = true
+hover_highlight = false
+font_weight = 500
+color = "on_surface"
+icon_color = "on_surface_variant"
+capsule = false
+capsule_fill = "surface"
+capsule_radius = 0.0
+capsule_padding = 8.0
+capsule_border = "outline"
+capsule_border_width = 1.0
+capsule_thickness = 0.8
+start = ["group:g-sys", "group:g-net"]
+center = []
+end = ["group:g-snd"]
+
+    [bar.status.monitor.HDMI-A-1]
+    enabled = false
+
+[[bar.status.capsule_group]]
+id = "g-sys"
+members = ["cap-sys", "cpu", "cpu-graph", "ram", "ram-graph", "gpu", "gpu-gauge", "cat"]
+fill = "surface"
+border = "outline"
+border_width = 1.0
+padding = 8.0
+radius = 0.0
+opacity = 1.0
+widget_spacing = 10
+
+[[bar.status.capsule_group]]
+id = "g-net"
+members = ["cap-net", "rx", "rx-graph", "tx"]
+fill = "surface"
+border = "outline"
+border_width = 1.0
+padding = 8.0
+radius = 0.0
+opacity = 1.0
+widget_spacing = 10
+
+[[bar.status.capsule_group]]
+id = "g-snd"
+members = ["cap-snd", "bluetooth", "volume", "brightness"]
+fill = "surface"
+border = "outline"
+border_width = 1.0
+padding = 8.0
+radius = 0.0
+opacity = 1.0
+widget_spacing = 10
+
+[widget.cap-ws]
+type = "text"
+text = "¹ws"
+color = "on_surface_variant"
+
+[widget.cap-info]
+type = "text"
+text = "²env"
+color = "on_surface_variant"
+
+[widget.cap-sys]
+type = "text"
+text = "³sys"
+color = "on_surface_variant"
+
+[widget.cap-net]
+type = "text"
+text = "⁴net"
+color = "on_surface_variant"
+
+[widget.cap-snd]
+type = "text"
+text = "⁵snd"
+color = "on_surface_variant"
+
+[widget.launcher-deck]
+type = "custom_button"
+glyph = ""
+label = "terminus-est"
+tooltip = "Launcher"
+capsule = true
+capsule_fill = "primary"
+capsule_border = "primary"
+color = "surface"
+capsule_padding = 12.0
+
+    [widget.launcher-deck.actions]
+    left = "exec terminus-launcher toggle"
+
+[widget.workspaces]
+style = "regular"
+label_source = "id"
+show_labels = true
+focused_color = "primary"
+occupied_color = "surface"
+empty_color = "surface"
+change_color_on_hover = false
+active_pill_size = 1.4
+inactive_pill_size = 1.4
+pill_scale = 0.9
+
+[widget.clipboard-shortcut]
+type = "custom_button"
+glyph = ""
+label = "[ clipboard ]"
+tooltip = "Open clipboard history"
+color = "on_surface_variant"
+
+    [widget.clipboard-shortcut.actions]
+    left = "exec terminus-bar msg panel-toggle clipboard"
+
+[widget.clock]
+format = "[ {:%a %d %b}  {:%H:%M} ]"
+tooltip_format = "{:%A, %d %B %Y}"
+color = "primary"
+
+[widget.weather]
+color = "on_surface"
+icon_color = "on_surface_variant"
+max_length = 80
+show_condition = false
+show_temperature = true
+
+[widget.media]
+color = "on_surface"
+icon_color = "on_surface_variant"
+
+[widget.audio-visualizer]
+type = "audio_visualizer"
+centered = true
+mirrored = false
+show_when_idle = false
+color_1 = "on_surface_variant"
+color_2 = "primary"
+
+[widget.tray]
+color = "on_surface_variant"
+
+[widget.cpu]
+type = "sysmon"
+highlight_color = "primary"
+stat = "cpu_usage"
+visualization = "none"
+show_glyph = false
+custom_label = "cpu"
+label_min_width = 28.0
+color = "on_surface"
+
+[widget.cpu-graph]
+type = "sysmon"
+highlight_color = "primary"
+stat = "cpu_usage"
+visualization = "graph"
+show_value = false
+show_glyph = false
+color = "primary"
+
+[widget.ram]
+type = "sysmon"
+highlight_color = "primary"
+stat = "ram_used"
+visualization = "none"
+show_glyph = false
+custom_label = "mem"
+label_min_width = 52.0
+color = "on_surface"
+
+[widget.ram-graph]
+type = "sysmon"
+highlight_color = "primary"
+stat = "ram_pct"
+visualization = "graph"
+show_value = false
+show_glyph = false
+color = "primary"
+
+[widget.gpu]
+type = "sysmon"
+highlight_color = "primary"
+stat = "gpu_usage"
+visualization = "none"
+show_glyph = false
+custom_label = "gpu"
+label_min_width = 28.0
+color = "on_surface"
+
+[widget.gpu-gauge]
+type = "sysmon"
+highlight_color = "primary"
+stat = "gpu_usage"
+visualization = "gauge"
+show_value = false
+show_glyph = false
+color = "primary"
+
+[widget.cat]
+type = "dotnetrob/cat:cat"
+cat_color = "primary"
+cat_color_mode = "custom"
+show_cpu_percent = true
+
+[widget.rx]
+type = "sysmon"
+highlight_color = "primary"
+stat = "net_rx"
+visualization = "none"
+show_glyph = false
+custom_label = "rx"
+network_speed_compact = true
+network_speed_unit = "mb"
+label_min_width = 36.0
+color = "on_surface"
+
+[widget.rx-graph]
+type = "sysmon"
+highlight_color = "primary"
+stat = "net_rx"
+visualization = "graph"
+show_value = false
+show_glyph = false
+network_speed_unit = "mb"
+color = "primary"
+
+[widget.tx]
+type = "sysmon"
+highlight_color = "primary"
+stat = "net_tx"
+visualization = "none"
+show_glyph = false
+custom_label = "tx"
+network_speed_compact = true
+network_speed_unit = "mb"
+label_min_width = 36.0
+color = "on_surface"
+
+[widget.bluetooth]
+color = "on_surface"
+icon_color = "on_surface_variant"
+
+[widget.volume]
+color = "on_surface"
+icon_color = "on_surface_variant"
+mute_color = "error"
+
+[widget.brightness]
+color = "on_surface"
+icon_color = "on_surface_variant"
+show_when_unavailable = true

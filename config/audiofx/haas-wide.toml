@@ -1,0 +1,18 @@
+label = "Haas widener"
+emoji = "📐"
+category = "Space"
+tags = ["haas", "wide", "delay", "stereo", "precedence"]
+description = "Delays the right channel 16 ms for a wide, open image."
+order = 90
+headroom_db = -2
+
+[[plugin]]
+type = "delay"
+mode-l = "Time"
+mode-r = "Time"
+time-l = 0.0
+time-r = 16.0
+dry-l = 0.0
+dry-r = -80.01
+wet-l = -80.01
+wet-r = 0.0

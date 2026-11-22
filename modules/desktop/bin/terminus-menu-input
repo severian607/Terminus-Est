@@ -1,0 +1,16 @@
+#!/bin/bash
+
+# terminus:summary=Prompt for text input with Terminus-Bar
+# terminus:group=menu
+# terminus:name=input
+# terminus:args=[prompt]
+# terminus:examples=terminus menu input Reminder
+
+set -euo pipefail
+
+prompt="${1:-Input}"
+if (( $# > 0 )); then
+  shift
+fi
+
+exec terminus-bar dmenu --prompt "$prompt…" </dev/null

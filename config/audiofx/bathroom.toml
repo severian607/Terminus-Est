@@ -1,0 +1,16 @@
+label = "Bathroom"
+emoji = "🚿"
+category = "Space"
+tags = ["bathroom", "tile", "reverb", "shower"]
+description = "Bright, hard-walled small room with a quick flutter."
+order = 20
+headroom_db = -3
+
+[[plugin]]
+type = "reverb"
+room-size = "Small"
+decay-time = 1.4
+amount = -8.0
+dry = 0.0
+hf-damp = 14000.0
+diffusion = 0.7

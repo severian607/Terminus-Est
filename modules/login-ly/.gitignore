@@ -1,0 +1,7 @@
+src/
+pkg/
+ly/
+*.tar.gz
+*.pkg.tar.zst
+zig-global-cache/
+/*.patch

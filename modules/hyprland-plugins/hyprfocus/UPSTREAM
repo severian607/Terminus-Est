@@ -1,0 +1,7 @@
+url: https://github.com/hyprwm/hyprland-plugins (hyprfocus/)
+commit: 2e03a09a92ba8b0adcd2840a69d84ffc2174b886
+license: BSD-3-Clause (LICENSE, from the repository root)
+patches:
+  - Makefile rewritten: builds build/hyprfocus.so with the installed headers (no hyprpm, no CMake).
+  - removed default.nix, meson.build, CMakeLists.txt.
+  - source files unchanged.

@@ -1,0 +1,57 @@
+#!/bin/bash
+
+# terminus:summary=Open native Terminus-Est settings or a desktop action chooser
+# terminus:args=[apps|capture|screenrecord|reminder-set|system|theme|background|toggle|hardware]
+
+menu() {
+  printf '%b\n' "$2" | terminus-bar dmenu --prompt "$1…"
+}
+
+show_capture_menu() {
+  case $(menu "Capture" "  Screenshot\n  Screenrecord\n󰴑  Text Extraction\n󰃉  Color") in
+  *Screenshot*) terminus-capture-screenshot ;;
+  *Screenrecord*) terminus-capture-screenrecording ;;
+  *Text*) terminus-capture-text-extraction ;;
+  *Color*) pkill hyprpicker || hyprpicker -a ;;
+  *) return ;;
+  esac
+}
+
+show_custom_reminder_input() {
+  local minutes
+  minutes=$(terminus-menu-input "Remind in minutes")
+
+  if [[ $minutes =~ ^[0-9]+$ ]] && ((minutes > 0)); then
+    show_reminder_message_input "$minutes"
+  elif [[ -n $minutes ]]; then
+    terminus-notification-send "󰔛" "Invalid reminder" "Enter the number of minutes" -u critical
+    show_custom_reminder_input
+  else
+    return
+  fi
+}
+
+show_reminder_message_input() {
+  local minutes="$1"
+  local message
+  message=$(terminus-menu-input "Reminder message")
+
+  if [[ -n $message ]]; then
+    terminus-reminder "$minutes" "$message"
+  else
+    terminus-reminder "$minutes"
+  fi
+}
+
+case "${1:-}" in
+  "") exec terminus-settings ;;
+  apps) exec terminus-launcher toggle ;;
+  capture) show_capture_menu ;;
+  screenrecord) exec terminus-capture-screenrecording ;;
+  reminder-set) show_custom_reminder_input ;;
+  system) exec terminus-bar msg panel-toggle session ;;
+  theme) exec terminus-settings appearance ;;
+  background) exec terminus-bar msg panel-toggle wallpaper ;;
+  toggle|hardware) exec terminus-bar msg panel-toggle control-center ;;
+  *) exec terminus-settings "$@" ;;
+esac

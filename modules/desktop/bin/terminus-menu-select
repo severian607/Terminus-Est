@@ -1,0 +1,19 @@
+#!/bin/bash
+
+# terminus:summary=Pick one option with Terminus-Bar
+# terminus:group=menu
+# terminus:name=select
+# terminus:args=prompt option...
+# terminus:examples=terminus menu select Format jpg png
+
+set -euo pipefail
+
+if (( $# < 2 )); then
+  echo "Usage: terminus-menu-select <prompt> <option>..." >&2
+  exit 1
+fi
+
+prompt="$1"
+shift
+
+printf '%s\n' "$@" | terminus-bar dmenu --prompt "$prompt…"

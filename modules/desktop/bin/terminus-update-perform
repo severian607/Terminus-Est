@@ -1,0 +1,23 @@
+#!/bin/bash
+
+# terminus:summary=Run the full Terminus-Est update pipeline
+# terminus:requires-sudo=true
+
+set -e
+
+# Ensure screensaver/sleep doesn't set in during updates
+hyprctl dispatch 'hl.dsp.window.tag({ tag = "+noidle" })' &>/dev/null || true
+
+# Perform all update steps
+terminus-update-keyring
+terminus-update-system-pkgs
+terminus-update-aur-pkgs
+terminus-update-orphan-pkgs
+terminus-hook post-update
+
+terminus-update-analyze-logs
+
+terminus-update-restart
+
+# Re-enable screensaver/sleep after updates
+hyprctl dispatch 'hl.dsp.window.tag({ tag = "-noidle" })' &>/dev/null || true

@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=local.terminus.Motion
+Exec=/usr/bin/systemctl --user start terminus-motion.service
+SystemdService=terminus-motion.service

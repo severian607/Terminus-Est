@@ -1,0 +1,19 @@
+label = "Deep bass"
+emoji = "🥁"
+category = "Tone"
+tags = ["bass", "sub", "rumble"]
+description = "Heavy sub-bass: +9 dB shelf at 60 Hz and a +3 dB punch at 120 Hz."
+order = 20
+headroom_db = -10
+
+[[band]]
+type = "lowshelf"
+freq = 60
+q = 0.7
+gain = 9
+
+[[band]]
+type = "peaking"
+freq = 120
+q = 1.0
+gain = 3

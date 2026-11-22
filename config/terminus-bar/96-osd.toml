@@ -1,0 +1,3 @@
+# SwayOSD owns the volume popup; Terminus-Bar's own volume OSD stays off.
+[osd.kinds]
+volume = false

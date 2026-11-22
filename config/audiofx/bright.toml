@@ -1,0 +1,19 @@
+label = "Bright"
+emoji = "💡"
+category = "Tone"
+tags = ["bright", "clear", "detail"]
+description = "Thinner lows and a lifted top end."
+order = 50
+headroom_db = -4
+
+[[band]]
+type = "lowshelf"
+freq = 150
+q = 0.7
+gain = -2
+
+[[band]]
+type = "highshelf"
+freq = 4000
+q = 0.7
+gain = 4

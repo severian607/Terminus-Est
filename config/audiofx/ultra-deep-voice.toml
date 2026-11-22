@@ -1,0 +1,20 @@
+label = "Ultra deep voice"
+emoji = "🌋"
+category = "Voice & Pitch"
+tags = ["pitch", "ultra", "deep", "low", "giant", "monster"]
+description = "Down an octave and four semitones, with the chest frequencies boosted for a giant rumble."
+order = 35
+headroom_db = -6
+
+[[band]]
+type = "lowshelf"
+freq = 180
+q = 0.7
+gain = 6
+
+[[plugin]]
+type = "pitch"
+octaves = -1.0
+semitones = -4.0
+dry = -100.0
+wet = 0.0

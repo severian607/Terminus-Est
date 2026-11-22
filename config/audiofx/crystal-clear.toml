@@ -1,0 +1,24 @@
+label = "Crystal clear"
+emoji = "💎"
+category = "Tone"
+tags = ["crystalizer", "clarity", "detail", "transient", "sharp"]
+description = "Sharpens transients across all bands to bring out detail."
+order = 130
+headroom_db = -4
+
+[[plugin]]
+type = "crystalizer"
+adaptive-intensity = true
+band0 = { bypass = false, intensity = 2.0, mute = false }
+band1 = { bypass = false, intensity = 2.0, mute = false }
+band2 = { bypass = false, intensity = 2.0, mute = false }
+band3 = { bypass = false, intensity = 3.0, mute = false }
+band4 = { bypass = false, intensity = 3.0, mute = false }
+band5 = { bypass = false, intensity = 3.0, mute = false }
+band6 = { bypass = false, intensity = 3.0, mute = false }
+band7 = { bypass = false, intensity = 3.0, mute = false }
+band8 = { bypass = false, intensity = 3.0, mute = false }
+band9 = { bypass = false, intensity = 3.0, mute = false }
+band10 = { bypass = false, intensity = 3.0, mute = false }
+band11 = { bypass = false, intensity = 3.0, mute = false }
+band12 = { bypass = false, intensity = 3.0, mute = false }

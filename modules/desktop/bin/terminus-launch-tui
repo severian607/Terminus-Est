@@ -1,0 +1,6 @@
+#!/bin/bash
+
+# terminus:summary=Launch a TUI command in Ghostty with an org.terminus.<name> app id
+# terminus:args=<command> [args...]
+
+exec setsid uwsm-app -- ghostty --class="org.terminus.$(basename "$1")" -e "$@"

@@ -1,0 +1,16 @@
+label = "Air exciter"
+emoji = "🌬️"
+category = "Tone"
+tags = ["exciter", "air", "sparkle", "brilliance", "highs"]
+description = "Synthesises extra high harmonics for sparkle and presence."
+order = 120
+headroom_db = -3
+
+[[plugin]]
+type = "exciter"
+amount = 6.0
+harmonics = 8.0
+scope = 6000.0
+blend = 0.0
+ceil = 16000.0
+ceil-active = true

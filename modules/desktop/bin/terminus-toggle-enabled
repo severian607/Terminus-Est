@@ -1,0 +1,6 @@
+#!/bin/bash
+
+# terminus:summary=Check if a toggle is enabled (flag file exists)
+# terminus:args=<flag-name>
+
+[[ -f "$HOME/.local/state/terminus-est/toggles/$1" ]]

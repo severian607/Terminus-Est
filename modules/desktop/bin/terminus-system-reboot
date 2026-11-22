@@ -1,0 +1,14 @@
+#!/bin/bash
+
+# terminus:summary=Reboot after closing application windows
+# terminus:examples=terminus reboot | terminus system reboot
+# terminus:aliases=terminus reboot
+
+terminus-state clear re*-required
+
+# Schedule the reboot to happen after closing windows (detached from terminal)
+nohup bash -c "sleep 2 && systemctl reboot --no-wall" >/dev/null 2>&1 &
+
+# Now close all windows
+terminus-hyprland-window-close-all
+sleep 1 # Allow apps like Chrome to shutdown correctly

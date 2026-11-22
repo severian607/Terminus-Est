@@ -1,0 +1,11 @@
+# Rebuild the Strata sidebar icon rules when the sidebar layout changes
+[Unit]
+Description=Watch the Strata sidebar layout
+
+[Path]
+PathChanged=%h/.config/gtk-3.0/bookmarks
+PathChanged=%h/.config/strata/settings.toml
+Unit=terminus-strata-skin.service
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,16 @@
+[package]
+name = "terminus-taskmanager"
+version = "0.2.0"
+edition = "2021"
+description = "Terminus-TaskManager: btop's layout with the GPU beside the CPU, drawn from the Terminus-Est palette"
+license = "MIT"
+
+[dependencies]
+libc = "0.2"
+ratatui = "0.29"
+toml = "0.8"
+
+[profile.release]
+lto = true
+strip = true
+opt-level = 3

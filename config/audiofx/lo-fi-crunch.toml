@@ -1,0 +1,15 @@
+label = "Lo-fi crunch"
+emoji = "🎛️"
+category = "Retro"
+tags = ["lofi", "crunch", "sampler", "dirty"]
+description = "10-bit, half-rate sampler grit with a darkened top end."
+order = 70
+headroom_db = -3
+[crusher]
+bits = 10
+downsample = 2
+
+[[band]]
+type = "lowpass"
+freq = 7000
+q = 0.707

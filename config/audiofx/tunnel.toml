@@ -1,0 +1,14 @@
+label = "Tunnel"
+emoji = "🚇"
+category = "Space"
+tags = ["tunnel", "underpass", "reverb", "echo"]
+description = "Long, hard, metallic tail of a concrete tunnel."
+order = 50
+headroom_db = -4
+
+[[plugin]]
+type = "reverb"
+room-size = "Tunnel-like"
+decay-time = 4.0
+amount = -8.0
+dry = 0.0

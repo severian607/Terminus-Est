@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""Audio fun mode: every key press plays the sound tied to that key.
+
+usage: terminus-funmode toggle [THEME] | on [THEME] | set THEME | off | status [--json] | list [--json] | map [THEME]
+
+Themes are config/terminus-funmode/themes/NAME.toml; `set` picks one and starts it, `toggle`/`on` use the
+last chosen theme when none is given. `terminus-keysounds` (SUPER+B) is the picker.
+
+The listener runs as the transient user unit `terminus-funmode`. It reads key-down events from every
+keyboard under /dev/input (needs the `input` group) and mixes one pre-decoded sample per key into a
+low-latency PipeWire stream (numpy + sounddevice), so there is no per-key process start.
+Nothing is logged or stored; key events are only used to pick a sound.
+"""
+
+import hashlib
+import re
+import tomllib
+import json
+import os
+import random
+import selectors
+import subprocess
+import sys
+import wave
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+UNIT = "terminus-funmode"
+THEME_DIR = Path(__file__).resolve().parents[1] / "config/terminus-funmode/themes"
+EXTENSIONS = {".ogg", ".wav", ".mp3", ".flac"}
+MAX_SECONDS = 2.0  # longer samples are never used
+VOLUME = os.environ.get("TERMINUS_FUNMODE_VOLUME", "0.6")
+SHUFFLE_SEED = "terminus-funmode-v1"  # fixed: a key keeps its sound across runs
+DURATION_CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "terminus-funmode/durations.json"
+WAV_CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "terminus-funmode/wav"
+
+
+def probe_duration(path):
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    try:
+        return float(out)
+    except ValueError:
+        return float("inf")  # unreadable files are treated as too long
+
+
+def file_stamp(path):
+    """Identity of a file's current content for the caches: path + mtime + size."""
+    info = path.stat()
+    return f"{path}|{info.st_mtime_ns}|{info.st_size}"
+
+
+def durations(files):
+    """Seconds per file, cached by path + mtime + size so only new or changed files are probed."""
+    try:
+        cache = json.loads(DURATION_CACHE.read_text())
+    except (OSError, ValueError):
+        cache = {}
+    stamps = {p: file_stamp(p) for p in files}
+    missing = [p for p in files if stamps[p] not in cache]
+    if missing:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for p, seconds in zip(missing, pool.map(probe_duration, missing)):
+                cache[stamps[p]] = seconds if seconds != float("inf") else None
+        DURATION_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        DURATION_CACHE.write_text(json.dumps(cache))
+    return {p: cache[stamps[p]] for p in files}
+
+
+class Theme:
+    """One keyboard sound theme: config/terminus-funmode/themes/NAME.toml."""
+
+    def __init__(self, path):
+        data = tomllib.loads(path.read_text())
+        self.name = path.stem
+        self.label, self.emoji = data["label"], data["emoji"]
+        self.category, self.description = data["category"], data["description"]
+        self.tags = [str(t) for t in data.get("tags", [])]
+        self.order = int(data.get("order", 500))
+        folder = os.environ.get("TERMINUS_FUNMODE_SOUNDS", data["sounds"])
+        self.sound_dir = Path(folder).expanduser()
+        self.custom_dir = self.sound_dir / "New audio"  # files named after a key (m.wav, 1.ogg, shift.wav) replace that key's sound
+        self.keymap = path.parent.parent / data["keymap"]
+
+    def sounds(self):
+        files = sorted(
+            p for p in self.sound_dir.rglob("*") if p.suffix.lower() in EXTENSIONS and self.custom_dir not in p.parents
+        )
+        if not files:
+            raise SystemExit(f"terminus-funmode: no audio files found in {self.sound_dir}")
+        seconds = durations(files)
+        short = [p for p in files if seconds[p] is not None and seconds[p] <= MAX_SECONDS]
+        if not short:
+            raise SystemExit(f"terminus-funmode: no audio files of {MAX_SECONDS:g}s or less in {self.sound_dir}")
+        return short
+
+
+def load_themes():
+    themes = sorted((Theme(p) for p in THEME_DIR.glob("*.toml")), key=lambda t: (t.order, t.name))
+    return {t.name: t for t in themes}
+
+
+def custom_keys(stem):
+    """Key names a custom file stem stands for: `m` -> KEY_M, `down arrow` -> KEY_DOWN, `shift` -> both shifts."""
+    stem = stem.lower().removesuffix(" arrow")
+    aliases = {
+        "shift": ["KEY_LEFTSHIFT", "KEY_RIGHTSHIFT"],
+        "ctrl": ["KEY_LEFTCTRL", "KEY_RIGHTCTRL"],
+        "alt": ["KEY_LEFTALT", "KEY_RIGHTALT"],
+        "super": ["KEY_LEFTMETA", "KEY_RIGHTMETA"],
+    }
+    return aliases.get(stem, [f"KEY_{stem.upper()}"])
+
+
+def key_sound_map(theme):
+    """Assign each key code a file: shuffle once with a fixed seed, then walk the key list in order.
+
+    Files in the `New audio` folder (named after their key, e.g. `m.wav`, `1.ogg`) override that key's sound.
+    """
+    from evdev import ecodes
+
+    codes = sorted({code for name, code in ecodes.ecodes.items() if name.startswith("KEY_") and code < 256})
+    files = theme.sounds()
+    order = files[:]
+    random.Random(SHUFFLE_SEED).shuffle(order)
+    mapping = {code: order[i % len(order)] for i, code in enumerate(codes)}
+    # keymap.json pins key -> file (relative to the sound folder); it wins over the shuffle so later edits to the
+    # sound folders cannot reshuffle keys that already have a sound.
+    pinned = json.loads(theme.keymap.read_text()) if theme.keymap.is_file() else {}
+    for name, rel in pinned.items():
+        code = ecodes.ecodes.get(name)
+        if isinstance(code, int) and (theme.sound_dir / rel).is_file():
+            mapping[code] = theme.sound_dir / rel
+    for path in sorted(theme.custom_dir.glob("*")) if theme.custom_dir.is_dir() else []:
+        if path.suffix.lower() not in EXTENSIONS:
+            continue
+        for name in custom_keys(path.stem):
+            code = ecodes.ecodes.get(name)
+            if isinstance(code, int):
+                mapping[code] = path
+            else:
+                print(f"terminus-funmode: {path.name}: unknown key {name}", file=sys.stderr)
+    return mapping
+
+
+def keyboards():
+    import evdev
+    from evdev import ecodes
+
+    found = []
+    for path in evdev.list_devices():
+        try:
+            dev = evdev.InputDevice(path)
+        except OSError:
+            continue
+        keys = dev.capabilities().get(ecodes.EV_KEY, [])
+        if ecodes.KEY_A in keys and ecodes.KEY_SPACE in keys:
+            found.append(dev)
+        else:
+            dev.close()
+    return found
+
+
+RATE = 48000
+BLOCK = 128  # frames per audio callback (~2.7 ms)
+MAX_VOICES = 32
+
+
+def ffmpeg_decode(src, dst):
+    """Write src as a 48 kHz 16-bit stereo wav at dst."""
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-i", str(src), "-ar", str(RATE), "-ac", "2", "-c:a", "pcm_s16le", str(dst)],
+        check=True,
+    )
+
+
+def as_wav(path):
+    """A wav to read: the file itself, or a cached wav converted once from ogg/mp3/flac (originals stay untouched)."""
+    if path.suffix.lower() == ".wav":
+        return path
+    key = hashlib.sha1(file_stamp(path).encode()).hexdigest()[:20]
+    cached = WAV_CACHE / f"{key}.wav"
+    if not cached.exists():
+        WAV_CACHE.mkdir(parents=True, exist_ok=True)
+        part = cached.with_suffix(".part.wav")
+        ffmpeg_decode(path, part)
+        part.replace(cached)
+    return cached
+
+
+def decode(path):
+    """Whole file as int16 stereo at RATE, loaded once up front so a key press only has to mix."""
+    import numpy as np
+
+    wav = as_wav(path)
+    with wave.open(str(wav), "rb") as f:
+        usable = f.getframerate() == RATE and f.getsampwidth() == 2 and f.getnchannels() in (1, 2)
+        if usable:
+            pcm = np.frombuffer(f.readframes(f.getnframes()), dtype=np.int16)
+            return np.repeat(pcm[:, None], 2, axis=1) if f.getnchannels() == 1 else pcm.reshape(-1, 2)
+    # a wav in another rate/width/layout: normalise it through ffmpeg
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(wav), "-f", "s16le", "-ac", "2", "-ar", str(RATE), "-"],
+        capture_output=True,
+        check=True,
+    ).stdout
+    return np.frombuffer(raw, dtype=np.int16).reshape(-1, 2)
+
+
+class Mixer:
+    """One always-open low-latency output stream; key presses add voices that the callback sums."""
+
+    def __init__(self, samples, volume):
+        import threading
+
+        import numpy as np
+        import sounddevice as sd
+
+        self.np = np
+        self.samples = samples
+        self.volume = volume
+        self.lock = threading.Lock()
+        self.voices = []  # [array, position]
+        self.stream = sd.OutputStream(
+            samplerate=RATE, channels=2, dtype="int16", blocksize=BLOCK, latency="low", callback=self.callback
+        )
+        self.stream.start()
+
+    def play(self, path):
+        with self.lock:
+            if len(self.voices) < MAX_VOICES:
+                self.voices.append([self.samples[path], 0])
+
+    def callback(self, out, frames, time, status):
+        np = self.np
+        mix = np.zeros((frames, 2), dtype=np.int32)
+        with self.lock:
+            for voice in self.voices:
+                data, pos = voice
+                chunk = data[pos : pos + frames]
+                mix[: len(chunk)] += chunk
+                voice[1] = pos + frames
+            self.voices = [v for v in self.voices if v[1] < len(v[0])]
+        out[:] = np.clip(mix * self.volume, -32768, 32767).astype(np.int16)
+
+
+def listen(theme):
+    from evdev import ecodes
+
+    mapping = key_sound_map(theme)
+    devices = keyboards()
+    if not devices:
+        raise SystemExit("terminus-funmode: no keyboard readable in /dev/input (is the user in the input group?)")
+    needed = sorted(set(mapping.values()))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        samples = dict(zip(needed, pool.map(decode, needed)))
+    mixer = Mixer(samples, float(VOLUME))
+    selector = selectors.DefaultSelector()
+    for dev in devices:
+        selector.register(dev, selectors.EVENT_READ)
+    while True:
+        for key, _ in selector.select():
+            try:
+                events = list(key.fileobj.read())
+            except OSError:  # device unplugged
+                selector.unregister(key.fileobj)
+                if not selector.get_map():
+                    return
+                continue
+            for event in events:
+                if event.type == ecodes.EV_KEY and event.value == 1 and event.code in mapping:
+                    mixer.play(mapping[event.code])
+
+
+STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "terminus-est/funmode-theme"
+
+
+def unit_theme():
+    """Theme the running unit was started with, or None when it is not running."""
+    out = subprocess.run(
+        ["systemctl", "--user", "show", UNIT, "-p", "ActiveState", "-p", "ExecStart", "--value"],
+        capture_output=True,
+        text=True,
+    ).stdout
+    if "active" not in out.split():
+        return None
+    match = re.search(r"argv\[\]=\S+ \S+ run (\S+) ;", out)
+    return match.group(1) if match else None
+
+
+def selected():
+    """Last chosen theme (what a bare `toggle` turns on); falls back to the first theme."""
+    themes = load_themes()
+    try:
+        name = STATE.read_text().strip()
+    except OSError:
+        name = ""
+    return themes[name] if name in themes else next(iter(themes.values()))
+
+
+def notify(text):
+    subprocess.run(["notify-send", "-u", "low", "-a", "Keyboard sounds", "Keyboard sounds", text], check=False)
+
+
+def turn_on(theme):
+    if unit_theme() == theme.name:
+        return
+    subprocess.run(["pkill", "-x", "mechvibes"], check=False)  # two engines would double every key
+    theme.sounds()  # fail early with a clear message instead of a dead unit
+    subprocess.run(["systemctl", "--user", "stop", UNIT], check=False, stderr=subprocess.DEVNULL)
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(theme.name + "\n")
+    subprocess.run(
+        ["systemd-run", "--user", f"--unit={UNIT}", "--collect", "--quiet", "--", sys.executable, os.path.abspath(__file__), "run", theme.name],
+        check=True,
+    )
+    notify(f"on: {theme.label}")
+
+
+def turn_off():
+    if unit_theme() is None:
+        return
+    subprocess.run(["systemctl", "--user", "stop", UNIT], check=False, stderr=subprocess.DEVNULL)
+    notify("off")
+
+
+def list_themes():
+    running = unit_theme()
+    rows = [
+        {
+            "name": t.name, "label": t.label, "emoji": t.emoji, "category": t.category,
+            "tags": t.tags, "description": t.description, "source": "original", "license": "original",
+            "order": t.order, "flags": [], "active": t.name == running,
+            "position": 1 if t.name == running else None, "shadowed": False,
+        }
+        for t in load_themes().values()
+    ]
+    return {"categories": ["Keyboard"], "effects": rows}
+
+
+def pick(name):
+    themes = load_themes()
+    if name is None:
+        return selected()
+    if name not in themes:
+        raise SystemExit(f"terminus-funmode: unknown theme {name!r} (have: {', '.join(themes)})")
+    return themes[name]
+
+
+def main(argv):
+    cmd = argv[0] if argv else "toggle"
+    args = [a for a in argv[1:] if a != "--json"]
+    js = "--json" in argv
+    name = args[0] if args else None
+    if cmd == "run":
+        listen(pick(name))
+    elif cmd == "toggle":
+        theme = pick(name)
+        if unit_theme() == theme.name:
+            turn_off()
+        else:
+            turn_on(theme)
+    elif cmd in ("on", "set"):
+        turn_on(pick(name))
+    elif cmd == "off":
+        turn_off()
+    elif cmd == "list":
+        data = list_themes()
+        if js:
+            print(json.dumps(data, ensure_ascii=False))
+        else:
+            for e in data["effects"]:
+                print(f" {'*' if e['active'] else ' '} {e['name']:<14} {e['emoji']} {e['label']:<12} {e['description']}")
+    elif cmd == "status":
+        running = unit_theme()
+        print(json.dumps({"active": running, "selected": selected().name}) if js else (running or "off"))
+        return 0 if running else 1
+    elif cmd == "map":
+        from evdev import ecodes
+
+        theme = pick(name)
+        for code, path in sorted(key_sound_map(theme).items()):
+            print(f"{ecodes.KEY[code] if isinstance(ecodes.KEY[code], str) else ecodes.KEY[code][0]:<20} {path.relative_to(theme.sound_dir)}")
+    else:
+        print(__doc__, file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -1,0 +1,13 @@
+label = "Deep voice"
+emoji = "🐻"
+category = "Voice & Pitch"
+tags = ["pitch", "deep", "low", "bass voice", "bear"]
+description = "Five semitones down."
+order = 30
+headroom_db = -2
+
+[[plugin]]
+type = "pitch"
+dry = -100.0
+wet = 0.0
+semitones = -5.0

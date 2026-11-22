@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=local.terminus.Symbols
+Exec=/usr/bin/systemctl --user start terminus-symbols.service
+SystemdService=terminus-symbols.service

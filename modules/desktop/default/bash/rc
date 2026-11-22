@@ -1,0 +1,6 @@
+source ~/.local/share/terminus-est/default/bash/envs
+source ~/.local/share/terminus-est/default/bash/shell
+source ~/.local/share/terminus-est/default/bash/aliases
+source ~/.local/share/terminus-est/default/bash/functions
+source ~/.local/share/terminus-est/default/bash/init
+[[ $- == *i* ]] && bind -f ~/.local/share/terminus-est/default/bash/inputrc

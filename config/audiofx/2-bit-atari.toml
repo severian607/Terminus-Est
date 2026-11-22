@@ -1,0 +1,32 @@
+label = "2-bit Atari"
+emoji = "🕹️"
+category = "Retro"
+tags = ["2-bit", "2bit", "atari", "2600", "tia", "console", "retro", "game", "mono"]
+description = "Atari 2600 style: mono, 2-bit steps at about an eighth of the sample rate, thin tinny band like a 70s TV speaker."
+order = 54
+headroom_db = -7
+
+[stereo]
+mode = "mono"
+
+[[band]]
+type = "highpass"
+freq = 200
+q = 0.8
+
+[[band]]
+type = "peaking"
+freq = 2500
+q = 1.0
+gain = 4
+
+[[band]]
+type = "lowpass"
+freq = 6000
+q = 0.8
+
+[[plugin]]
+type = "crusher"
+bit-reduction = 2.0
+sample-reduction = 6.0
+mode = "Linear"

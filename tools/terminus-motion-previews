@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""Record the preview clips shown in the motion picker (Super+A).
+
+usage: terminus-motion-previews [--force] [NAME...]
+
+Every entry is activated in the hidden sandbox (tools/terminus-motion-sandbox), filmed while a demo runs, and
+stored as ~/.cache/terminus-motion/previews/<group>/<name>.mp4. Nothing is loaded into the real session.
+Without NAME, entries that already have a clip are skipped; --force records them again.
+"""
+
+import json
+import os
+import signal
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+project = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(project / "lib"))
+import motion  # noqa: E402
+
+TOOLS = project / "tools"
+SANDBOX = "pre"
+DEMO_CLASS = "local.terminus.MotionDemo"
+
+
+def sandbox(*args, check=True, **kwargs):
+    return subprocess.run([TOOLS / "terminus-motion-sandbox", args[0], SANDBOX, *map(str, args[1:])],
+                          check=check, **kwargs)
+
+
+def spawn(*command):
+    """A client inside the sandbox, in the background."""
+    return subprocess.Popen([TOOLS / "terminus-motion-sandbox", "run", SANDBOX, *map(str, command)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def dispatch(expression):
+    sandbox("ctl", "dispatch", expression, stdout=subprocess.DEVNULL)
+
+
+def clients():
+    return json.loads(sandbox("ctl", "clients", "-j", capture_output=True, text=True).stdout)
+
+
+def wait_for_clients(count, timeout=6.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if len(clients()) == count:
+            return
+        time.sleep(0.1)
+    raise RuntimeError(f"expected {count} sandbox windows, found {len(clients())}")
+
+
+def look():
+    """Sandbox-only Lua: the real palette and a scaled-down version of the real window frame."""
+    colours = dict(re.findall(r'(\w+) = "#([0-9a-fA-F]{6})"', (project / "config/generated/appearance.lua").read_text()))
+    active, inactive = colours.get("active_border", "ffcccd"), colours.get("inactive_border", "262626")
+    return f"""hl.config({{
+  general = {{ gaps_in = 4, gaps_out = 10, border_size = 1,
+              col = {{ active_border = "rgb({active})", inactive_border = "rgb({inactive})" }} }},
+  decoration = {{ rounding = 10, shadow = {{ enabled = true, range = 12, render_power = 2, offset = "0 4",
+                                           color = "rgba(00000080)" }} }},
+}})
+"""
+
+
+def wallpaper():
+    try:
+        outputs = json.loads(subprocess.run(["skwd-helm", "current", "--json"], capture_output=True, text=True,
+                                            timeout=5).stdout)["outputs"]
+        path = next(o.get("current") or o.get("path") for o in outputs if o.get("connected"))
+        return path if path and Path(path).is_file() else None
+    except (OSError, ValueError, KeyError, StopIteration, subprocess.SubprocessError):
+        return None
+
+
+class Recording:
+    """Films the sandbox for `seconds`; the demo runs inside the `with` block."""
+
+    def __init__(self, raw, seconds):
+        self.raw, self.seconds = raw, seconds
+
+    def __enter__(self):
+        self.proc = subprocess.Popen([TOOLS / "terminus-motion-sandbox", "record", SANDBOX, self.raw, str(self.seconds)])
+        time.sleep(0.35)  # wf-recorder needs a moment before its first frame
+        return self
+
+    def __exit__(self, *_exc):
+        self.proc.wait()
+
+
+def demo_windows(entry, raw):
+    with Recording(raw, 3.7):
+        spawn(TOOLS / "terminus-motion-demo-windows", "cycle").wait()
+
+
+def demo_move(entry, raw):
+    demo = spawn(TOOLS / "terminus-motion-demo-windows", "hold", 2, 4.6)
+    wait_for_clients(2)
+    time.sleep(0.6)
+    with Recording(raw, 3.4):
+        for direction in ("l", "r", "l", "r"):
+            dispatch(f'hl.dsp.window.move({{ direction = "{direction}" }})')
+            time.sleep(0.7)
+    demo.wait()
+
+
+def demo_focus(entry, raw):
+    demo = spawn(TOOLS / "terminus-motion-demo-windows", "hold", 2, 4.6)
+    wait_for_clients(2)
+    time.sleep(0.6)
+    with Recording(raw, 3.4):
+        for direction in ("l", "r", "l", "r"):
+            dispatch(f'hl.dsp.focus({{ direction = "{direction}" }})')
+            time.sleep(0.7)
+    demo.wait()
+
+
+def demo_pointer(entry, raw):
+    demo = spawn(TOOLS / "terminus-motion-demo-windows", "hold", 1, 5.2)  # a dark page behind the pointer
+    wait_for_clients(1)
+    time.sleep(0.6)
+    with Recording(raw, 4.3):  # the shake comes last and the enlarged pointer needs a moment on screen
+        subprocess.run([TOOLS / "terminus-motion-demo-pointer", SANDBOX], check=True)
+    demo.wait()
+
+
+def demo_typing(entry, raw):
+    terminal = spawn("ghostty", "--gtk-single-instance=false", f"--class={DEMO_CLASS}", f"--custom-shader={entry.path}",
+                     "--custom-shader-animation=always", "--font-size=17", "--wait-after-command=false",
+                     "-e", "sh", "-c", f"sleep 1.2; {TOOLS / 'terminus-motion-demo-cursor'}; sleep 0.6")
+    try:
+        wait_for_clients(1)
+        time.sleep(0.7)
+        with Recording(raw, 4.4):
+            pass
+    finally:
+        terminal.wait(timeout=15)
+
+
+def demo_overlay(entry, raw):
+    """Run the overlay inside the sandbox, move the pointer along the demo path and click a few times."""
+    # The spotlight dims the screen, which a dark demo page would hide: it is filmed over the wallpaper.
+    demo = None if entry.path.stem == "spotlight" else spawn(TOOLS / "terminus-motion-demo-windows", "hold", 1, 6.0)
+    if demo:
+        wait_for_clients(1)
+    # Own process group: the sandbox tool and the entry's shell are wrappers around the daemon, which must die too.
+    overlay = subprocess.Popen([TOOLS / "terminus-motion-sandbox", "run", SANDBOX, "bash", entry.path],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    time.sleep(1.5)
+    try:
+        with Recording(raw, 4.3):
+            path = subprocess.Popen([TOOLS / "terminus-motion-demo-pointer", SANDBOX])
+            for delay, clicks in ((0.5, "1"), (0.7, "1"), (0.8, "2")):  # real clicks where the pointer is
+                time.sleep(delay)
+                spawn(project / "modules/overlays/pointer-fx/build/sandbox-click", clicks).wait()
+            path.wait()
+    finally:
+        os.killpg(overlay.pid, signal.SIGTERM)
+        overlay.wait(timeout=5)
+    if demo:
+        demo.wait()
+
+
+DEMOS = {"overlay": demo_overlay, "windows": demo_windows, "move": demo_move, "focus": demo_focus, "pointer": demo_pointer,
+         "typing": demo_typing}
+
+
+def record(entry, entries):
+    lua = [e.path for e in (entries["windows/pop"], entry) if e.kind == "lua" and (e is entry or entry.slot != "windows")]
+    sandbox("use", *lua)
+    dispatch("hl.dsp.cursor.move({ x = 958, y = 538 })")  # park the pointer out of the picture
+    with tempfile.TemporaryDirectory() as tmp:
+        raw = Path(tmp) / "raw.mp4"
+        DEMOS[entry.demo](entry, raw)
+        wait_for_clients(0)
+        entry.preview.parent.mkdir(parents=True, exist_ok=True)
+        # The pointer is small: keep the middle of the picture at full size instead of shrinking all of it.
+        picture = "crop=640:360:160:90" if entry.demo == "pointer" else "scale=640:360:flags=lanczos"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", raw, "-an", "-vf", f"fps=30,{picture}",
+                        "-c:v", "libx264", "-preset", "slow", "-crf", "24", "-pix_fmt", "yuv420p", entry.preview],
+                       check=True)
+
+
+def main(argv):
+    force = "--force" in argv
+    names = [a for a in argv if a != "--force"]
+    if any(a.startswith("-") for a in names):
+        print(__doc__, file=sys.stderr)
+        return 2
+    entries = motion.load_entries()
+    try:
+        targets = [motion.resolve(n, entries) for n in names] or [
+            e for e in entries.values() if e.demo in DEMOS and (force or not e.preview.exists())]
+    except motion.MotionError as error:
+        print(f"terminus-motion-previews: {error}", file=sys.stderr)
+        return 2
+    if not targets:
+        print("every entry already has a preview; use --force to record again")
+        return 0
+    failed = []
+    sandbox("start")
+    try:
+        Path(f"/tmp/tms-{SANDBOX}/extra.lua").write_text(look())
+        image = wallpaper()
+        if image:
+            spawn("swaybg", "-i", image, "-m", "fill")
+            time.sleep(0.8)
+        for entry in targets:
+            try:
+                record(entry, entries)
+                print(f"recorded {entry.id}")
+            except (RuntimeError, subprocess.SubprocessError) as error:
+                failed.append(entry.id)
+                print(f"FAILED   {entry.id}: {error}", file=sys.stderr)
+                # A crashed plugin takes the sandbox compositor with it: start a clean one for the rest.
+                if sandbox("ctl", "version", check=False, capture_output=True).returncode:
+                    sandbox("stop", check=False)
+                    sandbox("start")
+                    Path(f"/tmp/tms-{SANDBOX}/extra.lua").write_text(look())
+    finally:
+        sandbox("stop", check=False)
+    if failed:
+        print("no preview for: " + ", ".join(failed), file=sys.stderr)
+    return 1 if failed else 0
+
+
+sys.exit(main(sys.argv[1:]))

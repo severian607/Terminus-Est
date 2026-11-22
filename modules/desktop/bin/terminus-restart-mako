@@ -1,0 +1,5 @@
+#!/bin/bash
+
+# terminus:summary=Reload mako configuration (used by the Terminus-Est theme switching).
+
+makoctl reload

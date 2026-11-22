@@ -1,0 +1,9 @@
+label = "Widen"
+emoji = "↔️"
+category = "Stereo"
+tags = ["wide", "stereo", "width", "spatial"]
+description = "Exaggerates the difference between left and right."
+order = 30
+
+[stereo]
+base = 0.6

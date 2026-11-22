@@ -1,0 +1,11 @@
+label = "Muffled"
+emoji = "🧣"
+category = "Filters & Character"
+tags = ["muffled", "behind a wall", "dull", "dark"]
+description = "Low pass at 900 Hz, as if heard through a wall."
+order = 30
+
+[[band]]
+type = "lowpass"
+freq = 900
+q = 0.707

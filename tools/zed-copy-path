@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""Copy Zed's current file as a double-quoted absolute path (safe for spaces)."""
+
+import os
+import subprocess
+
+path = os.environ.get("ZED_FILE")
+if not path:
+    raise SystemExit("ZED_FILE is unavailable; focus a saved file in Zed first.")
+
+# Double quotes keep spaces intact; escape the characters that stay special inside them.
+escaped = "".join("\\" + c if c in '\\"$`' else c for c in path)
+copied_path = f'"{escaped}"'
+
+subprocess.run(
+    ["wl-copy", "--type", "text/plain;charset=utf-8"],
+    input=copied_path,
+    text=True,
+    check=True,
+    # Keep the Wayland clipboard owner alive when Zed closes the task terminal.
+    start_new_session=True,
+)

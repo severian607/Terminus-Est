@@ -1,0 +1,36 @@
+#!/usr/bin/python3
+"""Wait for oo7's unlocked default collection before graphical startup."""
+
+import sys
+import time
+
+import gi
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+deadline = time.monotonic() + 20
+while time.monotonic() < deadline:
+    try:
+        # oo7 0.6 publishes its bus name before loading collections and aliases.
+        collection = bus.call_sync(
+            "org.freedesktop.secrets", "/org/freedesktop/secrets",
+            "org.freedesktop.Secret.Service", "ReadAlias",
+            GLib.Variant("(s)", ("default",)), None,
+            Gio.DBusCallFlags.NO_AUTO_START, 1000, None,
+        ).unpack()[0]
+        if collection != "/":
+            locked = bus.call_sync(
+                "org.freedesktop.secrets", collection,
+                "org.freedesktop.DBus.Properties", "Get",
+                GLib.Variant("(ss)", ("org.freedesktop.Secret.Collection", "Locked")),
+                None, Gio.DBusCallFlags.NO_AUTO_START, 1000, None,
+            ).unpack()[0]
+            if locked is False:
+                sys.exit(0)
+    except GLib.Error:
+        pass
+    time.sleep(0.05)
+
+sys.exit("oo7 default collection did not become unlocked within 20 seconds")

@@ -1,0 +1,15 @@
+#!/bin/bash
+
+# terminus:summary=Restore the default Terminus-Est Plymouth boot theme
+# terminus:requires-sudo=true
+
+theme_dir="/usr/share/plymouth/themes/terminus-est"
+
+sudo find ~/.local/share/terminus-est/default/plymouth -maxdepth 1 -type f -exec cp -t "$theme_dir/" {} +
+sudo plymouth-set-default-theme terminus-est
+
+if terminus-cmd-present limine-mkinitcpio; then
+  sudo limine-mkinitcpio
+else
+  sudo mkinitcpio -P
+fi

@@ -1,0 +1,10 @@
+label = "Meow"
+emoji = "🐱"
+category = "Keyboard"
+description = "Every key plays its own sound from the Audio Fun library."
+tags = ["keyboard", "cat", "fun"]
+# Sound folder; TERMINUS_FUNMODE_SOUNDS overrides it. `New audio/` inside it holds per-key replacements.
+sounds = "~/Downloads/AUDIO for AUDIO FUN"
+# Pinned key -> file map, relative to this theme directory's parent.
+keymap = "keymap.json"
+order = 100

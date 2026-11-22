@@ -1,0 +1,206 @@
+#!/usr/bin/python3 -I
+"""Explicitly authorize staged login cosmetics; never interrupt the current session."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import select
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import time
+
+
+# Authentication boundary
+
+HELPER = Path("/usr/local/libexec/terminus-login-apply")
+REQUEST_SECONDS = 105
+FIELDS = {"animation", "password_style", "animation_frame_delay", "animation_timeout_sec", "background",
+          "foreground", "accent", "show_borders", "show_clock"}
+
+
+def trusted_helper():
+    for directory in reversed(HELPER.parents):
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError(f"Login apply helper has an untrusted parent: {directory}")
+    info = HELPER.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 or not info.st_mode & 0o100:
+        raise ValueError("Login apply helper must be a root-owned, non-user-writable executable installed by the administrator")
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate payload key: {key}")
+        result[key] = value
+    return result
+
+
+def validate_payload(payload):
+    if len(payload.encode("utf-8")) > 16384:
+        raise ValueError("Staged login appearance is too large")
+    values = json.loads(payload, object_pairs_hook=unique_object)
+    if type(values) is not dict or set(values) != FIELDS:
+        raise ValueError("Staged login appearance must contain exactly the approved cosmetic fields")
+    if type(values["animation"]) is not str or values["animation"] not in (
+            "none", "doom", "matrix", "colormix", "gameoflife", "dur_file", "terminus"):
+        raise ValueError("Invalid login animation")
+    if type(values["password_style"]) is not str or values["password_style"] not in ("asterisk", "constellation"):
+        raise ValueError("Invalid login password_style")
+    for key, low, high in (("animation_frame_delay", 10, 1000), ("animation_timeout_sec", 0, 3600)):
+        if type(values[key]) is not int or not low <= values[key] <= high:
+            raise ValueError(f"Invalid login {key}")
+    for key in ("background", "foreground", "accent"):
+        if type(values[key]) is not str or not re.fullmatch(r"#[0-9a-fA-F]{6}", values[key]):
+            raise ValueError(f"Invalid login {key}")
+    for key in ("show_borders", "show_clock"):
+        if type(values[key]) is not bool:
+            raise ValueError(f"Invalid login {key}")
+    return json.dumps(values, sort_keys=True, allow_nan=False)
+
+
+def pin_owner(pid, expected_start=None):
+    if type(pid) is not int or pid <= 0:
+        raise ValueError("Invalid request owner PID")
+    descriptor = os.pidfd_open(pid)
+    try:
+        process = Path("/proc") / str(pid)
+        fields = (process / "stat").read_text().rsplit(")", 1)[1].split()
+        status = dict(line.split(":", 1) for line in (process / "status").read_text().splitlines())
+        if (any(int(uid) != os.getuid() for uid in status["Uid"].split()) or fields[0] in ("Z", "X", "x")
+                or select.select([descriptor], [], [], 0)[0]):
+            raise ValueError("Request owner is not a live process belonging to the desktop user")
+        start = fields[19]
+        if expected_start is not None and start != expected_start:
+            raise ValueError("Request owner start identity changed")
+        return descriptor, {"pid": pid, "start": start, "uid": os.getuid()}
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+class RequestCancelled(Exception):
+    pass
+
+
+def cancel_request(signum, frame):
+    raise RequestCancelled("request cancelled")
+
+
+def authenticated_run(command, deadline, owners):
+    # subprocess.run's timeout cleanup can become an unbounded wait when
+    # pkexec changes UID and the desktop user can no longer kill its child.
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or select.select(owners, [], [], 0)[0]:
+                raise RequestCancelled("request expired or invoking backend exited")
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.25, remaining))
+                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                continue
+    except (OSError, UnicodeError) as error:
+        raise ValueError("Authentication communication failed; outcome UNKNOWN: " + str(error)) from error
+    finally:
+        if process.poll() is None:
+            try:
+                process.kill()
+            except (PermissionError, ProcessLookupError):
+                pass
+            # Never keep the lifetime owner alive waiting for an elevated child
+            # after cancellation. poll() reaps an already exited direct child.
+            process.poll()
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=(Path.home() / ".config/terminus-est").resolve())
+    parser.add_argument("--request-pid", type=int)
+    parser.add_argument("--request-start")
+    parser.add_argument("action", choices=["apply"])
+    args = parser.parse_args()
+    if os.geteuid() == 0:
+        raise ValueError("Run terminus-login as the desktop user; it requests authentication explicitly")
+    if (args.request_pid is None) != (args.request_start is None):
+        raise ValueError("--request-pid and --request-start must be supplied together")
+    if args.request_pid is not None and (args.request_pid != os.getppid()
+            or not re.fullmatch(r"[1-9][0-9]*", args.request_start)):
+        raise ValueError("The optional request owner must be the live invoking backend with a valid start token")
+    source = args.root.resolve() / "login/appearance.json"
+    with source.open("r", encoding="utf-8") as stream:
+        payload = validate_payload(stream.read(16385))
+    trusted_helper()
+    if shutil.which("pkexec"):
+        command = ["pkexec", str(HELPER)]
+    elif shutil.which("run0"):
+        command = ["run0", "--pipe", "--", str(HELPER)]
+    else:
+        raise ValueError("Authentication unavailable: install/use an existing polkit agent with pkexec or run0; no passwordless policy is provided")
+    descriptors = []
+    handlers = {}
+    try:
+        owners = []
+        descriptor, owner = pin_owner(os.getpid())
+        descriptors.append(descriptor)
+        owners.append(owner)
+        if args.request_pid is not None:
+            descriptor, owner = pin_owner(args.request_pid, args.request_start)
+            descriptors.append(descriptor)
+            owners.append(owner)
+        issued = time.monotonic()
+        deadline = issued + REQUEST_SECONDS
+        request = {"version": 1, "issued": issued, "deadline": deadline, "owners": owners}
+        # The root helper independently validates both objects. Lifecycle data is
+        # separate from cosmetics; no path, INI mapping, or command crosses auth.
+        command.extend(["--payload", payload, "--request", json.dumps(request, allow_nan=False)])
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            handlers[signum] = signal.signal(signum, cancel_request)
+        result = authenticated_run(command, deadline, descriptors)
+        try:
+            response = json.loads(result.stdout)
+        except ValueError:
+            response = None
+        if result.returncode:
+            if isinstance(response, dict) and response.get("status") == "refused" and response.get("written") is False:
+                print("Login apply refused; the authenticated helper confirmed no configuration was written by this request.", file=sys.stderr)
+            elif command[0] == "pkexec" and result.returncode in (126, 127):
+                print("Login authorization denied or cancelled before helper execution; no appearance was applied by this request.", file=sys.stderr)
+            else:
+                print("Login apply failed; outcome UNKNOWN. Do not assume the configuration is unchanged.", file=sys.stderr)
+            if result.stderr.strip():
+                print(result.stderr.strip()[:4000], file=sys.stderr)
+            return result.returncode if 0 < result.returncode < 256 else 1
+        if not isinstance(response, dict) or response.get("status") not in ("applied", "unchanged"):
+            raise ValueError("Authenticated helper returned no valid completion confirmation; outcome UNKNOWN")
+        print(json.dumps(response, sort_keys=True))
+        return 0
+    except RequestCancelled:
+        # A root-owned elevation child can survive local cancellation. Its
+        # deadline and our imminent exit revoke a later publication, but a
+        # replace already in flight cannot honestly be described as no-write.
+        print("Login apply cancelled or timed out; outcome UNKNOWN. A publication already in flight may have completed. Expired or dead-owner requests cannot authorize a later apply.", file=sys.stderr)
+        return 1
+    finally:
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (ValueError, OSError, UnicodeError) as error:
+        print("Login apply unavailable: " + str(error), file=sys.stderr)
+        sys.exit(1)

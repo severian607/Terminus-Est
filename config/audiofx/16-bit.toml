@@ -1,0 +1,24 @@
+label = "16-bit"
+emoji = "🎮"
+category = "Retro"
+tags = ["16-bit", "16bit", "snes", "genesis", "mega drive", "console", "retro", "game"]
+description = "SNES/Mega Drive-era sound: 9-bit grain, under half the sample rate and a soft, dark top."
+order = 56
+headroom_db = -3
+
+[[band]]
+type = "lowshelf"
+freq = 150
+q = 0.7
+gain = 2
+
+[[band]]
+type = "lowpass"
+freq = 14000
+q = 0.707
+
+[[plugin]]
+type = "crusher"
+bit-reduction = 9.0
+sample-reduction = 2.5
+mode = "Linear"

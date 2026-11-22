@@ -1,0 +1,14 @@
+#!/bin/bash
+
+# terminus:summary=Shut down after closing application windows
+# terminus:examples=terminus shutdown | terminus system shutdown
+# terminus:aliases=terminus shutdown
+
+terminus-state clear re*-required
+
+# Schedule the shutdown to happen after closing windows (detached from terminal)
+nohup bash -c "sleep 2 && systemctl poweroff --no-wall" >/dev/null 2>&1 &
+
+# Now close all windows
+terminus-hyprland-window-close-all
+sleep 1 # Allow apps like Chrome to shutdown correctly

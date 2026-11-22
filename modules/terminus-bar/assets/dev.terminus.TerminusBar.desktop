@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Terminus-Bar
+Comment=A sleek, customizable desktop shell crafted for Wayland.
+Exec=systemctl --user start terminus-bar.service
+Icon=terminusbar
+Terminal=false
+Categories=Settings;DesktopSettings;
+StartupNotify=false
+Actions=Settings;
+Keywords=desktop;shell;wayland;
+
+[Desktop Action Settings]
+Name=Open Terminus-Settings
+Exec=sh -c "terminus-settings || { systemctl --user start terminus-bar.service && terminus-settings; }"

@@ -1,0 +1,6 @@
+#!/bin/bash
+
+# terminus:summary=Check if a Hyprland toggle is currently enabled.
+# terminus:args=<flag-name>
+
+[[ -f "$HOME/.local/state/terminus-est/toggles/hypr/$1.conf" ]]

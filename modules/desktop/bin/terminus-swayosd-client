@@ -1,0 +1,6 @@
+#!/bin/bash
+
+# terminus:summary=Wrapper for swayosd-client that targets the currently focused monitor.
+# terminus:args=<swayosd-client-args...>
+
+exec swayosd-client --monitor "$(terminus-hyprland-monitor-focused)" "$@"

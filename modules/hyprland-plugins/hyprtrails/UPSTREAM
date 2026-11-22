@@ -1,0 +1,14 @@
+url: https://github.com/hyprwm/hyprland-plugins (hyprtrails/, removed upstream in 3aa21f2 "drop unmaintained plugins")
+commit: eaf18d55d51cef00818c5a4fdd4170f8cc2de4dc (last commit that still contains hyprtrails)
+license: BSD-3-Clause (LICENSE, from the repository root)
+patches (ported to the Hyprland 0.57.2 API, the upstream code does not compile against it):
+  - Makefile rewritten: builds build/hyprtrails.so with the installed headers.
+  - config values registered with addConfigValueV2 (CFloatValue/CIntValue/CColorValue) instead of addConfigValue.
+  - decoration: draw(CRenderContext&, monitor, a, presentation), getDecorationLayer (UNDER), getDecorationFlags
+    (NON_SOLID), getDisplayName; created with makeShared; pass element got the CRenderContext overloads and
+    boundingBox (whole monitor).
+  - window geometry through position()/size(GEOMETRIC_CURRENT), rounding via presentation(), window list via
+    Desktop::windowState()->windows(), render data via ctx.m_data, scissor/renderRect/projectBoxToTarget take ctx.
+  - glStencilMask(0xFF) before clearing the stencil (same fix as upstream hyprbars).
+  - shader sources no longer start with a newline before #version.
+  - PLUGIN_EXIT no longer touches the removed m_renderPass; init notification and reloadConfig call dropped.

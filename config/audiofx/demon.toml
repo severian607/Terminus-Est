@@ -1,0 +1,20 @@
+label = "Demon"
+emoji = "😈"
+category = "Voice & Pitch"
+tags = ["demon", "evil", "pitch", "growl", "dark"]
+description = "Nine semitones down with a long dark tunnel tail."
+order = 60
+headroom_db = -3
+
+[[plugin]]
+type = "pitch"
+dry = -100.0
+wet = 0.0
+semitones = -9.0
+
+[[plugin]]
+type = "reverb"
+room-size = "Tunnel-like"
+decay-time = 3.5
+amount = -9.0
+dry = 0.0

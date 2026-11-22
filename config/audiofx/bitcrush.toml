@@ -1,0 +1,10 @@
+label = "Bitcrush"
+emoji = "👾"
+category = "Retro"
+tags = ["bitcrush", "crusher", "digital", "8-bit", "glitch"]
+description = "Drops to 8 bits and a quarter of the sample rate for crunchy digital grit."
+order = 50
+headroom_db = -6
+[crusher]
+bits = 8
+downsample = 4

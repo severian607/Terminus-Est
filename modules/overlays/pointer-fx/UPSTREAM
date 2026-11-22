@@ -1,0 +1,17 @@
+Original code (no upstream): pointer-fx.c draws the click ripple and the pointer trail; sandbox-click.c sends virtual
+pointer clicks for previews in terminus-motion-sandbox.
+
+Idea for the ripple: https://github.com/TKasperczyk/ripple (MIT). That tool draws rings with GTK3 and needs a Hyprland
+`bindn = ,mouse:272,exec,ripple-trigger` entry in the user's config. Nothing of its code is used; pointer-fx registers
+the equivalent binds at run time instead, through the compositor's IPC `eval` request.
+Idea for the trail: github.com/baizhu945/niri-mouse-trail (niri-specific) and github.com/MURDERRA/Vapormove (window
+trail). Nothing of their code is used.
+
+protocols/wlr-layer-shell-unstable-v1.xml: wlr-protocols, MIT-style licence (Drew DeVault), copied unchanged from the
+Amabar project's protocols directory.
+protocols/xdg-output-unstable-v1.xml, protocols/xdg-shell.xml: wayland-protocols (MIT), copied from /usr/share/wayland-protocols.
+protocols/wlr-virtual-pointer-unstable-v1.xml: rewritten from the public interface description (same request
+signatures), used only by sandbox-click.
+
+Licence of the original code: same as the Terminus-Est project.
+Build: make -C modules/overlays/pointer-fx   (needs wayland-scanner, wayland-client, cairo; output in build/)

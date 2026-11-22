@@ -1,0 +1,21 @@
+#!/bin/bash
+
+# terminus:summary=Prompt for sudo once and keep the credential alive for this run; stops on the first failure.
+# terminus:requires-sudo=true
+#
+# Meant to be sourced: `source terminus-sudo-keepalive || exit 1`. Returns 1 when sudo cannot be authenticated, so
+# the caller aborts before running anything that needs root. The refresh loop probes with `sudo -n -v`, which fails
+# silently (a failing `sudo -n true` writes an error to the journal every minute), and ends on its first failure.
+
+if ! sudo -v; then
+  echo "terminus: sudo authentication failed; nothing was installed." >&2
+  return 1
+fi
+
+(
+  while sleep 60; do
+    sudo -n -v 2>/dev/null || exit 0
+  done
+) &
+SUDO_KEEPALIVE_PID=$!
+trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null' EXIT

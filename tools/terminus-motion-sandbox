@@ -1,0 +1,188 @@
+#!/bin/bash
+
+# A nested Hyprland on a hidden headless output of the live session. Motion entries (window presets, plugins,
+# cursor shaders) are tested and recorded there, so nothing is loaded into or shown on the real desktop.
+
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+usage: terminus-motion-sandbox start NAME            start a sandbox (NAME: 1-8 of a-z0-9)
+       terminus-motion-sandbox stop NAME             stop it and remove its output
+       terminus-motion-sandbox place NAME            re-hide its output after the real session reloaded its config
+       terminus-motion-sandbox use NAME ENTRY...     activate these config/motion entry files, reload, show errors
+       terminus-motion-sandbox ctl NAME ARGS...      hyprctl inside the sandbox
+       terminus-motion-sandbox run NAME CMD...       run a client inside the sandbox
+       terminus-motion-sandbox record NAME FILE SEC  record the sandbox output for SEC seconds (60 fps, 960x540)
+       terminus-motion-sandbox log NAME              path of the sandbox Hyprland log
+Extra Lua for a sandbox goes in /tmp/tms-NAME/extra.lua (loaded last); apply it with: ctl NAME reload
+EOF
+  exit 2
+}
+
+die() {
+  echo "terminus-motion-sandbox: $*" >&2
+  exit 1
+}
+
+(( $# >= 2 )) || usage
+cmd="$1"
+name="$2"
+shift 2
+[[ $name =~ ^[a-z0-9]{1,8}$ ]] || die "NAME must be 1-8 characters of a-z0-9"
+
+project="$(dirname "$(dirname "$(readlink -f "$0")")")"
+root="/tmp/tms-$name"
+output="MOTION-$name"
+
+inner() {
+  local signature
+  signature=$(ls "$root/r/hypr" 2>/dev/null | head -n1)
+  [[ -n $signature ]] || die "sandbox $name is not running"
+  env XDG_RUNTIME_DIR="$root/r" WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE="$signature" "$@"
+}
+
+# Runtime monitor rules: lost when the real session reloads its config, so `place` can re-apply them.
+place() {
+  # Pin the real monitors where they are: an extra output would otherwise move the auto-positioned ones.
+  hyprctl monitors -j | jq -r '.[] | select(.name | startswith("MOTION") | not) |
+    "hl.monitor({ output = \"\(.name)\", mode = \"\(.width)x\(.height)@\(.refreshRate)\", position = \"\(.x)x\(.y)\", scale = \(.scale), transform = \(.transform) })"' |
+    while read -r rule; do hyprctl eval "$rule" >/dev/null; done
+  # Far from the real monitors, so the pointer cannot wander onto it.
+  local x=$((12000 + $(cksum <<<"$name" | cut -d' ' -f1) % 40 * 1200))
+  hyprctl eval "hl.monitor({ output = \"$output\", mode = \"960x540@60\", position = \"${x}x12000\", scale = 1 })" >/dev/null
+}
+
+start() {
+  [[ ! -e $root ]] || die "sandbox $name already exists ($root); stop it first"
+  exec 9>/tmp/tms-start.lock
+  flock 9
+  mkdir -p "$root/r"
+  chmod 700 "$root/r"
+  # The nested compositor's window must not take the user's keyboard focus with it to the hidden output.
+  local focused_window focused_monitor
+  focused_window=$(hyprctl activewindow -j | jq -r '.address // empty')
+  focused_monitor=$(hyprctl monitors -j | jq -r '.[] | select(.focused) | .name')
+
+  hyprctl output create headless "$output" >/dev/null
+  place
+  hyprctl eval "hl.window_rule({ match = { class = \"^aquamarine\$\" }, monitor = \"$output\", no_initial_focus = true })" >/dev/null
+
+  cat >"$root/hyprland.lua" <<EOF
+dofile("$project/config/hyprland/helpers.lua")
+hl.monitor({ output = "", mode = "960x540@60", position = "0x0", scale = 1 })
+hl.config({
+  general = { gaps_in = 4, gaps_out = 8, border_size = 1 },
+  decoration = { rounding = 10 },
+  animations = { enabled = true },
+  cursor = { no_hardware_cursors = 1 },
+  misc = { disable_hyprland_logo = true, disable_splash_rendering = true, disable_watchdog_warning = true,
+           background_color = 0xff0b0b0b },
+  xwayland = { enabled = false },
+  ecosystem = { no_update_news = true, no_donation_nag = true },
+})
+dofile("$project/config/hyprland/animations.lua")
+if o.file_exists("$root/extra.lua") then
+  dofile("$root/extra.lua")
+end
+EOF
+
+  # HYPRLAND_NO_SD_VARS keeps the nested compositor from overwriting WAYLAND_DISPLAY and the instance signature
+  # in the systemd and D-Bus activation environments of the real session.
+  env -u HYPRLAND_INSTANCE_SIGNATURE -u DISPLAY \
+    XDG_RUNTIME_DIR="$root/r" WAYLAND_DISPLAY="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" \
+    HYPRLAND_NO_SD_VARS=1 HYPRLAND_NO_SD_NOTIFY=1 TERMINUS_MOTION_ACTIVE="$root/active.lua" \
+    setsid Hyprland --config "$root/hyprland.lua" >"$root/log" 2>&1 9>&- &
+  local pid=$!
+  echo "$pid" >"$root/pid"
+
+  local address="" attempt
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    address=$(hyprctl clients -j | jq -r --argjson pid "$pid" '.[] | select(.pid == $pid) | .address' | head -n1)
+    [[ -n $address && -S $root/r/wayland-1 ]] && break
+    kill -0 "$pid" 2>/dev/null || die "nested Hyprland exited; see $root/log"
+    sleep 0.1
+  done
+  [[ -n $address ]] || die "nested Hyprland window did not appear; see $root/log"
+  local monitor
+  monitor=$(hyprctl clients -j | jq -r --arg a "$address" '.[] | select(.address == $a) | .monitor')
+  [[ $(hyprctl monitors -j | jq -r --argjson id "$monitor" '.[] | select(.id == $id) | .name') == "$output" ]] ||
+    die "nested Hyprland opened on a visible monitor; stop the sandbox and retry"
+  hyprctl dispatch "hl.dsp.window.fullscreen({ window = 'address:$address' })" >/dev/null
+  hyprctl dispatch "hl.dsp.focus({ monitor = \"$focused_monitor\" })" >/dev/null
+  [[ -z $focused_window ]] || hyprctl dispatch "hl.dsp.focus({ window = 'address:$focused_window' })" >/dev/null
+  echo "sandbox $name running on hidden output $output ($root)"
+}
+
+stop() {
+  if [[ -f $root/pid ]]; then
+    local pid
+    pid=$(<"$root/pid")
+    kill "$pid" 2>/dev/null || true
+    for _ in {1..20}; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  hyprctl output remove "$output" >/dev/null 2>&1 || true
+  rm -rf "$root"
+  # The last sandbox gone: drop the runtime monitor and window rules by reloading the real config.
+  compgen -G '/tmp/tms-*/pid' >/dev/null || hyprctl reload >/dev/null
+  # skwd-walld shares one renderer between a real output and the headless one showing the same picture, and
+  # drops it when the headless output goes: put the wallpaper back on any real output that lost its layer.
+  if command -v skwd-helm >/dev/null; then
+    sleep 1
+    local painted
+    painted=$(hyprctl layers -j | jq -r 'to_entries[] | select([.value.levels[][] | .namespace] | index("skwd-paper")) | .key')
+    skwd-helm current --json 2>/dev/null | jq -r '.outputs[] | select(.connected and .current != "") | "\(.name)\t\(.current)"' |
+      while IFS=$'\t' read -r monitor picture; do
+        grep -qxF "$monitor" <<<"$painted" || skwd-helm apply "$picture" -o "$monitor" >/dev/null 2>&1 || true
+      done
+  fi
+}
+
+case "$cmd" in
+  start) start ;;
+  stop) stop ;;
+  place) place ;;
+  use)
+    {
+      echo "return {"
+      for entry in "$@"; do
+        printf '  "%s",\n' "$(readlink -f "$entry")"
+      done
+      echo "}"
+    } >"$root/active.lua"
+    inner hyprctl reload >/dev/null
+    errors=$(inner hyprctl configerrors)
+    [[ -z ${errors//[[:space:]]/} ]] || { echo "$errors"; exit 1; }
+    ;;
+  ctl) inner hyprctl "$@" ;;
+  run) inner "$@" ;;
+  record)
+    (( $# == 2 )) || usage
+    if command -v wf-recorder >/dev/null; then
+      inner wf-recorder -y -f "$1" -r 60 >/dev/null 2>&1 &
+      recorder=$!
+      sleep "$2"
+      kill -INT "$recorder"
+      wait "$recorder" 2>/dev/null || true
+    else
+      # No wf-recorder: grab frames with grim for SEC seconds and encode them at the rate actually achieved.
+      frames=$(mktemp -d)
+      end=$(awk -v now="$(date +%s%N)" -v s="$2" 'BEGIN { printf "%d", now + s * 1e9 }')
+      n=0
+      while (( $(date +%s%N) < end )); do
+        inner grim -t ppm "$frames/$(printf '%05d' "$n").ppm"
+        n=$(( n + 1 ))
+      done
+      (( n > 0 )) || die "grim captured no frames from sandbox $name"
+      fps=$(awk -v n="$n" -v s="$2" 'BEGIN { f = int(n / s + 0.5); print (f < 1 ? 1 : f) }')
+      ffmpeg -v error -y -framerate "$fps" -i "$frames/%05d.ppm" -an -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p "$1"
+      rm -rf "$frames"
+    fi
+    ;;
+  log) inner sh -c 'echo "$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/hyprland.log"' ;;
+  *) usage ;;
+esac

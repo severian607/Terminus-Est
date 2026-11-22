@@ -1,0 +1,25 @@
+label = "Loudness"
+emoji = "📈"
+category = "Tone"
+tags = ["loudness", "quiet", "low volume"]
+description = "Boosts bass and treble for listening at low volume."
+order = 70
+headroom_db = -8
+
+[[band]]
+type = "lowshelf"
+freq = 80
+q = 0.7
+gain = 6
+
+[[band]]
+type = "highshelf"
+freq = 8000
+q = 0.7
+gain = 4
+
+[[band]]
+type = "peaking"
+freq = 3000
+q = 1.0
+gain = 2

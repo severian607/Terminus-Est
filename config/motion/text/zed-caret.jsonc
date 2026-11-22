@@ -1,0 +1,13 @@
+// label: Smooth caret
+// emoji: ✍️
+// category: Text · Zed
+// slot: zed-caret
+// tags: zed, caret, cursor, smear, glide, editor
+// description: The Zed caret glides between positions and smears on long jumps. Blinking is turned off.
+// source: https://github.com/zed-industries/zed/pull/63195
+// license: built into Zed
+// demo: none
+{
+  "on": { "cursor_animation": { "enabled": true }, "cursor_blink": false },
+  "off": { "cursor_animation": { "enabled": false }, "cursor_blink": true }
+}

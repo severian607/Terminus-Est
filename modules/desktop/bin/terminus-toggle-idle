@@ -1,0 +1,12 @@
+#!/bin/bash
+
+# terminus:summary=Toggle the idle screensaver
+
+if systemctl --user is-active --quiet hypridle.service; then
+  systemctl --user stop hypridle.service
+  notify-send -u low "󱫖    Stop the idle screensaver"
+else
+  systemctl --user start hypridle.service
+  notify-send -u low "󱫖    Start the idle screensaver"
+fi
+

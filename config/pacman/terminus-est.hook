@@ -1,0 +1,12 @@
+# Pulls Terminus-Est from GitHub after every yay/pacman upgrade.
+# Install (fills in your user name):
+#   sed "s/@USER@/$USER/g" ~/Projects/Terminus-Est/config/pacman/terminus-est.hook | sudo install -Dm644 /dev/stdin /etc/pacman.d/hooks/terminus-est.hook
+[Trigger]
+Operation = Upgrade
+Type = Package
+Target = *
+
+[Action]
+Description = Updating Terminus-Est from GitHub
+When = PostTransaction
+Exec = /usr/bin/runuser -u @USER@ -- /home/@USER@/.local/bin/terminus-update --hook

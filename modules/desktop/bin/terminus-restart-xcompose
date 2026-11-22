@@ -1,0 +1,5 @@
+#!/bin/bash
+
+# terminus:summary=Restart the XCompose input method service (fcitx5) to apply new compose key settings.
+
+terminus-restart-app fcitx5 --disable notificationitem

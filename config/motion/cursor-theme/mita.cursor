@@ -1,0 +1,10 @@
+-- label: Mita
+-- emoji: 🎀
+-- category: Cursor · Theme
+-- slot: cursor-theme
+-- tags: mita, animated, cursor, theme
+-- description: The animated Mita cursor theme.
+-- source: original
+-- license: original
+theme = Mita
+size = 32

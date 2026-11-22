@@ -1,0 +1,9 @@
+#!/bin/bash
+
+# terminus:summary=Re-apply the current theme (re-renders templates and token neutrals)
+
+THEME_NAME_PATH="$HOME/.config/terminus-est/current/theme.name"
+
+if [[ -f $THEME_NAME_PATH ]]; then
+  terminus-theme-set "$(cat $THEME_NAME_PATH)"
+fi

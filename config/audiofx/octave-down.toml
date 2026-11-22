@@ -1,0 +1,13 @@
+label = "Octave down"
+emoji = "⏬"
+category = "Voice & Pitch"
+tags = ["pitch", "octave", "low", "slow"]
+description = "A full octave down."
+order = 40
+headroom_db = -2
+
+[[plugin]]
+type = "pitch"
+dry = -100.0
+wet = 0.0
+octaves = -1.0

@@ -1,0 +1,35 @@
+{
+  "settings": {
+    "mouse_color": {
+      "description": "Used when Mouse Color is set to Custom.",
+      "label": "Custom Color"
+    },
+    "mouse_color_mode": {
+      "description": "Use the current theme color, or pick a custom color below.",
+      "label": "Mouse Color",
+      "option_custom": "Custom",
+      "option_theme": "Match Theme"
+    },
+    "mouse_size": {
+      "description": "Sprite size in the bar, in pixels.",
+      "label": "Mouse Size"
+    },
+    "poll_interval": {
+      "description": "How often to sample GPU usage, in seconds.",
+      "label": "GPU Poll Interval"
+    },
+    "run_threshold": {
+      "description": "GPU percentage at which the mouse breaks into a run.",
+      "label": "Run Threshold"
+    },
+    "show_gpu_percent": {
+      "description": "Display the GPU percentage next to the mouse.",
+      "label": "Show GPU Percentage"
+    },
+    "walk_threshold": {
+      "description": "GPU percentage at which the mouse wakes up and starts walking.",
+      "label": "Walk Threshold"
+    }
+  },
+  "title": "Mouse"
+}

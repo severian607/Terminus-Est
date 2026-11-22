@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+# Terminus-Settings: the command line for the central settings, or the settings window.
+#   terminus-settings {get,schema,validate,render,set,reset,apply,login-apply} ...
+#   terminus-settings [section]        open the window, optionally on a section
+import os
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+COMMANDS = {"get", "schema", "validate", "render", "set", "reset", "apply", "login-apply", "--root", "-h", "--help"}
+
+if len(sys.argv) > 1 and sys.argv[1] in COMMANDS:
+    sys.path.insert(0, str(HERE.parent / "lib"))
+    from settings import cli
+
+    raise SystemExit(cli())
+
+bar = str(HERE / "terminus-bar")
+os.execv(bar, [bar, "msg", "settings-open", *sys.argv[1:]])

@@ -1,0 +1,15 @@
+#!/bin/bash
+
+# terminus:summary=Launch or focus on a given web app identified by the window-pattern.
+# terminus:args=<window-pattern> <url-and-flags...>
+
+if (($# == 0)); then
+  echo "Usage: terminus-launch-or-focus-webapp [window-pattern] [url-and-flags...]"
+  exit 1
+fi
+
+WINDOW_PATTERN="$1"
+shift
+LAUNCH_COMMAND="terminus-launch-webapp $@"
+
+exec terminus-launch-or-focus "$WINDOW_PATTERN" "$LAUNCH_COMMAND"

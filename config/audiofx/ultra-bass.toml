@@ -1,0 +1,28 @@
+label = "Ultra bass"
+emoji = "💥"
+category = "Tone"
+tags = ["bass", "ultra", "sub", "boom", "heavy", "extreme"]
+description = "+12 dB shelf under 80 Hz, a +6 dB sub bump at 50 Hz and added bass harmonics. Loud; watch your speakers."
+order = 25
+headroom_db = -14
+
+[[band]]
+type = "lowshelf"
+freq = 80
+q = 0.7
+gain = 12
+
+[[band]]
+type = "peaking"
+freq = 50
+q = 1.0
+gain = 6
+
+[[plugin]]
+type = "bass_enhancer"
+amount = 10.0
+harmonics = 8.0
+scope = 100.0
+blend = 0.0
+floor = 20.0
+floor-active = true

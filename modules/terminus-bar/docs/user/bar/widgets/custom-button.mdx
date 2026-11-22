@@ -1,0 +1,34 @@
+---
+title: custom_button
+description: Shows a custom glyph, image, or label with bindable actions.
+sidebar:
+  order: 10
+---
+
+Shows a custom glyph/image and an optional label. What it does on click and scroll is set with [widget actions](/noctalia/bar/actions/).
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `glyph` | string | `"heart"` | Bar glyph name: Noctalia alias, Tabler icon name, or `U+` / `0x` codepoint |
+| `custom_image` | string | `""` | Path to a custom image displayed instead of the glyph. Leave empty to use the glyph |
+| `custom_image_colorize` | bool | `false` | When `true`, tint the custom image with the widget icon color |
+| `label` | string | `""` | Optional text label shown next to the glyph or image |
+| `tooltip` | string | `""` | Optional hover tooltip |
+| `markup` | bool | `false` | When `true`, render `label` as Pango markup: `<span>` can set colors, sizes, underline and overline. Escape literal `<`, `>` and `&` as `&lt;`, `&gt;` and `&amp;`. `@role@` (for example `@primary@`) is replaced by that palette color as `#rrggbb`, and `@role/60@` by 60% of it mixed over the surface color; both follow palette changes live. Also applies to `active_label` |
+| `active_file` | string | `""` | State file (`$XDG_RUNTIME_DIR` and a leading `~` are expanded). While it holds the word `open`, `active_label` and the glow fade in over 150 ms; any other content fades them out. Write it with `echo open > file` |
+| `active_label` | string | `""` | Pango markup drawn over `label` while the state file says `open`. Use the same layout as `label` and give unchanged parts `alpha="0%"` so the glyphs line up |
+| `glow_color` | string | `""` | Color of a soft glow behind the label while active (role token or hex). Empty draws no glow |
+| `glow_width` | number | `0` | Width in pixels of the glow; `0` draws no glow |
+| `glow_offset` | number | `0` | Offset in pixels of the glow's left edge from the label's left edge (negative values reach left of it) |
+
+```toml
+[widget.quick-action]
+type = "custom_button"
+custom_image = "/path/to/icon.png"
+custom_image_colorize = true
+label = "Action"
+
+[widget.quick-action.actions]
+left = "exec notify-send Noctalia"
+right = "exec notify-send 'Other action'"
+```

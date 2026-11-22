@@ -1,0 +1,36 @@
+#!/bin/bash
+
+# terminus:summary=Install a theme from a git repository
+# terminus:args=[git-repo-url]
+
+if [[ -z $1 ]]; then
+  REPO_URL=$(gum input --placeholder="Git repo URL (https or git@host:org/repo.git)" --header="")
+else
+  REPO_URL="$1"
+fi
+
+if [[ -z $REPO_URL ]]; then
+  exit 1
+fi
+
+THEMES_DIR="$HOME/.config/terminus-est/themes"
+
+# Strip user@host: prefix from scp-style SSH URLs so basename sees just the path
+REPO_PATH="$REPO_URL"
+[[ $REPO_PATH != *"://"* && $REPO_PATH == *:*/* ]] && REPO_PATH="${REPO_PATH#*:}"
+THEME_NAME=$(basename "$REPO_PATH" .git | sed -E 's/^terminus-//; s/-theme$//' | tr '[:upper:]' '[:lower:]')
+THEME_PATH="$THEMES_DIR/$THEME_NAME"
+
+# Remove existing theme if present
+if [[ -d $THEME_PATH ]]; then
+  rm -rf "$THEME_PATH"
+fi
+
+# Clone the repo directly to ~/.config/terminus-est/themes
+if ! git clone "$REPO_URL" "$THEME_PATH"; then
+  echo "Error: Failed to clone theme repo."
+  exit 1
+fi
+
+# Apply the new theme with terminus-theme-set
+terminus-theme-set $THEME_NAME

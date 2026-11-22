@@ -1,0 +1,7 @@
+label = "Old radio"
+emoji = "📻"
+category = "Retro"
+tags = ["radio", "am", "vintage", "crt", "speaker"]
+description = "Impulse response of a small AM radio: 250 Hz-3.5 kHz band with a honky 1 kHz cabinet peak."
+order = 10
+ir = "old-radio"

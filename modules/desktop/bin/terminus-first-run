@@ -1,0 +1,24 @@
+#!/bin/bash
+
+# terminus:summary=Finish the installation of Terminus-Est with items that can only be done after logging in.
+# terminus:requires-sudo=true
+
+set -e
+
+FIRST_RUN_MODE=~/.local/state/terminus-est/first-run.mode
+
+if [[ -f $FIRST_RUN_MODE ]]; then
+  rm -f "$FIRST_RUN_MODE"
+
+  bash "$TERMINUS_DESKTOP_PATH/install/first-run/battery-monitor.sh"
+  bash "$TERMINUS_DESKTOP_PATH/install/first-run/cleanup-reboot-sudoers.sh"
+  bash "$TERMINUS_DESKTOP_PATH/install/first-run/firewall.sh"
+  bash "$TERMINUS_DESKTOP_PATH/install/first-run/dns-resolver.sh"
+  bash "$TERMINUS_DESKTOP_PATH/install/first-run/gnome-theme.sh"
+  bash "$TERMINUS_DESKTOP_PATH/install/first-run/swayosd.sh"
+  bash "$TERMINUS_DESKTOP_PATH/install/first-run/gtk-primary-paste.sh"
+  sudo rm -f /etc/sudoers.d/first-run
+
+  bash "$TERMINUS_DESKTOP_PATH/install/first-run/welcome.sh"
+  bash "$TERMINUS_DESKTOP_PATH/install/first-run/wifi.sh"
+fi

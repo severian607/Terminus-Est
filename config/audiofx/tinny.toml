@@ -1,0 +1,16 @@
+label = "Tinny speaker"
+emoji = "🔔"
+category = "Filters & Character"
+tags = ["tin", "small speaker", "laptop", "cheap"]
+description = "Removes everything below 1.5 kHz like a cheap speaker."
+order = 60
+
+[[band]]
+type = "highpass"
+freq = 1500
+q = 0.707
+
+[[band]]
+type = "lowpass"
+freq = 9000
+q = 0.707

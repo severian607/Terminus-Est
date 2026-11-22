@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Motion entries: terminus-motionfx set|toggle|remove NAME... | off | list | status."""
+
+import json
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+import motion  # noqa: E402
+
+USAGE = """usage: terminus-motionfx set NAME...        use these entries; each replaces what is in its slot
+       terminus-motionfx toggle NAME        turn one entry on or off
+       terminus-motionfx remove NAME        turn one entry off
+       terminus-motionfx off | clear        back to the default window animation, everything else off
+       terminus-motionfx resume             start the active overlays (run at login)
+       terminus-motionfx list [--json]      list entries
+       terminus-motionfx status [--json]    show what is active
+NAME is group/name (windows/pop) or a bare name that is unique (pop)."""
+
+
+def table(data):
+    for category in data["categories"]:
+        print(category)
+        for e in (e for e in data["effects"] if e["category"] == category):
+            mark = "*" if e["active"] else " "
+            print(f" {mark} {e['name']:<28} {e['emoji']} {e['label']:<20} {e['description']}")
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(USAGE, file=sys.stderr if not argv else sys.stdout)
+        return 2 if not argv else 0
+    command, args = argv[0], argv[1:]
+    as_json = "--json" in args
+    args = [a for a in args if a != "--json"]
+    entries = motion.load_entries()
+    try:
+        if command == "list":
+            data = motion.list_entries(entries)
+            if as_json:
+                print(json.dumps(data, ensure_ascii=False))
+            else:
+                table(data)
+        elif command == "status":
+            active = motion.read_active(entries)
+            if as_json:
+                print(json.dumps(active))
+            else:
+                for slot, name in sorted(active.items()):
+                    print(f"{slot}: {name}")
+        elif command == "resume":
+            motion.sync_overlays(motion.read_active(entries), entries)
+        elif command in ("off", "clear"):
+            motion.apply(dict(motion.DEFAULTS), entries)
+        elif command in ("set", "toggle", "remove"):
+            if not args:
+                print(USAGE, file=sys.stderr)
+                return 2
+            motion.apply(motion.change(motion.read_active(entries), command, args, entries), entries)
+        else:
+            print(USAGE, file=sys.stderr)
+            return 2
+    except motion.MotionError as error:
+        print(f"terminus-motionfx: {error}", file=sys.stderr)
+        return 2
+    return 0
+
+
+sys.exit(main(sys.argv[1:]))

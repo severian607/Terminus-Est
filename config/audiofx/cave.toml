@@ -1,0 +1,20 @@
+label = "Cave"
+emoji = "🕳️"
+category = "Space"
+tags = ["cave", "cavern", "dark", "reverb"]
+description = "Dark 7 s tunnel reverb with the top end closed down."
+order = 60
+headroom_db = -4
+
+[[band]]
+type = "lowpass"
+freq = 4000
+q = 0.707
+
+[[plugin]]
+type = "reverb"
+room-size = "Tunnel-like"
+decay-time = 7.0
+amount = -5.0
+dry = -3.0
+predelay = 30.0

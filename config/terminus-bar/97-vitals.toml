@@ -1,0 +1,9 @@
+# The `mem` sysmon widget (named `ram` in the bar layout of both machines) opens the mem view of
+# the terminus/vitals panel. The cat and mouse declare their clicks in their own manifests.
+[widget.ram.actions]
+left = "panel-toggle terminus/vitals:vitals mem"
+
+# Monday-first calendar with ISO week numbers (clock panel and control-center calendar).
+[control_center.calendar]
+first_day_of_week = "monday"
+show_week_numbers = true

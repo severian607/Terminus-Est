@@ -1,0 +1,226 @@
+# Terminus-Bar style preset 'frame': a floating TUI window. Inset from the screen edges, 1px
+# outline border, radius 0, every module a bordered chip, accent launcher title chip.
+# Apply with: terminus-bar-style set frame
+
+[bar]
+order = ["default"]
+
+[bar.default]
+position = "top"
+thickness = 38
+background_opacity = 1.0
+border = "outline"
+border_width = 1.0
+radius = 0
+radius_top_left = 0
+radius_top_right = 0
+radius_bottom_left = 0
+radius_bottom_right = 0
+concave_edge_corners = false
+margin_ends = 10
+margin_edge = 6
+padding = 5
+widget_spacing = 6
+shadow = false
+reserve_space = true
+hover_highlight = false
+font_weight = 500
+color = "on_surface"
+icon_color = "on_surface_variant"
+capsule = true
+capsule_fill = "surface"
+capsule_foreground = "on_surface"
+capsule_radius = 0.0
+capsule_padding = 8.0
+capsule_opacity = 1.0
+capsule_border = "outline"
+capsule_border_width = 1.0
+capsule_thickness = 0.78
+start = ["launcher-title", "group:g-ws", "clipboard-shortcut"]
+center = ["clock"]
+end = [
+    "weather", "media", "audio-visualizer", "tray", "group:g-snd", "group:g-sys", "group:g-net"
+]
+
+    [bar.default.monitor.HDMI-A-1]
+    enabled = false
+
+[[bar.default.capsule_group]]
+id = "g-ws"
+members = ["workspaces"]
+fill = "surface"
+border = "outline"
+border_width = 1.0
+padding = 6.0
+radius = 0.0
+opacity = 1.0
+
+[[bar.default.capsule_group]]
+id = "g-snd"
+members = ["bluetooth", "volume", "brightness"]
+fill = "surface"
+border = "outline"
+border_width = 1.0
+padding = 8.0
+radius = 0.0
+opacity = 1.0
+widget_spacing = 10
+
+[[bar.default.capsule_group]]
+id = "g-sys"
+members = ["ram", "gpu", "cat"]
+fill = "surface"
+border = "outline"
+border_width = 1.0
+padding = 8.0
+radius = 0.0
+opacity = 1.0
+widget_spacing = 10
+
+[[bar.default.capsule_group]]
+id = "g-net"
+members = ["rx", "tx"]
+fill = "surface"
+border = "outline"
+border_width = 1.0
+padding = 8.0
+radius = 0.0
+opacity = 1.0
+widget_spacing = 10
+
+[widget.launcher-title]
+type = "custom_button"
+glyph = ""
+label = "terminus-est"
+tooltip = "Launcher"
+capsule_fill = "primary"
+capsule_border = "primary"
+color = "surface"
+capsule_padding = 12.0
+
+    [widget.launcher-title.actions]
+    left = "exec terminus-launcher toggle"
+
+[widget.workspaces]
+style = "regular"
+label_source = "id"
+show_labels = true
+focused_color = "primary"
+occupied_color = "surface"
+empty_color = "surface"
+change_color_on_hover = false
+active_pill_size = 1.4
+inactive_pill_size = 1.4
+pill_scale = 0.9
+capsule = false
+
+[widget.clipboard-shortcut]
+type = "custom_button"
+glyph = ""
+label = "[ clipboard ]"
+tooltip = "Open clipboard history"
+color = "on_surface_variant"
+
+    [widget.clipboard-shortcut.actions]
+    left = "exec terminus-bar msg panel-toggle clipboard"
+
+[widget.clock]
+format = "{:%a %d %b}  │  {:%H:%M}"
+tooltip_format = "{:%A, %d %B %Y}"
+capsule_border = "primary"
+color = "primary"
+capsule_padding = 14.0
+
+[widget.weather]
+color = "on_surface"
+icon_color = "on_surface_variant"
+max_length = 80
+show_condition = false
+show_temperature = true
+
+[widget.media]
+color = "on_surface"
+icon_color = "on_surface_variant"
+
+[widget.audio-visualizer]
+type = "audio_visualizer"
+centered = true
+mirrored = false
+show_when_idle = false
+color_1 = "on_surface_variant"
+color_2 = "primary"
+
+[widget.tray]
+color = "on_surface_variant"
+
+[widget.bluetooth]
+capsule = false
+color = "on_surface"
+icon_color = "on_surface_variant"
+
+[widget.volume]
+capsule = false
+color = "on_surface"
+icon_color = "on_surface_variant"
+mute_color = "error"
+
+[widget.brightness]
+capsule = false
+color = "on_surface"
+icon_color = "on_surface_variant"
+show_when_unavailable = true
+
+[widget.ram]
+type = "sysmon"
+highlight_color = "primary"
+stat = "ram_pct"
+visualization = "none"
+show_glyph = false
+custom_label = "mem"
+capsule = false
+color = "on_surface"
+icon_color = "on_surface_variant"
+
+[widget.gpu]
+type = "sysmon"
+highlight_color = "primary"
+stat = "gpu_usage"
+visualization = "none"
+show_glyph = false
+custom_label = "gpu"
+capsule = false
+color = "on_surface"
+icon_color = "on_surface_variant"
+
+[widget.cat]
+type = "dotnetrob/cat:cat"
+capsule = false
+cat_color = "primary"
+cat_color_mode = "custom"
+show_cpu_percent = true
+
+[widget.rx]
+type = "sysmon"
+highlight_color = "primary"
+stat = "net_rx"
+visualization = "none"
+show_glyph = false
+custom_label = "rx"
+network_speed_compact = true
+network_speed_unit = "mb"
+capsule = false
+color = "on_surface"
+icon_color = "on_surface_variant"
+
+[widget.tx]
+type = "sysmon"
+highlight_color = "primary"
+stat = "net_tx"
+visualization = "none"
+show_glyph = false
+custom_label = "tx"
+network_speed_compact = true
+network_speed_unit = "mb"
+capsule = false
+color = "on_surface"
+icon_color = "on_surface_variant"

@@ -1,0 +1,40 @@
+label = "Walkie-talkie"
+emoji = "📡"
+category = "Filters & Character"
+tags = ["radio", "walkie", "comms", "military", "crushed"]
+description = "Narrow 450-2800 Hz band, 7-bit crunch and compression."
+order = 80
+headroom_db = -3
+
+[[band]]
+type = "highpass"
+freq = 450
+q = 0.8
+
+[[band]]
+type = "lowpass"
+freq = 2800
+q = 0.8
+
+[[band]]
+type = "peaking"
+freq = 1500
+q = 1.0
+gain = 5
+
+[[plugin]]
+type = "crusher"
+bit-reduction = 7.0
+sample-reduction = 3.0
+mode = "Linear"
+
+[[plugin]]
+type = "compressor"
+mode = "Downward"
+threshold = -24.0
+ratio = 5.0
+attack = 5.0
+release = 120.0
+makeup = 5.0
+dry = -80.01
+wet = 0.0

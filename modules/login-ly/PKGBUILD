@@ -1,0 +1,101 @@
+# Maintainer: Christian Heusel <gromit@archlinux.org>
+# Contributor: éclairevoyant
+# Contributor: nullgemm <nullgemm@mailbox.org>
+#
+# Terminus-Est build: set ZIG=/path/to/zig-0.16.x to build with a Zig 0.16 toolchain
+# (Ly 1.4.1 needs >= 0.16.0; the system zig may be newer).
+
+pkgname=ly
+pkgver=1.4.1
+pkgrel=1.2
+pkgdesc="TUI display manager (Terminus-Est: constellation password, night-sky animation)"
+arch=(x86_64)
+url="https://codeberg.org/fairyglade/ly"
+license=('WTFPL')
+depends=(pam glibc libxcb)
+makedepends=(git zig patch)
+install=ly.install
+optdepends=('xorg-xauth: for X server sessions'
+            'libxcb: for X server sessions')
+backup=(
+    etc/$pkgname/{config.ini,setup.sh}
+    etc/pam.d/ly
+)
+# makepkg only resolves plain source names next to the PKGBUILD; patches/ is referenced by file:// URL.
+_patchdir="$PWD/patches"
+_zig_deps=(
+    aro-5f5a050569a95ecc40a426f0c3666ae7ef987ede.tar.gz::https://codeberg.org/ziglang/arocc/archive/5f5a050569a95ecc40a426f0c3666ae7ef987ede.tar.gz
+    clap-fc1e5cc3f6d9d3001112385ee6256d694e959d2f.tar.gz::https://github.com/Hejsil/zig-clap/archive/fc1e5cc3f6d9d3001112385ee6256d694e959d2f.tar.gz
+    ini-3b733e10adc6c4c48050709b97a22258bc2e6156.tar.gz::https://github.com/AshAmetrine/ziglibs-ini/archive/3b733e10adc6c4c48050709b97a22258bc2e6156.tar.gz
+    termbox2-c7f241e8888ce243e1748b05c26a42fcfaaad936.tar.gz::https://github.com/AnErrupTion/termbox2/archive/c7f241e8888ce243e1748b05c26a42fcfaaad936.tar.gz
+    translate-c-7a1a9fdc4ab00835748a6657ecbb835e3d5d45f7.tar.gz::https://codeberg.org/ziglang/translate-c/archive/7a1a9fdc4ab00835748a6657ecbb835e3d5d45f7.tar.gz
+    zigini-a665d081dda42664a96da2840ea09c5ccf9d0692.tar.gz::https://github.com/AshAmetrine/zigini/archive/a665d081dda42664a96da2840ea09c5ccf9d0692.tar.gz
+)
+source=("git+$url.git#tag=v${pkgver}"
+        "${_zig_deps[@]}"
+        "waitpid-eintr.patch::file://${_patchdir}/waitpid-eintr.patch"
+        "terminus-constellation.patch::file://${_patchdir}/terminus-constellation.patch")
+noextract=("${_zig_deps[@]}")
+b2sums=('71ebccd0a951682d0207e4cee4cf5ebb77550eb4e43b5b6591dd5c42fd9bb0ef500193a955cc33a865f95f50f3782e6016c2b260aa3c41b002d194415d7c3cdf'
+        '333a52e9ff1e4cf770bf623bdd6f1237bf79b2ae088e912143e067f0f9b5859108c132ccc69c9f887037a747b76eb13c0be955d45b8c31eb755dbe7df8759820'
+        '146092d61f1eab9d2d00b3acbc02a5a177867147f53f9a8e7c904cb943302c5b31cf8136a7e229a596b18d4a52674de1d7847f9127b6929d657209b26d730033'
+        '060dc6c11b4a5a517d69ed7e5dace0200fcb22f1ee839158ef296def55db5af17dd002a4e0243fbf9c9f4b986419077bbfeff90fdc369466e33099d5053f4f9c'
+        '5a0e1a8a28194a64fa20b1fccc488e88eb269e0590a4c63166f3dd31fa2849c5dd2bf687a728ef7781ef54064d5d246cc627e13a80bc98dc806bfc27488d6d59'
+        '0983056462e8c79d4d4baf56da3ebfac7777a85ef3c1fa9b0f1de153aab93c7706f471654af240a1574bbfcd6d6cf619c2f97d27331d1b4b0ce7fe67035ea88f'
+        'b828e59292e5ab894244c3850c929c93d6332e6de0593df80372546284931ca652eb87528de4888a9c637f03c45b2568cc86d2fe084363061cf00c647982c717'
+        '2e0ffe699244b940c1a4fec0c3f5323c0701cf741278e19a35f1ca368aa61e65cd17d6eb52bf6074ac038c5bac516f1492f4d9ad3fb39f95050331d43869a6eb'
+        '60b78f9f615142f2d51353f7d23567eb01eab6ca9a40eedbda220adf39d6899f6fd4ddd5b28c6c05c1629fe0ee854f8d122fba0f0486fc86d5327abd5e2db59d')
+
+prepare() {
+    cd "$pkgname"
+    patch -Np1 -i "$srcdir/waitpid-eintr.patch"
+    patch -Np1 -i "$srcdir/terminus-constellation.patch"
+    # The decorative boot-log line names this machine's real root device and filesystem (the patch carries the
+    # desktop's btrfs on nvme0n1p2 as a placeholder), so build the package on the machine it is installed on.
+    local _root _fstype
+    # readlink resolves /dev/mapper/root to the kernel's name (dm-0), which is what a real boot log prints.
+    _root=$(basename "$(readlink -f "$(findmnt -no SOURCE / | sed 's|\[.*||')")")
+    _fstype=$(findmnt -no FSTYPE /)
+    if [[ -n $_root && -n $_fstype ]]; then
+        if [[ $_fstype == btrfs ]]; then
+            sed -i "s|btrfs (nvme0n1p2): using crc32c checksum algorithm|btrfs ($_root): using crc32c checksum algorithm|" src/animations/Terminus.zig
+        else
+            sed -i "s|btrfs (nvme0n1p2): using crc32c checksum algorithm|$_fstype ($_root): mounted filesystem|" src/animations/Terminus.zig
+        fi
+    fi
+    for dep in "${_zig_deps[@]}"; do
+        ${ZIG:-zig} fetch --global-cache-dir ../zig-global-cache "../${dep%%::*}"
+    done
+}
+
+build() {
+    cd "$pkgname"
+    ${ZIG:-zig} build \
+      --search-prefix /usr \
+      -Ddest_directory="$pkgdir" \
+      -Dname="ly-dm" \
+      --global-cache-dir ../zig-global-cache \
+      --system zig-pkg \
+      --build-id=sha1 \
+      -Dtarget=native-linux.6.6-gnu.2.40 \
+      -Dcpu=baseline \
+      -Doptimize=ReleaseSafe
+}
+
+package() {
+    cd "$pkgname"
+
+    ${ZIG:-zig} build \
+      --search-prefix /usr \
+      -Ddest_directory="$pkgdir" \
+      -Dname="ly-dm" \
+      --global-cache-dir ../zig-global-cache \
+      --system zig-pkg \
+      --build-id=sha1 \
+      -Dtarget=native-linux.6.6-gnu.2.40 \
+      -Dcpu=baseline \
+      -Doptimize=ReleaseSafe \
+      installexe
+
+    install -Dm644 license.md "$pkgdir/usr/share/licenses/$pkgname/WTFPL"
+}

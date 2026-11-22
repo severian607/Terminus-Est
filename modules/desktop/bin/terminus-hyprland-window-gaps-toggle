@@ -1,0 +1,5 @@
+#!/bin/bash
+
+# terminus:summary=Toggles the window gaps globally between no gaps and the default.
+
+terminus-hyprland-toggle window-no-gaps

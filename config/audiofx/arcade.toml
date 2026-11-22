@@ -1,0 +1,36 @@
+label = "Arcade cabinet"
+emoji = "🕹️"
+category = "Retro"
+tags = ["arcade", "cabinet", "8-bit", "crt", "coin-op"]
+description = "Crushed 8-bit audio from a small, reverberant cabinet speaker."
+order = 90
+headroom_db = -4
+
+[[band]]
+type = "highpass"
+freq = 200
+q = 0.8
+
+[[band]]
+type = "lowpass"
+freq = 6500
+q = 0.8
+
+[[band]]
+type = "peaking"
+freq = 900
+q = 1.0
+gain = 3
+
+[[plugin]]
+type = "crusher"
+bit-reduction = 8.0
+sample-reduction = 2.0
+mode = "Linear"
+
+[[plugin]]
+type = "reverb"
+room-size = "Small"
+decay-time = 0.5
+amount = -14.0
+dry = 0.0

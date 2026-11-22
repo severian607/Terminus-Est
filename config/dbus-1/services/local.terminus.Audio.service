@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=local.terminus.Audio
+Exec=/usr/bin/systemctl --user start terminus-audio.service
+SystemdService=terminus-audio.service

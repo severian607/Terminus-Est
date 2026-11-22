@@ -1,0 +1,10 @@
+-- label: Sword
+-- emoji: ⚔️
+-- category: Cursor · Theme
+-- slot: cursor-theme
+-- tags: sword, terminus-est, rune, animated, cursor, theme
+-- description: The Terminus Est sword, repainted in the wallpaper accent. Glints when idle, blooms on links, runes light while busy.
+-- source: original (modules/terminus-cursor)
+-- license: original
+theme = terminus-est
+size = 36

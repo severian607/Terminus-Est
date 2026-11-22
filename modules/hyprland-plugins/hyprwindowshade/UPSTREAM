@@ -1,0 +1,14 @@
+url: https://github.com/ManofJELLO/HyprWindowShade
+commit: 17ff70ec67247b9d76dbcc721af42e20a363d5d4 ("Pin Hyprland 0.57.2 to c84e9ba")
+license: MIT (LICENSE)
+patches:
+  - Makefile: output is build/hyprwindowshade.so (mkdir build; clean removes build/).
+  - removed build.sh, hyprpm.toml and docs/ (demo media).
+shaders/:
+  - close/fire_close.glsl: original port of Burn-My-Windows fire.frag (Simon Schneegans, GPL-3.0) taken from
+    https://github.com/theguriev/hyprburn @ 581d74160b94bbeda84149a664288d86c48c81d2 (GPL-3.0-or-later,
+    src/shaders.hpp), rewritten to the HyprWindowShade interface (GLSL ES 3.20, window_rect, progress).
+    Simplex noise from Ashima webgl-noise (MIT). This file is GPL-3.0.
+  - the other shaders are from https://github.com/jbuck95/Hyprland-Shader @ 116c55a5567fc5931d6eefffadd5133ac90648d8
+    (MIT, shaders/LICENSE). Patches: open/*.glsl got "// @duration 0.7" (upstream open shaders declare none, which
+    makes the plugin toast a warning); close/{glitch,matrix,voronoi-shatter}_close.glsl duration 0.5 -> 0.7.

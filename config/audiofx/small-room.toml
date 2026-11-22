@@ -1,0 +1,15 @@
+label = "Small room"
+emoji = "🛋️"
+category = "Space"
+tags = ["room", "reverb", "ambience", "dry"]
+description = "Short, tight room reverb that adds a little air."
+order = 10
+headroom_db = -2
+
+[[plugin]]
+type = "reverb"
+room-size = "Small"
+decay-time = 0.6
+amount = -14.0
+dry = 0.0
+predelay = 4.0

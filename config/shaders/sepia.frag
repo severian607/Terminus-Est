@@ -1,0 +1,18 @@
+// label: Sepia
+// emoji: 🟤
+// category: Color · Mono & Tint
+// tags: sepia, vintage, brown, old photo
+// description: Warm vintage sepia tone.
+// source: https://github.com/rokokol/hyprland-screen-shader
+// license: MIT
+// order: 20
+// animated: no
+// samples: no
+
+vec3 effect(vec3 c, vec2 uv) {
+    return vec3(
+        dot(c, vec3(0.393, 0.769, 0.189)),
+        dot(c, vec3(0.349, 0.686, 0.168)),
+        dot(c, vec3(0.272, 0.534, 0.131))
+    );
+}

@@ -1,0 +1,4 @@
+#!/bin/bash
+
+# terminus:summary=No-op now that terminus-update-perform is responsible for idle management.
+# terminus:hidden=true

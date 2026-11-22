@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+# terminus:summary=Build and switch the Terminus Eclipse cursor: apply ACCENT | build ACCENT | use SIZE | preview ACCENT DIR
+"""Terminus Eclipse cursor theme: an arrow with an accent-coloured eclipse ring and a travelling arc.
+
+One script takes the accent and writes the whole theme (hyprcursor + XCursor). Geometry lives in
+template.svg (arrow states) and text.svg (I-beam); only plain hex placeholders are substituted.
+Shapes not designed yet are taken from the Mita theme (see uncovered.txt in each build).
+
+  terminus-eclipse-cursor apply ACCENT   build if not cached, then switch if this theme is chosen
+  terminus-eclipse-cursor build ACCENT   build into the cache only
+  terminus-eclipse-cursor use SIZE       called by terminus-cursor once the choice is recorded
+  terminus-eclipse-cursor preview ACCENT DIR   render one frame per shape and size, install nothing
+
+Callers (terminus-cursor) hold the state lock; this script takes none.
+"""
+
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import importlib.machinery
+import importlib.util
+import os
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+
+HERE = Path(__file__).resolve().parent
+_loader = importlib.machinery.SourceFileLoader("terminus_cursor", str(HERE.parent / "terminus-cursor/terminus-cursor"))
+_spec = importlib.util.spec_from_loader("terminus_cursor", _loader)
+sword = importlib.util.module_from_spec(_spec)
+_loader.exec_module(sword)  # shared helpers only: colour parsing, rendering, XCursor packing, state files
+
+NAME = "terminus-eclipse"
+SIZES = (32, 40, 48, 64)
+DEFAULT_SIZE = 40
+CIRCUMFERENCE = 43.98
+ARROW = (HERE / "template.svg").read_text()
+TEXT = (HERE / "text.svg").read_text()
+ARROW_HOT = (2 / 32, 2 / 32)  # the arrow tip
+
+# name -> (overrides, frames, delay ms, ring width, ring opacity, arc dash pattern)
+ARROW_SHAPES = {
+    "left_ptr": (("arrow", "top_left_arrow", "default"), 16, 250, "1.6", "0.85", "6 37.98"),
+    "pointer": (("hand1", "hand2", "pointing_hand", "hand"), 16, 125, "2.0", "1", "6 15.99"),
+    "wait": (("progress", "watch", "left_ptr_watch"), 12, 80, "1.6", "0.85", "16 27.98"),
+}
+
+
+class Shape:
+    def __init__(self, overrides, frames, delay, hotspot):
+        self.overrides, self.frames, self.delay, self.hotspot = overrides, frames, delay, hotspot
+
+
+def build_shapes(acc_hex):
+    """name -> (Shape, [svg per frame]). ACC_HEX may omit the '#'; it is validated and normalised here."""
+    acc_hex = sword.to_hex(sword.parse_hex(acc_hex))
+    out = {}
+    for name, (overrides, n, delay, width, opacity, arc) in ARROW_SHAPES.items():
+        svgs = []
+        for i in range(n):
+            svgs.append(ARROW.replace("{{ACC}}", acc_hex).replace("{{RING_W}}", width)
+                        .replace("{{RING_OP}}", opacity).replace("{{ARC}}", arc)
+                        .replace("{{ARC_OFF}}", f"{-CIRCUMFERENCE * i / n:.4f}").replace("{{ARC2}}", ""))
+        out[name] = (Shape(overrides, n, delay, ARROW_HOT), svgs)
+    out["text"] = (Shape(("xterm", "ibeam"), 1, 0, (0.5, 0.5)), [TEXT.replace("{{ACC}}", acc_hex)])
+    for _, svgs in out.values():
+        assert not any("{{" in s for s in svgs), "unsubstituted placeholder"
+    return out
+
+
+def frame_file(name, size, i):
+    return f"{name}_{size}_{i:02d}.png"
+
+
+def meta_hl(name, shape):
+    hx, hy = shape.hotspot
+    lines = ["resize_algorithm = bilinear", f"hotspot_x = {hx:.6f}", f"hotspot_y = {hy:.6f}"]
+    lines += [f"define_override = {o}" for o in shape.overrides]
+    for size in sorted(SIZES, reverse=True):
+        for i in range(shape.frames):
+            lines.append(f"define_size = {size}, {frame_file(name, size, i)}" + (f", {shape.delay}" if shape.frames > 1 else ""))
+    return "\n".join(lines) + "\n"
+
+
+def build_theme(acc_hex, out):
+    work = out / "work"
+    shape_dirs = work / "hyprcursors"
+    shape_dirs.mkdir(parents=True)
+    (work / "manifest.hl").write_text(
+        f"name = {NAME}\ndescription = Terminus Est eclipse arrow cursor\nversion = 1.0\ncursors_directory = hyprcursors\n")
+    xcur = out / NAME / "cursors"
+    xcur.mkdir(parents=True)
+    table = build_shapes(acc_hex)
+    renders = []
+    for name, (shape, svgs) in table.items():
+        (shape_dirs / name).mkdir()
+        (shape_dirs / name / "meta.hl").write_text(meta_hl(name, shape))
+        for size in SIZES:
+            for i, svg in enumerate(svgs):
+                renders.append((svg, size, shape_dirs / name / frame_file(name, size, i)))
+    with ThreadPoolExecutor() as pool:
+        list(pool.map(sword.render, *zip(*renders)))
+        for name, (shape, svgs) in table.items():
+            hx, hy = shape.hotspot
+            keys = [(size, i) for size in SIZES for i in range(shape.frames)]
+            pixels = pool.map(sword.read_rgba, [shape_dirs / name / frame_file(name, s, i) for s, i in keys],
+                              [s for s, _ in keys])
+            images = [(s, int(s * hx + 0.5), int(s * hy + 0.5), shape.delay, rgba) for (s, i), rgba in zip(keys, pixels)]
+            (xcur / name).write_bytes(sword.xcursor_bytes(images))
+            for alias in shape.overrides:
+                (xcur / alias).symlink_to(name)
+    covered = set(table) | {a for shape, _ in table.values() for a in shape.overrides}
+    fallback = sword.ICONS / sword.FALLBACK_THEME / "hyprcursors"
+    missing = [h.stem for h in sorted(fallback.glob("*.hlc")) if h.stem not in covered] if fallback.is_dir() else []
+    (out / "uncovered.txt").write_text("\n".join(missing) + "\n")
+
+    theme = out / NAME
+    (out / "compiled").mkdir()
+    sword.subprocess.run(["hyprcursor-util", "--create", str(work), "--output", str(out / "compiled")],
+                         check=True, capture_output=True)
+    compiled = next((out / "compiled").glob("theme_*"))
+    shutil.copytree(compiled, theme / "x")
+    for item in (theme / "x").iterdir():
+        item.rename(theme / item.name)
+    (theme / "x").rmdir()
+    for name in missing:
+        target = theme / "hyprcursors" / f"{name}.hlc"
+        if not target.exists():
+            shutil.copy2(fallback / f"{name}.hlc", target)
+    (theme / "index.theme").write_text(
+        f"[Icon Theme]\nName={NAME}\nComment=Terminus Est eclipse arrow cursor\nInherits={sword.FALLBACK_THEME}\n")
+    shutil.rmtree(work)
+    shutil.rmtree(out / "compiled")
+
+
+def cache_dir():
+    return sword.CACHE.parent / "eclipse"
+
+
+def cached(acc_hex):
+    digest = hashlib.sha1((ARROW + TEXT).encode() + Path(__file__).read_bytes()).hexdigest()[:8]
+    return cache_dir() / f"{acc_hex.lstrip('#').lower()}-{digest}"
+
+
+def ensure_built(acc_hex):
+    sword.parse_hex(acc_hex)  # fail before creating the cache directory
+    target = cached(acc_hex)
+    if (target / NAME / "index.theme").is_file():
+        return target
+    root = cache_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=".build-", dir=root))
+    try:
+        build_theme(acc_hex, tmp)
+        if target.exists():
+            shutil.rmtree(target)
+        tmp.rename(target)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return target
+
+
+def install(acc_hex):
+    """Point the icon theme at this accent's build; switch to it if it is the chosen theme."""
+    link = sword.ICONS / NAME
+    sword.ICONS.mkdir(parents=True, exist_ok=True)
+    if link.exists() and not link.is_symlink():
+        sys.exit(f"terminus-eclipse-cursor: {link} exists and is not a symlink; refusing to replace it")
+    tmp = sword.ICONS / f".{NAME}.tmp"
+    tmp.unlink(missing_ok=True)
+    tmp.symlink_to(cached(acc_hex) / NAME)
+    os.replace(tmp, link)
+    theme, size = sword.read_choice()
+    if theme == NAME:
+        sword.set_cursor(NAME, size)
+
+
+def cmd_preview(acc_hex, dest):
+    dest.mkdir(parents=True, exist_ok=True)
+    for name, (shape, svgs) in build_shapes(acc_hex).items():
+        for size in SIZES:
+            sword.render(svgs[len(svgs) // 2], size, dest / f"{name}_{size}.png")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="terminus-eclipse-cursor")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name in ("apply", "build"):
+        sub.add_parser(name).add_argument("accent")
+    sub.add_parser("use").add_argument("size", type=int)
+    p = sub.add_parser("preview")
+    p.add_argument("accent")
+    p.add_argument("dir", type=Path)
+    args = ap.parse_args()
+    if args.cmd == "preview":
+        cmd_preview(args.accent, args.dir)
+    elif args.cmd == "use":
+        accent = sword.read_accent()
+        ensure_built(accent)
+        install(accent)
+        sword.set_cursor(NAME, args.size)
+    else:
+        ensure_built(args.accent)
+        if args.cmd == "apply":
+            install(args.accent)
+
+
+if __name__ == "__main__":
+    main()

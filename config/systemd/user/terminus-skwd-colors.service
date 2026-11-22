@@ -1,0 +1,10 @@
+# Mirror the Skwd Wall colour scheme into Terminus-Bar, its control center and btop
+[Unit]
+Description=Sync Terminus-Bar colours from Skwd Wall
+After=terminus-bar.service
+# Skwd rewrites the scheme several times per apply; never trip the start limit.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=%h/Projects/Terminus-Est/tools/terminus-skwd-palette

@@ -1,0 +1,24 @@
+id           = "terminus/vitals"
+name         = "Vitals"
+version      = "1.0.0"
+plugin_api   = 22
+author       = "terminus"
+license      = "MIT"
+dependencies = ["procps-ng", "pciutils"]
+icon         = "activity"
+description  = "CPU, GPU and memory panel with a 1 hour to 7 day history, opened from the cat, mouse and mem bar widgets."
+tags         = ["system", "panel"]
+
+# One panel, three views. The open context picks the view ("cpu", "gpu", "mem"):
+#   terminus-bar msg panel-toggle terminus/vitals:vitals gpu
+# The cat and mouse widgets bind their left click to it; the bar's `mem` sysmon widget does so
+# in config/terminus-bar/97-vitals.toml. Tab / Shift+Tab cycle the views in place, h cycles the 1, 6, 24 hour and 7 day
+# window, t opens terminus-taskmanager. History comes from terminus-vitals-log.service (bin/vitals-log).
+[[panel]]
+id              = "vitals"
+entry           = "panel.luau"
+width           = 460
+height          = 420
+placement       = "attached"
+open_near_click = true
+capture_keys    = ["Tab", "shift+Tab", "t", "h"]

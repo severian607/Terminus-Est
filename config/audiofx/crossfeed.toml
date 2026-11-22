@@ -1,0 +1,12 @@
+label = "Headphone crossfeed"
+emoji = "🎧"
+category = "Stereo"
+tags = ["headphones", "crossfeed", "fatigue", "bauer", "speakers"]
+description = "Bleeds a little low-passed sound across the ears, as if listening to speakers."
+order = 80
+headroom_db = -1
+
+[[plugin]]
+type = "crossfeed"
+fcut = 700
+feed = 6.0

@@ -1,0 +1,18 @@
+label = "Robot voice"
+emoji = "🤖"
+category = "Voice & Pitch"
+tags = ["robot", "comb", "metal", "voice", "dalek"]
+description = "A 5 ms comb filter turns voices metallic and robotic."
+order = 50
+headroom_db = -4
+
+[[plugin]]
+type = "delay"
+mode-l = "Time"
+mode-r = "Time"
+time-l = 5.0
+time-r = 5.0
+dry-l = 0.0
+dry-r = 0.0
+wet-l = 0.0
+wet-r = 0.0

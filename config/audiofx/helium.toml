@@ -1,0 +1,13 @@
+label = "Helium"
+emoji = "🎈"
+category = "Voice & Pitch"
+tags = ["pitch", "helium", "balloon", "octave", "high"]
+description = "A full octave up."
+order = 20
+headroom_db = -2
+
+[[plugin]]
+type = "pitch"
+dry = -100.0
+wet = 0.0
+octaves = 1.0

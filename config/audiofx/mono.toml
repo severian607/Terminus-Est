@@ -1,0 +1,9 @@
+label = "Mono"
+emoji = "🔈"
+category = "Stereo"
+tags = ["mono", "downmix", "single", "accessibility"]
+description = "Mixes left and right into the same signal on both sides."
+order = 10
+
+[stereo]
+mode = "mono"

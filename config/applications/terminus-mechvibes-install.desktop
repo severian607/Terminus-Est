@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Mechvibes pack installer
+Comment=Install a Mechvibes sound pack from the website's Install button
+Exec=terminus-mechvibes install %u
+Terminal=false
+NoDisplay=true
+MimeType=x-scheme-handler/mechvibes;

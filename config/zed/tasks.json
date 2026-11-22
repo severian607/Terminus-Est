@@ -1,0 +1,28 @@
+[
+  {
+    "label": "Copy current file path for shell",
+    "command": "$HOME/Projects/Terminus-Est/tools/zed-copy-path",
+    "cwd": "$ZED_DIRNAME",
+    "reveal": "never",
+    "hide": "always",
+    "show_command": false,
+    "show_summary": false,
+    "save": "none"
+  },
+  {
+    "label": "Java: Compile folder",
+    "command": "javac *.java",
+    "cwd": "$ZED_DIRNAME",
+    "save": "all",
+    "reveal": "always",
+    "hide": "never"
+  },
+  {
+    "label": "Java: Compile and run current class",
+    "command": "javac *.java && java $ZED_STEM",
+    "cwd": "$ZED_DIRNAME",
+    "save": "all",
+    "reveal": "always",
+    "hide": "never"
+  }
+]

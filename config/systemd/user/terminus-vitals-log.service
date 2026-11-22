@@ -1,0 +1,11 @@
+[Unit]
+Description=Terminus vitals logger (cpu, gpu, memory history for the bar panels)
+
+[Service]
+ExecStart=/usr/bin/python3 %h/Projects/Terminus-Est/modules/terminus-bar-plugins/vitals/bin/vitals-log
+Restart=on-failure
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=default.target

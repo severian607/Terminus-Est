@@ -1,0 +1,10 @@
+label = "Chiptune"
+emoji = "🕹️"
+category = "Retro"
+tags = ["chiptune", "8-bit", "gameboy", "nes", "crusher"]
+description = "Harsh 5-bit, heavily downsampled sound of an old handheld."
+order = 60
+headroom_db = -8
+[crusher]
+bits = 5
+downsample = 12

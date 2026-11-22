@@ -1,0 +1,24 @@
+#!/bin/bash
+
+# Focused-window transparency
+# Obsidian toggles blur; every other window toggles opacity.
+
+active_window=$(hyprctl activewindow -j)
+address=$(jq -r '.address // empty' <<<"$active_window")
+[[ -n $address ]] || exit 0
+class=$(jq -r '.class' <<<"$active_window")
+
+if [[ "${class,,}" == *obsidian* ]]; then
+  no_blur=$(hyprctl getprop "address:$address" no_blur)
+  if [[ "$no_blur" == "true" ]]; then
+    next_no_blur=0
+  else
+    next_no_blur=1
+  fi
+
+  hyprctl dispatch "hl.dsp.window.set_prop({ prop = \"opaque\", value = \"0\", window = \"address:$address\" })" >/dev/null
+  hyprctl dispatch "hl.dsp.window.set_prop({ prop = \"no_blur\", value = \"$next_no_blur\", window = \"address:$address\" })"
+  exit 0
+fi
+
+hyprctl dispatch "hl.dsp.window.set_prop({ prop = \"opaque\", value = \"toggle\", window = \"address:$address\" })"

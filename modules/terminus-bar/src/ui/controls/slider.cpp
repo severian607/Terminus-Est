@@ -1,0 +1,339 @@
+#include "ui/controls/slider.h"
+
+#include "core/input/key_symbols.h"
+#include "core/input/keybind_matcher.h"
+#include "cursor-shape-v1-client-protocol.h"
+#include "render/core/render_styles.h"
+#include "render/scene/input_area.h"
+#include "render/scene/rect_node.h"
+#include "ui/palette.h"
+#include "ui/style.h"
+
+#include <algorithm>
+#include <cmath>
+#include <linux/input-event-codes.h>
+#include <memory>
+
+namespace {
+
+  constexpr double kValueEpsilon = 0.0001;
+
+  RoundedRectStyle solidStyle(const Color& fill, float radius) {
+    return RoundedRectStyle{
+        .fill = fill,
+        .border = fill,
+        .fillMode = FillMode::Solid,
+        .radius = radius,
+        .softness = 1.0F,
+        .borderWidth = 0.0F,
+    };
+  }
+
+  Color resolved(ColorRole role, float alpha = 1.0F) { return colorForRole(role, alpha); }
+
+} // namespace
+
+Slider::Slider() {
+  // The value renders as a tmux-style line gauge: heavy accent rule, caret, light rule.
+
+  auto area = std::make_unique<InputArea>();
+  area->setOnEnter([this](const InputArea::PointerData& /*data*/) {
+    applyVisualState();
+    markPaintDirty();
+  });
+  area->setOnLeave([this]() {
+    applyVisualState();
+    markPaintDirty();
+  });
+  area->setOnPress([this](const InputArea::PointerData& data) {
+    if (!m_enabled || data.button != BTN_LEFT) {
+      return;
+    }
+    if (!data.pressed) {
+      applyVisualState();
+      markPaintDirty();
+      if (m_onDragEnd) {
+        m_onDragEnd();
+      }
+      return;
+    }
+    applyVisualState();
+    updateFromLocalX(data.localX);
+    markPaintDirty();
+  });
+  area->setOnMotion([this](const InputArea::PointerData& data) {
+    if (!m_enabled || m_inputArea == nullptr || !m_inputArea->pressed()) {
+      return;
+    }
+    updateFromLocalX(data.localX);
+  });
+  area->setOnAxisHandler([this](const InputArea::PointerData& data) {
+    if (!m_enabled || !m_wheelAdjustEnabled || data.axis != WL_POINTER_AXIS_VERTICAL_SCROLL) {
+      return false;
+    }
+    const auto lines = static_cast<double>(data.scrollSteps());
+    if (lines == 0.0) {
+      return false;
+    }
+    // Per-line step: use the slider's snap step, else 5% of range.
+    const double step = m_step > 0.0 ? m_step : (m_max - m_min) * 0.05;
+    if (step <= 0.0) {
+      return false;
+    }
+    // Wayland convention: positive axisLines = scroll down. Scroll up should increase.
+    setValue(m_value - lines * step);
+    if (m_onDragEnd) {
+      m_onDragEnd();
+    }
+    return true;
+  });
+  area->setFocusable(true);
+  area->setOnFocusGain([this]() {
+    applyVisualState();
+    markPaintDirty();
+  });
+  area->setOnFocusLoss([this]() {
+    applyVisualState();
+    markPaintDirty();
+  });
+  area->setOnKeyDown([this](const InputArea::KeyData& key) {
+    if (!key.pressed || !m_enabled) {
+      return;
+    }
+    const double step = m_step > 0.0 ? m_step : (m_max - m_min) * 0.05;
+    if (step <= 0.0) {
+      return;
+    }
+    if (KeybindMatcher::matches(KeybindAction::Left, key.sym, key.modifiers)) {
+      setValue(m_value + (Style::rtl() ? step : -step));
+      if (m_onDragEnd) {
+        m_onDragEnd();
+      }
+    } else if (KeybindMatcher::matches(KeybindAction::Right, key.sym, key.modifiers)) {
+      setValue(m_value + (Style::rtl() ? -step : step));
+      if (m_onDragEnd) {
+        m_onDragEnd();
+      }
+    } else if (KeySymbol::isPageDown(key.sym)) {
+      setValue(m_value - step * 10.0);
+      if (m_onDragEnd) {
+        m_onDragEnd();
+      }
+    } else if (KeySymbol::isPageUp(key.sym)) {
+      setValue(m_value + step * 10.0);
+      if (m_onDragEnd) {
+        m_onDragEnd();
+      }
+    } else if (KeySymbol::isHome(key.sym)) {
+      setValue(m_min);
+      if (m_onDragEnd) {
+        m_onDragEnd();
+      }
+    } else if (KeySymbol::isEnd(key.sym)) {
+      setValue(m_max);
+      if (m_onDragEnd) {
+        m_onDragEnd();
+      }
+    }
+  });
+  m_inputArea = static_cast<InputArea*>(addChild(std::move(area)));
+  m_inputArea->setCursorShape(WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER);
+
+  // Siblings above the InputArea must not be hit-testable, or presses on them never reach it.
+  for (RectNode** node : {&m_fill, &m_rest, &m_caret}) {
+    *node = static_cast<RectNode*>(addChild(std::make_unique<RectNode>()));
+    (*node)->setHitTestVisible(false);
+  }
+
+  applyVisualState();
+}
+
+void Slider::setRange(double minValue, double maxValue) {
+  if (maxValue < minValue) {
+    std::swap(minValue, maxValue);
+  }
+  if (m_min == minValue && m_max == maxValue) {
+    return;
+  }
+  m_min = minValue;
+  m_max = maxValue;
+  const double next = snapped(m_value);
+  const bool valueChanged = std::abs(next - m_value) >= kValueEpsilon;
+  m_value = next;
+  updateGeometry();
+  markPaintDirty();
+  if (valueChanged && m_onValueChanged) {
+    m_onValueChanged(m_value);
+  }
+}
+
+void Slider::setStep(double step) {
+  m_step = std::max(step, 0.0);
+  const double next = snapped(m_value);
+  const bool valueChanged = std::abs(next - m_value) >= kValueEpsilon;
+  m_value = next;
+  updateGeometry();
+  markPaintDirty();
+  if (valueChanged && m_onValueChanged) {
+    m_onValueChanged(m_value);
+  }
+}
+
+void Slider::setValue(double value) {
+  const double next = snapped(value);
+  if (std::abs(next - m_value) < kValueEpsilon) {
+    return;
+  }
+  m_value = next;
+  updateGeometry();
+  markPaintDirty();
+  if (m_onValueChanged) {
+    m_onValueChanged(m_value);
+  }
+}
+
+void Slider::setEnabled(bool enabled) {
+  if (m_enabled == enabled) {
+    return;
+  }
+  m_enabled = enabled;
+  applyVisualState();
+  markPaintDirty();
+}
+
+void Slider::setReadOnly(bool readOnly) {
+  if (m_inputArea == nullptr) {
+    return;
+  }
+  m_inputArea->setEnabled(!readOnly);
+  m_inputArea->setFocusable(!readOnly);
+  m_inputArea->setTabStop(!readOnly);
+  m_inputArea->setHitTestVisible(!readOnly);
+}
+
+void Slider::setTrackHeight(float height) {
+  m_trackHeight = std::max(1.0F, height);
+  updateGeometry();
+  markLayoutDirty();
+}
+
+void Slider::setThumbSize(float size) {
+  m_thumbSizePx = std::max(1.0F, size);
+  updateGeometry();
+  markLayoutDirty();
+}
+
+void Slider::setControlHeight(float height) {
+  m_controlHeightPx = std::max(1.0F, height);
+  updateGeometry();
+  markLayoutDirty();
+}
+
+void Slider::setAccentColor(const ColorSpec& color) {
+  m_accentColor = color;
+  applyVisualState();
+  markPaintDirty();
+}
+
+void Slider::setWheelAdjustEnabled(bool enabled) { m_wheelAdjustEnabled = enabled; }
+
+void Slider::setOnValueChanged(std::function<void(double)> callback) { m_onValueChanged = std::move(callback); }
+
+void Slider::setOnDragEnd(std::function<void()> callback) { m_onDragEnd = std::move(callback); }
+
+bool Slider::dragging() const noexcept { return m_inputArea != nullptr && m_inputArea->pressed(); }
+
+void Slider::doLayout(Renderer& /*renderer*/) {
+  updateGeometry();
+  applyVisualState();
+}
+
+LayoutSize Slider::doMeasure(Renderer& renderer, const LayoutConstraints& constraints) {
+  return measureByLayout(renderer, constraints);
+}
+
+void Slider::doArrange(Renderer& renderer, const LayoutRect& rect) { arrangeByLayout(renderer, rect); }
+
+void Slider::updateGeometry() {
+  const float widthPx = width() > 0.0F ? width() : Style::sliderDefaultWidth;
+  const float heightPx = std::max({m_thumbSizePx, m_trackHeight, m_controlHeightPx});
+  setSize(widthPx, heightPx);
+
+  const float trackX = Style::sliderHorizontalPadding;
+  const float trackW = std::max(0.0F, widthPx - Style::sliderHorizontalPadding * 2.0F);
+  // Heavy rule up to the caret, light rule after it (tmux pane-border weights).
+  const float heavyH = std::round(std::clamp(m_trackHeight * 0.5F, 3.0F, 5.0F));
+  const float lightH = std::max(1.0F, std::round(heavyH / 3.0F));
+  const float caretW = std::min(trackW, std::round(heavyH * 1.5F));
+  const float caretH = std::min(heightPx, std::round(std::clamp(m_trackHeight * 2.0F, 12.0F, 18.0F)));
+
+  const float travel = std::max(0.0F, trackW - caretW);
+  const float filledW = std::round(travel * normalizedValue());
+  const float restW = travel - filledW;
+  const bool rtl = Style::rtl();
+  const float caretX = rtl ? trackX + restW : trackX + filledW;
+
+  m_fill->setPosition(rtl ? caretX + caretW : trackX, (heightPx - heavyH) * 0.5F);
+  m_fill->setFrameSize(filledW, heavyH);
+  m_fill->setVisible(filledW > 0.0F);
+  m_rest->setPosition(rtl ? trackX : caretX + caretW, (heightPx - lightH) * 0.5F);
+  m_rest->setFrameSize(restW, lightH);
+  m_rest->setVisible(restW > 0.0F);
+  m_caret->setPosition(caretX, (heightPx - caretH) * 0.5F);
+  m_caret->setFrameSize(caretW, caretH);
+
+  m_inputArea->setPosition(0.0F, 0.0F);
+  m_inputArea->setFrameSize(widthPx, heightPx);
+}
+
+void Slider::updateFromLocalX(float x) {
+  const float widthPx = width() > 0.0F ? width() : Style::sliderDefaultWidth;
+  const float trackX = Style::sliderHorizontalPadding;
+  const float trackW = std::max(0.0F, widthPx - Style::sliderHorizontalPadding * 2.0F);
+  if (trackW <= 0.0F) {
+    return;
+  }
+  const double raw = static_cast<double>(std::clamp((x - trackX) / trackW, 0.0F, 1.0F));
+  const double t = Style::rtl() ? 1.0 - raw : raw;
+  setValue(m_min + t * (m_max - m_min));
+}
+
+void Slider::applyVisualState() {
+  const bool hovering = m_inputArea != nullptr && m_inputArea->hovered();
+  const bool pressing = m_inputArea != nullptr && m_inputArea->pressed();
+  const bool focused = m_inputArea != nullptr && m_inputArea->focused();
+
+  Color restColor = resolved(ColorRole::Outline, 0.55F);
+  Color fillColor = resolveColorSpec(m_accentColor);
+
+  if (!m_enabled) {
+    restColor = resolved(ColorRole::Outline, Style::disabledOutlineAlpha * 0.6F);
+    fillColor.a *= 0.5F;
+  } else if (focused) {
+    restColor = resolveColorSpec(focusRingColorSpec());
+    restColor.a *= 0.6F;
+  } else if (hovering || pressing) {
+    restColor = resolved(ColorRole::Outline);
+  }
+
+  m_fill->setStyle(solidStyle(fillColor, 0.0F));
+  m_caret->setStyle(solidStyle(fillColor, 0.0F));
+  m_rest->setStyle(solidStyle(restColor, 0.0F));
+}
+
+float Slider::normalizedValue() const noexcept {
+  if (m_max <= m_min) {
+    return 0.0F;
+  }
+  return static_cast<float>(std::clamp((m_value - m_min) / (m_max - m_min), 0.0, 1.0));
+}
+
+double Slider::snapped(double value) const noexcept {
+  const double clamped = std::clamp(value, m_min, m_max);
+  if (m_step <= 0.0 || m_max <= m_min) {
+    return clamped;
+  }
+
+  const double steps = std::round((clamped - m_min) / m_step);
+  return std::clamp(m_min + steps * m_step, m_min, m_max);
+}
