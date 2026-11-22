@@ -93,6 +93,7 @@ Read [`install.sh`](install.sh) first if you like; it is short and asks for sudo
 - installs the Consoleet Terminus font the launcher is drawn in;
 - clones the repository to `~/Projects/Terminus-Est` (units and bindings expect that path);
 - links the configuration into `~/.config` and `~/.local`, moving anything already there to `~/.local/state/terminus-est/install-backup/<time>/`;
+- adds one import line to `~/.config/gtk-3.0/gtk.css` and `gtk-4.0/gtk.css` and three include lines to `~/.config/ghostty/config`, so GTK applications and Ghostty follow the palette (your own settings in those files stay);
 - builds the bar and the Hyprland plugins, renders the skins and enables the user units.
 
 Running it again updates and relinks. Then log in to the *Hyprland (uwsm-managed)* session. Outputs come up at their preferred mode; to name a main monitor or set modes, see the comment in `config/hyprland/monitors.lua`.
@@ -141,7 +142,7 @@ rm -rf ~/Projects/Terminus-Est        # your earlier files are in ~/.local/state
 
 `config/settings.toml` `[appearance]` holds the colours, opacities and the interface font. The neutrals are fixed; the accent follows the wallpaper: `tools/terminus-skwd-palette` sets it whenever Skwd Wall changes the scheme.
 
-`terminus-settings apply` renders every skin from that palette: Strata, Zed, the launcher, mako, SwayOSD and the Hyprland borders. It also writes GTK colours and a Ghostty override to `config/generated/` (`gtk-colors.css`, `appearance-ghostty.conf`); import those from your own GTK and Ghostty configuration if you want them to follow. Generated files are listed in `.gitignore`; change the palette or the templates in `lib/skins/`, not the output.
+`terminus-settings apply` renders every skin from that palette: Strata, Zed, the launcher, mako, SwayOSD, GTK colours, the Ghostty background, cursor and light mode, and the Hyprland borders. Generated files are listed in `.gitignore`; change the palette or the templates in `lib/skins/`, not the output.
 
 <a id="commands"></a>
 ### `⁶ commands`

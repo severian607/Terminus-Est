@@ -72,6 +72,7 @@ main() {
   link "$dir/config/generated/mako.ini" "$HOME/.config/mako/config"
   link "$dir/config/zed" "$HOME/.config/zed"
   link "$dir/config/swayosd" "$HOME/.config/swayosd"
+  follow_palette
   link "$dir/wallpapers" "$HOME/Pictures/Wallpapers/Terminus Est"
   for file in "$dir"/config/systemd/user/terminus-* "$dir"/config/systemd/user/swayosd-server.service; do
     link "$file" "$HOME/.config/systemd/user/$(basename "$file")"
@@ -159,6 +160,33 @@ link() {
   fi
   mkdir -p "$(dirname "$target")"
   ln -s "$source" "$target"
+}
+
+# GTK and Ghostty keep their own configuration; one import or include line each makes them follow the palette.
+# The lines are added once and the files are otherwise left as they are.
+follow_palette() {
+  local generated=$HOME/.config/terminus-est/generated file line
+  line="@import url(\"file://$generated/gtk-colors.css\");"
+  for file in "$HOME/.config/gtk-3.0/gtk.css" "$HOME/.config/gtk-4.0/gtk.css"; do
+    mkdir -p "$(dirname "$file")"
+    if ! grep -qsF "$generated/gtk-colors.css" "$file"; then
+      # @import is only valid before every other rule, so it goes first.
+      printf '%s\n%s\n' "$line" "$(cat "$file" 2>/dev/null)" > "$file.terminus-new"
+      mv "$file.terminus-new" "$file"
+      say "GTK follows the palette: $file"
+    fi
+  done
+  file=$HOME/.config/ghostty/config
+  mkdir -p "$(dirname "$file")"
+  for line in \
+    'config-file = ?"~/.config/terminus-est/generated/appearance-ghostty.conf"' \
+    'config-file = ?"~/.local/state/terminus-est/motion/ghostty.conf"' \
+    'config-file = ?"~/.config/terminus-est/generated/ghostty-mode.conf"'; do
+    if ! grep -qsF "$line" "$file"; then
+      printf '%s\n' "$line" >> "$file"
+      say "Ghostty include added: ${line#config-file = }"
+    fi
+  done
 }
 
 install_font() {
