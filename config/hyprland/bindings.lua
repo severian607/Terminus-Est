@@ -175,7 +175,8 @@ o.bind("SUPER + ALT + K",        "Calendar panel (clock)",     "terminus-bar msg
 o.bind("SUPER + ALT + D",        "Display panel (brightness)", "terminus-bar msg panel-toggle brightness")
 o.bind("SUPER + ALT + Y",        "Weather panel",              "terminus-bar msg panel-toggle weather")
 o.bind("SUPER + ALT + P",        "Power panel (battery)",      "terminus-bar msg panel-toggle control-center power")
-o.bind("SUPER + ALT + S",        "Media panel",                "terminus-bar msg panel-toggle media")
+o.bind("SUPER + ALT + S",        "Settings",                   "terminus-settings")
+o.bind("SUPER + ALT + N",        "Media panel (now playing)",  "terminus-bar msg panel-toggle media")
 o.bind("SUPER + CTRL + T",       "Activity",                   "terminus compat launch-tui btop")
 
 -- # Zoom, screen effects and sounds.
